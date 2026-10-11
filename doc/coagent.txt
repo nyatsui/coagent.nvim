@@ -6,8 +6,9 @@ CONTENTS                                              *coagent-contents*
   1. Introduction ............................ |coagent-intro|
   2. Commands ................................ |coagent-commands|
   3. Panel keys .............................. |coagent-keys|
-  4. Modes ................................... |coagent-modes|
-  5. Lua API ................................. |coagent-api|
+  4. Slash commands .......................... |coagent-slash|
+  5. Modes ................................... |coagent-modes|
+  6. Lua API ................................. |coagent-api|
 
 ==============================================================================
 1. INTRODUCTION                                          *coagent-intro*
@@ -56,10 +57,38 @@ Check the setup with |:checkhealth| coagent.
   q  close            g? help
 
 Input: <CR> (normal) / <C-s> (insert) send, <C-c> stop, <C-k> panel,
-<C-p>/<C-n> history. All keys are configurable via `keymaps`.
+<C-p>/<C-n> history, /help slash commands (|coagent-slash|). All keys are
+configurable via `keymaps`.
 
 ==============================================================================
-4. MODES                                                 *coagent-modes*
+4. SLASH COMMANDS                                        *coagent-slash*
+
+A prompt whose first word is /name runs a command locally; it is never sent
+to the model. Typing "/" at the start of the input pops up the commands
+(also <C-x><C-o>; disable the popup with `ui.slash_complete = false`).
+Commands go into the input history like prompts.
+
+  /compact            Elide every long tool output before the last 8
+                      messages now. Local only: no request.
+  /compact summary    Ask the current model ONCE to summarize the older
+                      turns into one message (costs one request; <C-c>
+                      cancels it).
+  /new  /sessions  /model [role]  /mode [mode]  /roles [preset]
+  /usage  /changes  /diff  /review  /stop  /processes
+                      Same as the matching :Coagent* command.
+  /clear              Clear the input.
+  /help               List the commands in the timeline.
+
+Unknown commands show an error and keep the text. Start with "//" to send a
+literal "/" ("//help me" sends "/help me"). Text whose first word is not a
+command name (e.g. "/etc/hosts is wrong") is sent as a normal prompt.
+
+/compact is refused while the agent is working. The session history itself
+is not changed; only what later requests send. Because the start of the
+request changes, the next request is a one-time prompt-cache miss.
+
+==============================================================================
+5. MODES                                                 *coagent-modes*
 
 readonly    Only read/search tools are offered and executed.
 supervised  Reads run automatically; every edit and command asks first.
@@ -69,11 +98,12 @@ auto        Only for workspaces in `auto.workspaces` or explicitly enabled.
             commands always ask.
 
 ==============================================================================
-5. LUA API                                                 *coagent-api*
+6. LUA API                                                 *coagent-api*
 
   require('coagent').setup(opts)
   require('coagent').ask(prompt, { range = { l1, l2 } })
   require('coagent').open() / close() / toggle() / stop()
+  require('coagent').compact({ summary = false })
   require('coagent').controller()   -- events: controller.events:on(...)
   require('coagent').register_tool(tool)
 

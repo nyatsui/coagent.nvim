@@ -383,6 +383,7 @@ function M.intro(o)
   b.line('reports back. Edits and commands ask for approval in supervised mode.', 'CoagentDim')
   b.line('')
   b.line('Context: #buffer #buffers #selection #file:path #diagnostics #gitdiff', 'CoagentDim')
+  b.line('Commands: /help /compact /model /mode /new /usage ... (// sends a literal "/")', 'CoagentDim')
   b.line('Help: g? in this panel', 'CoagentDim')
   b.line('')
   return b

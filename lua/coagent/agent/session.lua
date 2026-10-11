@@ -174,6 +174,7 @@ function Session:serialize(opts)
     status = self.status,
     next_item = self.next_item,
     compact_watermark = self.compact_watermark,
+    compact_summary = self.compact_summary and vim.tbl_extend('force', self.compact_summary, { content = clean(self.compact_summary.content) }) or nil,
     roles = self.roles,
     role_stats = self.role_stats,
     messages = messages,
@@ -195,6 +196,7 @@ function M.deserialize(data)
   s.status = data.status or 'IDLE'
   s.next_item = data.next_item or #s.items
   s.compact_watermark = data.compact_watermark
+  s.compact_summary = data.compact_summary
   s.roles = data.roles
   s.role_stats = data.role_stats
   s.changes = Changes.new(data.changes)

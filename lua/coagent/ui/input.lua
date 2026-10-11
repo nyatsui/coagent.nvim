@@ -24,6 +24,21 @@ function Input.new(config, on_submit)
       self:placeholder()
     end,
   })
+  local slash = require('coagent.ui.slash')
+  bo.omnifunc = "v:lua.require'coagent.ui.slash'.omnifunc"
+  if config.ui.slash_complete ~= false then
+    -- show the menu without inserting the first candidate while typing
+    pcall(function()
+      bo.completeopt = 'menuone,noinsert'
+    end)
+    vim.api.nvim_create_autocmd('TextChangedI', {
+      buffer = self.buf,
+      callback = function()
+        -- complete() cannot run inside the autocommand itself
+        vim.schedule(slash.autocomplete)
+      end,
+    })
+  end
   self:placeholder()
   return self
 end
@@ -60,7 +75,7 @@ function Input:placeholder()
   if self:text() == '' then
     local k = self.config.keymaps.input.submit
     local ic = require('coagent.ui.icons').get(self.config.ui.icons)
-    local hint = string.format('Ask the agent%s (%s send %s #buffer #selection #file:path)', ic.ellipsis, type(k) == 'table' and (k.n or k.i) or k, ic.dot)
+    local hint = string.format('Ask the agent%s (%s send %s #buffer #selection #file:path %s /help)', ic.ellipsis, type(k) == 'table' and (k.n or k.i) or k, ic.dot, ic.dot)
     if self.busy_hint then
       hint = self.busy_hint
     end
@@ -79,10 +94,13 @@ function Input:submit()
     return
   end
   -- Keep the text when the agent refuses it (e.g. busy) so nothing is lost.
-  if self.on_submit(text) == false then
+  local ok, opts = self.on_submit(text)
+  if ok == false then
     return
   end
-  table.insert(self.history, text)
+  if not (opts and opts.history == false) then
+    table.insert(self.history, text)
+  end
   self.hist_pos = nil
   self:set_text('')
 end

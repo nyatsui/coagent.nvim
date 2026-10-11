@@ -361,4 +361,101 @@ function M.compact(messages, budget, opts)
   return msgs, info
 end
 
+------------------------------------------------------------------------------
+-- Manual compaction (/compact)
+------------------------------------------------------------------------------
+
+M.KEEP_RECENT = 8
+
+M.SUMMARY_PREFIX = '[Context note: the earlier conversation was summarized by /compact summary to save context. Summary:\n'
+
+local function first_user(messages)
+  for i, m in ipairs(messages) do
+    if m.role == 'user' then
+      return i
+    end
+  end
+end
+
+--- Messages actually sent: the session history with the turns covered by a
+--- `/compact summary` replaced by one summary message right after the first
+--- user message (the task). Returns `messages` itself when there is none.
+---@param messages table[]
+---@param summary {upto:integer, content:string}?
+---@return table[]
+function M.with_summary(messages, summary)
+  local fu = first_user(messages)
+  if not (summary and fu and summary.upto > fu and summary.upto <= #messages) then
+    return messages
+  end
+  local out = {}
+  for i = 1, fu do
+    table.insert(out, messages[i])
+  end
+  table.insert(out, { role = 'user', content = M.SUMMARY_PREFIX .. summary.content .. '\nRe-read files if you need their current content.]' })
+  for i = summary.upto + 1, #messages do
+    table.insert(out, messages[i])
+  end
+  return out
+end
+
+--- Watermark that elides every old tool output before the recent tail.
+---@param messages table[] messages as sent (after `with_summary`)
+---@param keep_recent integer?
+---@return integer
+function M.full_watermark(messages, keep_recent)
+  return math.max(0, #messages - (keep_recent or M.KEEP_RECENT))
+end
+
+--- Range of the history a summary would cover: (from, upto] in `messages`
+--- indices, ending right before the recent tail and never splitting an
+--- assistant message from its tool results. nil when there is nothing new.
+---@param messages table[]
+---@param prev {upto:integer}?
+---@param keep_recent integer?
+---@return integer? from, integer? upto
+function M.summary_range(messages, prev, keep_recent)
+  local fu = first_user(messages)
+  if not fu then
+    return nil
+  end
+  local tail_start = #messages - (keep_recent or M.KEEP_RECENT) + 1
+  while tail_start > 1 and messages[tail_start] and messages[tail_start].role == 'tool' do
+    tail_start = tail_start - 1
+  end
+  local from = math.max(fu, prev and prev.upto or 0)
+  local upto = tail_start - 1
+  if upto <= from then
+    return nil
+  end
+  return from, upto
+end
+
+--- Plain-text transcript of messages (from, upto] for the summarizer. Tool
+--- calls are flattened into text so the request needs no tool definitions.
+---@param messages table[]
+---@param from integer
+---@param upto integer
+---@param prev_summary string?
+---@return string
+function M.transcript(messages, from, upto, prev_summary)
+  local parts = {}
+  if prev_summary then
+    table.insert(parts, '## Earlier summary\n' .. prev_summary)
+  end
+  for i = from + 1, upto do
+    local m = messages[i]
+    if m.role == 'tool' then
+      table.insert(parts, '## tool result\n' .. M.elide(m.content or ''))
+    else
+      local text = '## ' .. m.role .. '\n' .. util.clip(m.content or '', 4000)
+      for _, tc in ipairs(m.tool_calls or {}) do
+        text = text .. '\n[tool call] ' .. tc.name .. ' ' .. util.clip(tc.arguments or '', 300)
+      end
+      table.insert(parts, text)
+    end
+  end
+  return table.concat(parts, '\n\n')
+end
+
 return M

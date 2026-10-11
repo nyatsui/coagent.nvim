@@ -123,6 +123,7 @@ local defaults = {
     collapse_tool_details = true,
     show_reasoning = false,
     show_context = true, -- context usage ("ctx 12k/128k") in the status bar
+    slash_complete = true, -- pop up /command completion while typing "/" in the input
     markdown = 'auto', -- 'auto' | 'treesitter' | 'syntax' | 'off'
   },
 

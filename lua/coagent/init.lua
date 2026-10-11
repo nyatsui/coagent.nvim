@@ -145,6 +145,16 @@ local function build(session)
   return c
 end
 
+--- Compact the conversation now (see Controller:compact).
+---@param opts {summary:boolean?}?
+function M.compact(opts)
+  local ok, err = M.controller():compact(opts)
+  if not ok then
+    notify(err, vim.log.levels.WARN)
+  end
+  return ok
+end
+
 --- Fetch Copilot usage/quota in the background (CopilotChat's info call).
 ---@param cb fun(usage:table?, err:string?)?
 function M.refresh_usage(cb)
@@ -217,7 +227,15 @@ end
 -- Actions
 ------------------------------------------------------------------------------
 
+--- Returns false to keep the text in the input; slash commands may also
+--- return `{history = false}` to stay out of the input history.
 function actions.submit(text)
+  local slash = require('coagent.ui.slash')
+  local p = slash.parse(text)
+  if p.kind == 'command' then
+    return slash.run(p)
+  end
+  text = p.text
   local c = M.controller()
   c.source = source()
   local sel = state.selection

@@ -527,10 +527,12 @@ function View:help()
     end
     return not a:match('^  ') and b:match('^  ') ~= nil
   end)
+  table.insert(lines, '')
+  vim.list_extend(lines, vim.split(require('coagent.ui.slash').help_text(), '\n', { plain = true }))
   local buf = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].bufhidden = 'wipe'
-  local width = math.min(vim.o.columns - 4, 60)
+  local width = math.min(vim.o.columns - 4, 80)
   local win = vim.api.nvim_open_win(buf, true, {
     relative = 'editor',
     row = 2,
