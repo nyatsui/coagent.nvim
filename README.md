@@ -649,3 +649,7 @@ nvim -l scripts/screenshot.lua 80 24
 ## License
 
 [MIT](LICENSE)
+
+## Acknowledgments
+
+本プラグインは [CopilotChat.nvim](https://github.com/CopilotC-Nvim/CopilotChat.nvim) の認証・API 通信を利用しています。CopilotChat.nvim の開発者およびコントリビューターの皆様に感謝いたします。
