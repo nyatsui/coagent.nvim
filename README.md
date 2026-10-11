@@ -445,7 +445,7 @@ require('coagent').setup({
 | `:CoagentProcesses` | エージェントが起動したバックグラウンドプロセスの出力表示・停止 |
 | `:CoagentUsage [billing]` | Copilot の利用量・残量（Premium requests / Chat / Completions とリセット日）、タスク・セッションのリクエスト数とトークン数。`billing` で GitHub の請求ページをブラウザで開く |
 | `:CoagentMode [supervised\|readonly\|auto]` | 承認モード切替 |
-| `:CoagentModel` | モデル選択（tool calling 対応モデルのみ。役割分担中は役割ごと） |
+| `:CoagentModel` | モデル選択（tool calling 対応モデルのみ。役割分担中は役割ごと）。各モデルに料金倍率（`x0` = プラン内、`x1`、`x10` など）を表示 |
 | `:CoagentRoles [preset]` | モデルの役割分担: `single` / `advisor` / `explorers` / `full` |
 | `:CoagentEffort [level] [role]` | 推論の強さ: `minimal` / `low` / `medium` / `high` / `off` / `default`（`/effort` と同じ） |
 | `:CoagentNew` / `:CoagentSessions` | 新規セッション / 保存済みセッション一覧 |

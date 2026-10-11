@@ -271,7 +271,7 @@ Neovim にフォーカスが無いとき、承認待ち・完了・失敗・上�
 - `gm` / `:CoagentMode` — `supervised` / `readonly` / `auto`
   - `auto` は `auto.workspaces` に登録済みでなければ確認ダイアログが出ます。サンドボックスの有無も表示されます
   - モード変更は次のツール実行から有効（実行時にも再判定されます）
-- `:CoagentModel` — tool calling 対応モデルから選択（セッションごとに保持）
+- `:CoagentModel` — tool calling 対応モデルから選択（セッションごとに保持）。各モデルに料金倍率を表示（`x0` はプラン内で追加料金なし、`x1` が基準、大きいほど高価）
 - `/effort` / `:CoagentEffort` — 推論の強さ（reasoning effort）
   - `/effort high`（全役割）、`/effort low explorer`（役割だけ）、`/effort off`（送らない）、`/effort default`（設定値に戻す）。
     引数なしなら一覧から選択。セッションと一緒に保存されます

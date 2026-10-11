@@ -232,6 +232,8 @@ function Backend:models()
       tools = m.tools,
       max_input_tokens = m.max_input_tokens,
       picker = m.picker,
+      -- premium request multiplier from the models API (CopilotChat >= #1567 keeps it)
+      multiplier = tonumber(m.multiplier),
       reasoning_efforts = m.reasoning_efforts,
       reasoning_effort = m.reasoning_effort,
     })
@@ -240,6 +242,18 @@ function Backend:models()
     return a.id < b.id
   end)
   return out
+end
+
+--- Short cost label for a model's billing multiplier: "x0" (included in the
+--- plan), "x0.33", "x1", "x10". nil when the server did not report one.
+---@param multiplier number?
+---@return string?
+function Backend.format_multiplier(multiplier)
+  multiplier = tonumber(multiplier)
+  if not multiplier then
+    return nil
+  end
+  return 'x' .. string.format('%.2f', multiplier):gsub('%.?0+$', '')
 end
 
 ---@param model string

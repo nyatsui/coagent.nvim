@@ -34,7 +34,7 @@ describe('CopilotChat backend adapter', function()
           end,
           get_models = function()
             return {
-              { id = 'fake-model', name = 'Fake', tools = true, streaming = true, max_input_tokens = 100000 },
+              { id = 'fake-model', name = 'Fake', tools = true, streaming = true, max_input_tokens = 100000, multiplier = 0.33 },
             }
           end,
           prepare_input = providers.copilot.prepare_input,
@@ -223,7 +223,21 @@ describe('CopilotChat backend adapter', function()
     end)
     assert.are.equal('fake-model', models[1].id)
     assert.is_true(models[1].tools)
+    assert.are.equal(0.33, models[1].multiplier)
     assert.are.equal('fake-model', backend:default_model())
+  end)
+
+  it('formats billing multipliers for the model picker', function()
+    local f = Backend.format_multiplier
+    assert.are.equal('x0', f(0))
+    assert.are.equal('x0.33', f(0.33))
+    assert.are.equal('x1', f(1))
+    assert.are.equal('x1.5', f(1.5))
+    assert.are.equal('x10', f(10))
+    assert.is_nil(f(nil))
+    local label = require('coagent')._model_label
+    assert.are.equal('* GPT [gpt-4.1]  x0', label({ id = 'gpt-4.1', name = 'GPT', multiplier = 0 }, 'gpt-4.1', f))
+    assert.are.equal('  Auto (Copilot) [auto]', label({ id = 'auto', name = 'Auto (Copilot)' }, 'gpt-4.1', f))
   end)
 end)
 

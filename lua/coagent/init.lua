@@ -646,10 +646,11 @@ function M.select_model(role)
         return (m.tools or m.id == 'auto') and m.picker ~= false
       end, models)
       local current = ({ builder = roles.builder_model, explorer = roles.explorer_model, advisor = roles.advisor_model })[role]
+      local fmt = c.backend.format_multiplier or require('coagent.backend.copilotchat').format_multiplier
       vim.ui.select(usable, {
-        prompt = role == 'builder' and 'Model (tool calling capable)' or ('Model for the ' .. role),
+        prompt = (role == 'builder' and 'Model (tool calling capable)' or ('Model for the ' .. role)) .. '  (xN = cost multiplier)',
         format_item = function(m)
-          return (m.id == current and '* ' or '  ') .. m.name .. ' [' .. m.id .. ']'
+          return M._model_label(m, current, fmt)
         end,
       }, function(m)
         if not m then
@@ -663,6 +664,20 @@ function M.select_model(role)
       end)
     end)
   end)
+end
+
+--- One line of the model picker: current marker, name, id and cost multiplier.
+---@param m table
+---@param current string?
+---@param fmt fun(n:number?):string?
+---@return string
+function M._model_label(m, current, fmt)
+  local label = (m.id == current and '* ' or '  ') .. m.name .. ' [' .. m.id .. ']'
+  local mult = fmt(m.multiplier)
+  if mult then
+    label = label .. '  ' .. mult
+  end
+  return label
 end
 
 --- Choose the model roles preset for this session.

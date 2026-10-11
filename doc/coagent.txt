@@ -64,6 +64,7 @@ Check the setup with |:checkhealth| coagent.
 :CoagentOutput           Show the last command output.
 :CoagentMode [mode]      supervised | readonly | auto
 :CoagentModel            Pick a tool-calling capable model (per role when roles are on).
+                         Each entry shows the billing multiplier (x0 = included).
 :CoagentRoles [preset]   Model roles: single (default) | advisor | explorers | full
 :CoagentEffort [level] [role]
                          Reasoning effort for this session: minimal | low |
