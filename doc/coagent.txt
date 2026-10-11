@@ -8,6 +8,8 @@ CONTENTS                                              *coagent-contents*
   3. Panel keys .............................. |coagent-keys|
   4. Slash commands .......................... |coagent-slash|
      Rewind .................................. |coagent-rewind|
+     Queue ................................... |coagent-queue|
+     Notifications ........................... |coagent-notify|
   5. Modes ................................... |coagent-modes|
   6. Lua API ................................. |coagent-api|
 
@@ -85,12 +87,13 @@ total tokens. Rates are yours to fill in; nothing is shown without them. >lua
   a  approve          A  approve always     d  deny (with reason)
   D  deny and stop    r  review hunks       gd diff
   <Tab>/za details    <CR> open details     gf jump to change
-  gc changes          ]] [[ next/prev item   <C-c> stop
+  gc changes          ]] [[ next/prev item   <C-c> stop (|coagent-queue|)
   p  pause            R  resume             gs sessions
   gn new session      gm mode               i  input
   q  close            g? help
 
-Input: <CR> (normal) / <C-s> (insert) send, <C-c> stop, <C-k> panel,
+Input: <CR> (normal) / <C-s> (insert) send (queued while the agent works),
+<C-c> take back queued messages, else stop, <C-k> panel,
 <C-p>/<C-n> history, /help slash commands (|coagent-slash|). All keys are
 configurable via `keymaps`.
 
@@ -148,6 +151,8 @@ Commands go into the input history like prompts.
   /usage [billing]  /changes  /diff  /review  /stop  /processes
                       Same as the matching :Coagent* command.
   /rewind             Same as :CoagentRewind (|coagent-rewind|).
+  /queue [clear]      List the messages queued while the agent works;
+                      "clear" discards them (|coagent-queue|).
   /clear              Clear the input.
   /help               List the commands in the timeline.
 
@@ -212,6 +217,43 @@ Names are case-insensitive and become lower-case commands (/summarize).
 #selection/#buffer. A template named like a built-in command (/review)
 is reachable only through :CoagentPrompt.
 
+                                                         *coagent-queue*
+Messages sent while the agent is busy (responding, running a tool or waiting
+for approval) are queued and shown at the bottom of the panel as
+"Queued (n)". They never interrupt a running tool or an approval prompt:
+at the next step boundary (after the tool results of the current step,
+before the next request) they are appended as one user message labelled
+"User (while you were working): ...". The history stays append-only, so
+the prompt cache keeps working. If the task finishes first, the oldest
+queued message starts a new task (with its own |coagent-rewind|
+checkpoint). Read-only templates (/explain, ...) always wait for a task of
+their own.
+
+<C-c> in the input (or panel) first moves the queued messages back into
+the input; press it again to stop the agent. /queue lists them and
+/queue clear discards them. Stopping the task (:CoagentStop, deny & stop)
+also moves them back into the input instead of sending them. Slash
+commands are never queued; they run at once.
+
+                                                        *coagent-notify*
+When Neovim does not have focus, coagent rings the terminal bell on the
+events in `notify.on`: >lua
+    notify = {
+      on = { 'approval', 'done', 'failed' }, -- also: 'paused'
+      bell = true,                -- BEL to the terminal (tmux: bell flag)
+      desktop = false,            -- notify-send (Linux) / osascript (macOS)
+      only_when_unfocused = true,
+    }
+<
+Messages are generic status text only, e.g.
+"coagent: approval needed (run_command)"; prompt, code and model output
+are never included. Desktop notifications call a local command; nothing is
+sent over the network. Focus is tracked with |FocusLost| and
+|FocusGained|. Inside tmux this needs `set -g focus-events on`; without
+focus events Neovim always counts as focused, so set
+`only_when_unfocused = false` instead. No "done" notification is sent when
+a queued message immediately starts the next task.
+
 ==============================================================================
 5. MODES                                                 *coagent-modes*
 
@@ -229,6 +271,8 @@ auto        Only for workspaces in `auto.workspaces` or explicitly enabled.
   require('coagent').ask(prompt, { range = { l1, l2 } })
   require('coagent').open() / close() / toggle() / stop()
   require('coagent').compact({ summary = false })
+  require('coagent').clear_queue({ restore = false })  -- returns the count
+  require('coagent').controller():queued()
   require('coagent').controller()   -- events: controller.events:on(...)
   require('coagent').register_tool(tool)
 

@@ -41,6 +41,8 @@ I'll find the `add` implementation and its tests.
 - **ターミナル適応** — 80×24 で動作、tmux、256 色/true color、Unicode/ASCII/Nerd Font アイコン、split/float 切替、リサイズ追従
 - **プロンプトテンプレート** — `/explain` `/codereview` `/fix` `/tests` `/commit` など（CopilotChat の定型プロンプト相当）と設定での独自定義。説明・レビューはそのタスクだけ読み取り専用
 - **`#url` / `#clipboard`** — 入力した URL のページ本文やクリップボードを添付
+- **作業中の追加指示** — 作業中に送ったメッセージはキューに入り、次のステップ境界で届く（ツールや承認は中断しない）
+- **通知** — 承認待ち・完了・失敗をベル（tmux 対応）や任意のデスクトップ通知で知らせる（文面は定型文のみ）
 - **セッション** — プロジェクト単位で保存/復元、中断タスクの再開（未実行の tool call は再実行しない）
 
 ## 要件
@@ -177,12 +179,45 @@ nvim --clean -u scripts/demo.lua
 | `/usage [billing]` / `/changes` / `/diff` / `/review` | 利用量（`billing` で GitHub の請求ページ） / 変更一覧 / diff / hunk レビュー |
 | `/rewind` | 過去のプロンプトの直前まで巻き戻す（コード + 会話 / 会話のみ / コードのみ。下記「巻き戻し」） |
 | `/stop` / `/processes` | 停止 / バックグラウンドプロセス |
+| `/queue [clear]` | 作業中に送ったメッセージ（キュー）の一覧 / `clear` で破棄 |
 | `/clear` / `/help` | 入力欄をクリア / コマンド一覧 |
 
 - 未知のコマンド（`/foo`）はエラー表示のみで送信されず、入力も残ります
 - `/` 自体を送りたいときは `//` で始めます（`//compact とは` → `/compact とは` を送信）。
   `/etc/hosts が…` のように先頭語がコマンド名の形でない場合はそのまま送信されます
 - `:Coagent /compact` のようにコマンドからも使えます
+
+### 作業中の追加メッセージ（キュー）
+
+エージェントが作業中（応答中・ツール実行中・承認待ち）でも入力欄から送信できます。送ったメッセージはキューに入り、
+パネル末尾に `Queued (n)` として薄く表示されます。
+
+- 実行中のツールや承認待ちを中断することはありません。現在のステップのツール結果の後、次のリクエストの前に
+  「User (while you were working): …」というユーザーメッセージとして追加されます（履歴は追記のみなのでプロンプトキャッシュも効きます）
+- 先にタスクが完了・失敗した場合は、そのメッセージで新しいタスクを始めます（`/rewind` のチェックポイントも作られます）
+- 読み取り専用のテンプレート（`/explain` など）は実行中のタスクに混ぜず、完了後に独立したタスクとして実行します
+- 入力欄で `<C-c>` を押すと、まずキューのメッセージが入力欄に戻ります（エージェントは止まりません）。もう一度 `<C-c>` で停止。
+  `/queue` で一覧、`/queue clear` で破棄。`:CoagentStop` で停止した場合もキューは送られずに入力欄へ戻ります
+
+### 通知（承認待ち・完了・失敗）
+
+Neovim（ターミナル）にフォーカスが無いときに、承認待ち・完了・失敗をベルで知らせます（`notify` で設定）。
+
+```lua
+notify = {
+  on = { 'approval', 'done', 'failed' }, -- 'paused' も指定可
+  bell = true,                -- 端末へ BEL を送る（tmux ではウィンドウにベルフラグが立つ）
+  desktop = false,            -- true: デスクトップ通知（Linux: notify-send / macOS: osascript）
+  only_when_unfocused = true, -- フォーカス中は通知しない
+},
+```
+
+- 通知の文面は「`coagent: approval needed (run_command)`」「`coagent: task completed`」のような定型文だけで、
+  プロンプト・コード・モデルの出力は含みません。デスクトップ通知もローカルのコマンドを呼ぶだけで外部には送信しません
+- フォーカスは `FocusLost` / `FocusGained` で判定します。**tmux では `set -g focus-events on`** が必要です
+  （無いと常に「フォーカス中」とみなされて通知されません。その場合は `only_when_unfocused = false`）
+- tmux でベルを使うときは `monitor-bell on`（既定）と、必要に応じて `bell-action any` を設定してください
+- 実行中のタスクの完了直後にキューのメッセージで次のタスクが始まる場合、その完了通知は出しません
 
 ### 巻き戻し（/rewind）
 
@@ -293,13 +328,13 @@ require('coagent').setup({
 | `d` | 拒否（理由入力） | `gd` | diff（承認待ちなら side-by-side） |
 | `D` | 拒否して停止 | `gf` | 該当ファイルの変更箇所へジャンプ |
 | `r` | hunk レビュー | `gc` | 変更ファイル一覧 |
-| `<C-c>` | 停止（完了後に押すとバックグラウンドプロセスも停止） | `]]` / `[[` | 次/前の項目 |
+| `<C-c>` | 停止（キューがあれば先に入力欄へ戻す。完了後に押すとバックグラウンドプロセスも停止） | `]]` / `[[` | 次/前の項目 |
 | `p` / `R` | 一時停止 / 再開 | `gs` / `gn` | セッション一覧 / 新規 |
 | `gm` | モード切替 | `i` | 入力欄へ |
 | `gu` | 利用量・残量 | | |
 | `q` | 閉じる | `g?` | ヘルプ |
 
-入力欄: `<CR>`（ノーマル）/ `<C-s>`（インサート）送信、`<C-c>` 停止、`<C-k>` パネルへ、`<C-p>`/`<C-n>` 履歴。
+入力欄: `<CR>`（ノーマル）/ `<C-s>`（インサート）送信（作業中はキューへ）、`<C-c>` キューを戻す / 停止、`<C-k>` パネルへ、`<C-p>`/`<C-n>` 履歴。
 入力欄の Normal mode では `a` `d` `i` などは通常の編集キーのままなので、パネル操作は `g` 付きで使えます:
 `ga` 承認 / `gA` 常に承認 / `gx` 拒否 / `gX` 拒否して停止 / `gr` hunk レビュー / `gd` diff / `gc` 変更一覧 /
 `gu` 利用量 / `gs` セッション / `gn` 新規 / `gm` モード / `g?` ヘルプ（承認待ちの間はステータスラインにも表示）。
@@ -366,6 +401,7 @@ require('coagent').setup({
   ui = { layout = 'vertical', width = 0.42, icons = 'unicode', show_reasoning = false },
   prompts = {}, -- 独自のプロンプトテンプレート（「プロンプトテンプレート」参照）
   references = { url = true, url_max_bytes = 32 * 1024, clipboard_max_bytes = 32 * 1024 },
+  notify = { on = { 'approval', 'done', 'failed' }, bell = true, desktop = false, only_when_unfocused = true },
 })
 ```
 

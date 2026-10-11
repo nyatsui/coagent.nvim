@@ -263,24 +263,20 @@ describe('controller compact', function()
     assert.is_true(ok)
     assert.is_true(info.pending)
     assert.is_true(c:busy())
-    assert.is_false((c:submit('too early')))
+    -- a message sent during the summary waits for it, then starts its task
+    assert.is_true((c:submit('next')))
+    assert.are.equal(1, #c:queued())
     h.wait(function()
-      return c.session.compact_summary ~= nil
+      return c.session.compact_summary ~= nil and c:state() == 'COMPLETED'
     end)
-    assert.is_false(c:busy())
-    assert.are.equal(1, backend.calls)
+    assert.are.equal(2, backend.calls)
     local req = backend.requests[1]
     assert.are.same({}, req.tools)
     assert.are.equal(1, #req.messages)
     assert.is_truthy(req.messages[1].content:find('## tool result', 1, true))
     assert.are.equal(5, c.session.compact_summary.upto)
     assert.are.equal('- read files 1 and 2', c.session.compact_summary.content)
-    assert.are.equal(1, c.session.role_stats.builder.requests)
-
-    c:submit('next')
-    h.wait(function()
-      return c:state() == 'COMPLETED'
-    end)
+    assert.are.equal(2, c.session.role_stats.builder.requests)
     local sent = backend.requests[2].messages
     assert.are.equal('the task', sent[1].content)
     assert.is_truthy(sent[2].content:find(context.SUMMARY_PREFIX, 1, true))

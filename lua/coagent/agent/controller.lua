@@ -50,6 +50,7 @@ function Controller.new(opts)
     cancel_fn = nil,
     model_cache = {},
     unsubscribe = {},
+    queue = {},
   }, Controller)
   self.processes = Background.new(self.config)
   self.processes:on_change(function(p)
@@ -213,7 +214,9 @@ function Controller:submit(text, opts)
     return false, 'empty prompt'
   end
   if self:busy() then
-    return false, 'the agent is busy; stop it first (<C-c>)'
+    -- Follow-up while the agent works: delivered at the next step boundary
+    -- (never interrupting a running tool or an approval prompt).
+    return self:_enqueue(text, opts)
   end
   if self.machine.current == S.PAUSED then
     -- A new message while paused abandons the paused task's pending steps.
@@ -306,6 +309,10 @@ function Controller:stop(reason)
   -- that outlived their task (dev servers).
   local bg = self.processes:running_count()
   self.processes:kill_all()
+  if reason ~= 'dispose' then
+    -- queued follow-ups go back to the input instead of starting a task
+    self:clear_queue({ restore = true })
+  end
   if self.compacting then
     -- a `/compact summary` request (the agent itself is idle)
     self.compacting = nil
@@ -372,6 +379,109 @@ end
 ---@return table? pending {item, prepared}
 function Controller:pending()
   return self.pending_approval
+end
+
+------------------------------------------------------------------------------
+-- Follow-up queue (messages sent while the agent is busy)
+------------------------------------------------------------------------------
+
+Controller.FOLLOWUP_LABEL = 'User (while you were working): '
+
+---@class Coagent.QueuedMessage
+---@field id integer
+---@field text string prompt text (template already expanded)
+---@field opts table submit opts (source, selection, readonly, input, template)
+
+function Controller:_emit_queue(extra)
+  self.events:emit('queue', vim.tbl_extend('force', { items = vim.deepcopy(self:queued()) }, extra or {}))
+end
+
+---@return boolean ok, string? err
+function Controller:_enqueue(text, opts)
+  self.queue_seq = (self.queue_seq or 0) + 1
+  table.insert(self.queue, { id = self.queue_seq, text = text, opts = opts })
+  self:_emit_queue()
+  return true
+end
+
+--- Messages waiting for the next step boundary (oldest first).
+---@return {id:integer, text:string, input:string}[]
+function Controller:queued()
+  return vim.tbl_map(function(q)
+    return { id = q.id, text = q.text, input = q.opts.input or q.text, readonly = q.opts.readonly }
+  end, self.queue)
+end
+
+--- Drop all queued messages. Returns the texts as typed.
+---@param opts {restore:boolean?}? restore: the UI puts the texts back into the input
+---@return string[] inputs
+function Controller:clear_queue(opts)
+  if #self.queue == 0 then
+    return {}
+  end
+  local inputs = vim.tbl_map(function(q)
+    return q.opts.input or q.text
+  end, self.queue)
+  self.queue = {}
+  self:_emit_queue({ dropped = inputs, restore = opts and opts.restore or false })
+  return inputs
+end
+
+--- Deliver queued messages into the running task: one user message appended
+--- after the tool results of the step that just ended (the history stays
+--- append-only). Read-only template prompts wait for a task of their own.
+--- Must run inside the task coroutine.
+function Controller:_deliver_queue(gen)
+  local batch = {}
+  while #self.queue > 0 and not self.queue[1].opts.readonly do
+    table.insert(batch, table.remove(self.queue, 1))
+  end
+  if #batch == 0 then
+    return
+  end
+  self:_emit_queue({ delivered = #batch })
+  local parts = {}
+  for _, q in ipairs(batch) do
+    local item = self:_add({ type = 'user', text = q.text, followup = true })
+    local clean, atts, errors, infos = context.resolve_references(q.text, {
+      ws = self.ws,
+      source = q.opts.source or {},
+      selection = q.opts.selection,
+      references = self.config.references,
+    })
+    async.main()
+    if self.gen ~= gen then
+      return
+    end
+    for _, i in ipairs(infos or {}) do
+      self:notice('info', i)
+    end
+    for _, e in ipairs(errors) do
+      self:notice('warn', e)
+    end
+    local content = clean ~= '' and clean or q.text
+    if #atts > 0 then
+      content = content .. '\n\n' .. table.concat(atts, '\n\n')
+      item.attachments = #atts
+      self:_update(item)
+    end
+    table.insert(parts, Controller.FOLLOWUP_LABEL .. content)
+  end
+  table.insert(self.session.messages, { role = 'user', content = table.concat(parts, '\n\n') })
+end
+
+--- After a task (or a `/compact summary`) ends: start a new task with the
+--- oldest queued message; the rest follow at that task's first step boundary.
+function Controller:_drain_queue()
+  if #self.queue == 0 or self:busy() or self.machine.current == S.PAUSED then
+    return
+  end
+  local q = table.remove(self.queue, 1)
+  self:_emit_queue()
+  local ok, err = self:submit(q.text, q.opts)
+  if not ok then
+    self:notice('warn', 'Queued message not sent: ' .. tostring(err))
+  end
 end
 
 ------------------------------------------------------------------------------
@@ -594,6 +704,9 @@ function Controller:_compact_summary()
   self:notice('info', string.format('Summarizing %d older messages with %s (1 request)...', upto - from, model))
   local function refresh()
     self.events:emit('state', { state = self.machine.current, prev = self.machine.current })
+    if not self.compacting then
+      self:_drain_queue()
+    end
   end
   refresh()
   async.run(function()
@@ -716,6 +829,14 @@ function Controller:_loop(gen)
         return
       end
       self.machine:to(S.THINKING)
+    end
+
+    -- step boundary: follow-ups typed while the agent worked
+    if #self.queue > 0 then
+      self:_deliver_queue(gen)
+      if self.gen ~= gen then
+        return
+      end
     end
 
     local limit = self:_check_limits()
@@ -1410,6 +1531,14 @@ function Controller:_finish_now(state, info)
     local rates = self.config.usage and self.config.usage.rates
     summary.usage = { requests = u.requests, tokens = u.tokens, credits = (Usage.estimate(u, rates)) }
   end
+  if #self.queue > 0 then
+    if state == S.CANCELLED then
+      -- a stopped task never starts queued follow-ups by itself
+      self:clear_queue({ restore = true })
+    else
+      summary.followup = true -- a queued message starts the next task right away
+    end
+  end
   self:_add(summary)
   if self.machine:can(state) then
     self.machine:to(state, info)
@@ -1421,6 +1550,11 @@ function Controller:_finish_now(state, info)
   self:save()
   if self.store and self.config.session.persist then
     pcall(self.store.prune, self.store, self.session.root, self.config.session.max_saved_sessions or 50)
+  end
+  if summary.followup then
+    vim.schedule(function()
+      self:_drain_queue()
+    end)
   end
 end
 

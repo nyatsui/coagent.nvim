@@ -70,6 +70,7 @@ function M.setup(opts)
     end,
   })
   vim.api.nvim_create_autocmd('WinEnter', { group = group, callback = track_editor })
+  require('coagent.ui.notify').track_focus(group)
   vim.api.nvim_create_autocmd('VimLeavePre', {
     group = group,
     callback = function()
@@ -187,6 +188,12 @@ end
 local function set_controller(c)
   local old = state.controller
   state.controller = c
+  if state.unnotify then
+    state.unnotify()
+  end
+  state.unnotify = require('coagent.ui.notify').attach(c, function()
+    return config.options.notify
+  end)
   if config.options.usage.refresh_after_task then
     c.events:on('done', function()
       M.refresh_usage()
@@ -325,7 +332,12 @@ function M.prompt(args, opts)
   return M.run_template(name, rest)
 end
 
+--- <C-c>: with queued follow-ups, first take them back into the input;
+--- otherwise stop the agent.
 function actions.stop()
+  if M.clear_queue({ restore = true }) > 0 then
+    return
+  end
   M.stop()
 end
 
@@ -416,6 +428,26 @@ function M.stop()
     return true
   end
   return false
+end
+
+--- Drop the messages queued while the agent is busy.
+---@param opts {restore:boolean?}? restore: put them back into the input
+---@return integer count
+function M.clear_queue(opts)
+  local c = state.controller
+  if not c then
+    return 0
+  end
+  local n = #c:clear_queue(opts)
+  if n > 0 then
+    local key = config.options.keymaps.input.stop
+    key = type(key) == 'string' and key or nil
+    local restore = opts and opts.restore
+    local what = restore and 'moved back to the input' or 'discarded'
+    local hint = (restore and key) and (' ' .. key .. ' again stops the agent.') or ''
+    c:notice('info', string.format('%d queued message%s %s.%s', n, n > 1 and 's' or '', what, hint))
+  end
+  return n
 end
 
 function M.pause()
@@ -941,6 +973,10 @@ function M._reset()
   end
   if state.controller then
     state.controller:dispose()
+  end
+  if state.unnotify then
+    state.unnotify()
+    state.unnotify = nil
   end
   state.view, state.controller, state.backend, state.store = nil, nil, nil, nil
   state.selection, state.extra_tools = nil, {}

@@ -37,7 +37,20 @@
 3. 読み込み・検索系は自動、編集・コマンドは承認待ちで止まります
 4. 最終報告の下に **検証状態**（Verified / Last check failed / Not verified）と変更ファイル一覧が出ます
 
-追加の指示は完了後にそのまま入力すれば同じ会話で続きます。実行中に送信はできません（先に `<C-c>`）。
+追加の指示は完了後にそのまま入力すれば同じ会話で続きます。
+
+### 作業中に送ったメッセージ（キュー）
+
+作業中（応答中・ツール実行中・承認待ち）に送信したメッセージはキューに入り、パネル末尾に `Queued (n)` と表示されます。
+
+- 次のステップ境界（現在のステップのツール結果の後、次のリクエストの前）で
+  `User (while you were working): …` というユーザーメッセージとしてエージェントに届きます。タイムラインでは
+  `You (while the agent was working)` と表示されます。実行中のツールや承認待ちは中断しません
+- 届く前にタスクが終わった場合（完了・失敗）は、そのメッセージで新しいタスクを開始します
+- 読み取り専用テンプレート（`/explain` など）はタスク完了後に独立したタスクとして実行されます
+- 取り消し: 入力欄の `<C-c>` でキューの内容が入力欄に戻ります（エージェントは継続。もう一度 `<C-c>` で停止）。
+  `/queue` で一覧、`/queue clear` で破棄。停止（`:CoagentStop`、拒否して停止）したときも送られずに入力欄へ戻ります
+- スラッシュコマンド（`/queue`、`/stop` など）はキューに入らず、その場で実行されます
 
 ### コンテキストを渡す
 
@@ -162,9 +175,20 @@
 
 | 操作 | 効果 |
 |---|---|
-| `<C-c>`（パネル/入力欄）/ `:CoagentStop` | 即時停止。HTTP ストリーム中断、実行中コマンドのプロセスグループを kill、承認待ちを破棄。表示済みの部分応答は残る |
+| `<C-c>`（パネル/入力欄） | キューがあればまずそれを入力欄に戻す（停止しない）。キューが空なら `:CoagentStop` と同じ |
+| `:CoagentStop` / `/stop` | 即時停止（キューは入力欄へ戻す）。HTTP ストリーム中断、実行中コマンドのプロセスグループを kill、承認待ちを破棄。表示済みの部分応答は残る |
 | `p` / `:CoagentPause` | 現在のステップ完了後に一時停止 |
 | `R` / `:CoagentResume` | 一時停止・外部割り込み・復元したセッションを再開 |
+
+### 通知
+
+Neovim にフォーカスが無いとき、承認待ち・完了・失敗（`notify.on` に `'paused'` を足すと一時停止も）を知らせます。
+
+- 既定は端末ベル（BEL）のみ。tmux ではそのウィンドウにベルフラグが立ちます
+- `notify.desktop = true` でデスクトップ通知（Linux: `notify-send`、macOS: `osascript`）。`:checkhealth coagent` で検出結果を確認できます
+- 文面は `coagent: approval needed (run_command)` のような定型文のみ（プロンプトやコードは含まない）
+- フォーカス判定は `FocusLost` / `FocusGained`。tmux では `~/.tmux.conf` に `set -g focus-events on` が必要です。
+  端末がフォーカスイベントを送らない場合は `notify.only_when_unfocused = false` にしてください
 
 ## 6. モードとモデル
 
@@ -195,3 +219,4 @@
 | `CONFLICT: ... unsaved changes` | 該当バッファを保存または破棄してから続行を指示 |
 | 同じ操作を繰り返して停止した | `max_identical_calls` / `max_identical_failures` の安全装置。指示を具体化して再実行 |
 | モデルがツールを使わない | `:CoagentModel` で tool calling 対応モデルを選択 |
+| 通知（ベル）が来ない | tmux なら `set -g focus-events on`（フォーカス判定）と `monitor-bell on`。または `notify.only_when_unfocused = false` |

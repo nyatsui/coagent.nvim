@@ -10,13 +10,14 @@ local icons = require('coagent.ui.icons')
 local ns_hl = vim.api.nvim_create_namespace('coagent_hl')
 local ns_virt = vim.api.nvim_create_namespace('coagent_virt')
 local ns_spin = vim.api.nvim_create_namespace('coagent_spinner')
+local ns_foot = vim.api.nvim_create_namespace('coagent_footer')
 
 ---@class Coagent.Panel
 local Panel = {}
 Panel.__index = Panel
 
 function Panel.new(config)
-  local self = setmetatable({ config = config, blocks = {}, index = {}, dirty = {}, timer = nil, frame = 1 }, Panel)
+  local self = setmetatable({ config = config, blocks = {}, index = {}, dirty = {}, timer = nil, frame = 1, footer = nil }, Panel)
   self.buf = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_buf_set_name(self.buf, 'coagent://panel/' .. self.buf)
   local bo = vim.bo[self.buf]
@@ -154,13 +155,58 @@ local function total_lines(self)
   return total
 end
 
---- Invariant: buffer line count == sum of block lines (a buffer always keeps
---- at least one line, so the very first insert leaves a trailing '' to drop).
+--- Invariant: buffer line count == sum of block lines + footer lines (a
+--- buffer always keeps at least one line, so the very first insert leaves a
+--- trailing '' to drop). New blocks are inserted before the footer.
 local function trim(self)
   local total = total_lines(self)
-  if total > 0 and vim.api.nvim_buf_line_count(self.buf) > total then
-    vim.api.nvim_buf_set_lines(self.buf, total, -1, false, {})
+  local foot = self.footer and self.footer.lines or {}
+  local count = vim.api.nvim_buf_line_count(self.buf)
+  if #foot == 0 then
+    if total > 0 and count > total then
+      vim.api.nvim_buf_set_lines(self.buf, total, -1, false, {})
+    end
+    return
   end
+  if vim.deep_equal(vim.api.nvim_buf_get_lines(self.buf, total, -1, false), foot) then
+    return
+  end
+  vim.api.nvim_buf_set_lines(self.buf, total, -1, false, foot)
+  if total == 0 and vim.api.nvim_buf_line_count(self.buf) > #foot then
+    vim.api.nvim_buf_set_lines(self.buf, #foot, -1, false, {})
+  end
+  vim.api.nvim_buf_clear_namespace(self.buf, ns_foot, total, -1)
+  for _, h in ipairs(self.footer.hls) do
+    local line = foot[h[1] + 1] or ''
+    local e = h[3] == -1 and #line or math.min(h[3], #line)
+    if e > h[2] then
+      pcall(vim.api.nvim_buf_set_extmark, self.buf, ns_foot, total + h[1], h[2], { end_col = e, hl_group = h[4], priority = 200 })
+    end
+  end
+end
+
+--- Lines kept below the timeline (queued messages); nil/empty removes them.
+---@param rendered Coagent.Rendered?
+function Panel:set_footer(rendered)
+  if not self:valid() then
+    return
+  end
+  if rendered and #rendered.lines == 0 then
+    rendered = nil
+  end
+  if not rendered and not self.footer then
+    return
+  end
+  local total = total_lines(self)
+  write(self, function()
+    vim.api.nvim_buf_clear_namespace(self.buf, ns_foot, 0, -1)
+    if self.footer then
+      -- drop the old footer first (trim only rewrites lines that differ)
+      vim.api.nvim_buf_set_lines(self.buf, total, -1, false, {})
+    end
+    self.footer = rendered
+    trim(self)
+  end)
 end
 
 local function append(self, id, item, rendered)
@@ -181,6 +227,7 @@ function Panel:reset(items)
     vim.api.nvim_buf_clear_namespace(self.buf, ns_hl, 0, -1)
     vim.api.nvim_buf_clear_namespace(self.buf, ns_virt, 0, -1)
     vim.api.nvim_buf_clear_namespace(self.buf, ns_spin, 0, -1)
+    vim.api.nvim_buf_clear_namespace(self.buf, ns_foot, 0, -1)
     vim.api.nvim_buf_set_lines(self.buf, 0, -1, false, {})
     local o = self:opts()
     if #items == 0 then
@@ -227,6 +274,7 @@ function Panel:flush()
     if self.blocks[1] and self.blocks[1].id == 'intro' then
       vim.api.nvim_buf_clear_namespace(self.buf, ns_hl, 0, -1)
       vim.api.nvim_buf_clear_namespace(self.buf, ns_virt, 0, -1)
+      vim.api.nvim_buf_clear_namespace(self.buf, ns_foot, 0, -1)
       vim.api.nvim_buf_set_lines(self.buf, 0, -1, false, {})
       self.blocks, self.index = {}, {}
     end

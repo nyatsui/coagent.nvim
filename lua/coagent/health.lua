@@ -73,6 +73,19 @@ function M.check()
       h.warn('prompts.' .. t.name .. ': /' .. key .. ' is a built-in command; use :CoagentPrompt ' .. key)
     end
   end
+  local n = cfg.notify or {}
+  h.info('notify on: ' .. table.concat(n.on or {}, ', ') .. '; bell: ' .. tostring(n.bell ~= false) .. '; desktop: ' .. tostring(n.desktop == true))
+  if n.desktop then
+    local cmd = require('coagent.ui.notify').sys.desktop_cmd()
+    if cmd then
+      h.ok('desktop notifications via ' .. cmd[1])
+    else
+      h.warn('notify.desktop is on but neither notify-send (Linux) nor osascript (macOS) was found')
+    end
+  end
+  if n.only_when_unfocused ~= false and vim.env.TMUX then
+    h.info("inside tmux: notifications need focus events (`set -g focus-events on` in tmux.conf)")
+  end
   h.info('#url references: ' .. (cfg.references.url == false and 'disabled' or 'enabled'))
   h.info('mode: ' .. cfg.mode .. '; sessions: ' .. (cfg.session.persist and (cfg.session.dir or (vim.fn.stdpath('state') .. '/coagent/sessions')) or 'not persisted'))
 end

@@ -87,7 +87,8 @@ function View:attach(c)
       local ik = self.config.keymaps.input
       hint = string.format('Approval needed: %s approve %s %s deny %s %s hunks (Normal mode)', ik.approve or '', icons.get(self.config.ui.icons).dot, ik.deny or '', icons.get(self.config.ui.icons).dot, ik.review or '')
     elseif busy then
-      hint = 'Agent is working' .. icons.get(self.config.ui.icons).ellipsis .. ' (<C-c> stop)'
+      local ic = icons.get(self.config.ui.icons)
+      hint = 'Agent is working' .. ic.ellipsis .. ' (messages are queued ' .. ic.dot .. ' <C-c> stop)'
     end
     self.input:set_busy_hint(hint)
     self:input_statusline()
@@ -117,6 +118,17 @@ function View:attach(c)
       end)
     end
   end)
+  on('queue', function(e)
+    self:_render_queue(e.items)
+    if e.restore and e.dropped and #e.dropped > 0 then
+      -- put cancelled follow-ups back into the input (after a submit clears it)
+      vim.schedule(function()
+        local cur = vim.trim(self.input:text())
+        local text = table.concat(e.dropped, '\n\n')
+        self.input:set_text(cur == '' and text or (cur .. '\n\n' .. text))
+      end)
+    end
+  end)
   on('approval_request', function(item)
     upd(item)
     if not self:visible() then
@@ -129,7 +141,17 @@ function View:attach(c)
     end
   end)
   self.panel:reset(c.session.items)
+  self:_render_queue(c:queued())
   self:refresh_bar()
+end
+
+---@param items table[]
+function View:_render_queue(items)
+  local render = require('coagent.ui.render')
+  local o = self.panel:opts()
+  local k = self.config.keymaps.input.stop
+  o.stop_key = type(k) == 'table' and k[1] or k or nil
+  self.panel:set_footer(#items > 0 and render.queue(items, o) or nil)
 end
 
 function View:detach()

@@ -95,15 +95,19 @@ describe('ui', function()
       return c:state() == 'STREAMING'
     end)
     vim.wait(60)
-    -- sending while busy is refused but the typed text is kept
+    -- sending while busy queues the text below the timeline
     view.input:set_text('follow-up question')
     view.input:submit()
-    assert.are.equal('follow-up question', view.input:text())
+    assert.are.equal('', view.input:text())
+    local text = table.concat(vim.api.nvim_buf_get_lines(view.panel.buf, 0, -1, false), '\n')
+    assert.is_truthy(text:find('Queued (1)', 1, true))
+    assert.is_truthy(text:find('follow-up question', 1, true))
     -- user scrolls up to the first line while streaming
     vim.api.nvim_win_set_cursor(view.wins.panel, { 1, 0 })
     local seen_partial = vim.api.nvim_buf_line_count(view.panel.buf)
+    -- the queued text starts the next task once the first one completes
     h.wait(function()
-      return c:state() == 'COMPLETED'
+      return c:state() == 'COMPLETED' and #c.session.checkpoints == 2
     end)
     assert.is_true(vim.api.nvim_buf_line_count(view.panel.buf) > seen_partial)
     assert.are.equal(1, vim.api.nvim_win_get_cursor(view.wins.panel)[1])

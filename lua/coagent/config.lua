@@ -34,6 +34,18 @@ local defaults = {
     rates = nil,
   },
 
+  -- Get the user's attention when the agent needs it. on: 'approval' | 'done'
+  -- | 'failed' | 'paused'. bell: BEL to the terminal (tmux flags the window).
+  -- desktop: notify-send (Linux) / osascript (macOS); generic text only, never
+  -- prompt or code. only_when_unfocused: needs terminal focus reporting
+  -- (tmux: `set -g focus-events on`), otherwise Neovim always counts as focused.
+  notify = {
+    on = { 'approval', 'done', 'failed' },
+    bell = true,
+    desktop = false,
+    only_when_unfocused = true,
+  },
+
   -- 'supervised' (default): read tools run automatically, edits and commands need approval.
   -- 'readonly': only read/search tools are offered to and executable by the model.
   -- 'auto': workspace auto mode, only usable in workspaces listed in `auto.workspaces`
@@ -214,6 +226,9 @@ function M.setup(opts)
   -- Lists must replace, not merge, so users can shrink them.
   if opts and opts.auto and opts.auto.allowed_commands then
     M.options.auto.allowed_commands = opts.auto.allowed_commands
+  end
+  if opts and opts.notify and opts.notify.on then
+    M.options.notify.on = opts.notify.on
   end
   if opts and opts.auto and opts.auto.protected_globs then
     M.options.auto.protected_globs = opts.auto.protected_globs

@@ -140,6 +140,34 @@ M.COMMANDS = {
     end,
   },
   {
+    name = 'queue',
+    args = '[clear]',
+    desc = 'Messages queued while the agent works (clear: discard them)',
+    complete = { 'clear' },
+    run = function(arg)
+      if arg == 'clear' then
+        if app().clear_queue() == 0 then
+          notice('info', 'No queued messages.')
+        end
+        return
+      elseif arg ~= '' then
+        notice('error', '/queue: unknown argument "' .. arg .. '" (use /queue or /queue clear)')
+        return false
+      end
+      local list = app().controller():queued()
+      if #list == 0 then
+        notice('info', 'No queued messages. While the agent works, messages you send wait here and reach it at the next step.')
+        return
+      end
+      local lines = { string.format('Queued messages (%d), sent at the next step boundary:', #list) }
+      for i, q in ipairs(list) do
+        table.insert(lines, string.format('  %d. %s', i, (q.input:gsub('\n', ' '))))
+      end
+      table.insert(lines, '/queue clear discards them; <C-c> in the input moves them back into the input.')
+      notice('info', table.concat(lines, '\n'))
+    end,
+  },
+  {
     name = 'processes',
     desc = 'Show or stop background processes',
     run = function()

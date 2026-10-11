@@ -322,6 +322,10 @@ function M.item(item, o)
   if item.type == 'user' then
     local r = b.line(i.user .. ' You')
     b.hl(r, 0, -1, 'CoagentUser')
+    if item.followup then
+      b.lines[#b.lines] = b.lines[#b.lines] .. ' (while the agent was working)'
+      b.hl(r, #i.user + 4, -1, 'CoagentDim')
+    end
     for _, l in ipairs(vim.split(item.text or '', '\n', { plain = true })) do
       b.line(l)
     end
@@ -372,6 +376,31 @@ function M.item(item, o)
     end
   elseif item.type == 'summary' then
     summary(b, item, o)
+  end
+  b.line('')
+  return b
+end
+
+--- Messages queued while the agent is busy (panel footer, pending style).
+---@param items {text:string, readonly:boolean?}[]
+---@param o table render opts
+---@return Coagent.Rendered
+function M.queue(items, o)
+  local b = builder()
+  I = o.icons
+  if #items == 0 then
+    return b
+  end
+  local k = o.stop_key and (' ' .. o.stop_key .. ' in the input takes them back') or ''
+  local r = b.line(string.format('%s Queued (%d) %s sent at the next step%s', o.icons.pending, #items, o.icons.dot, k))
+  b.hl(r, 0, -1, 'CoagentDim')
+  for _, q in ipairs(items) do
+    local lines = vim.split(q.text or '', '\n', { plain = true })
+    local first = lines[1] .. (#lines > 1 and (' ' .. o.icons.ellipsis) or '')
+    if q.readonly then
+      first = first .. '  (read-only: after this task)'
+    end
+    b.line('  ' .. o.icons.user .. ' ' .. util.clip(first, 200), 'CoagentDim')
   end
   b.line('')
   return b
