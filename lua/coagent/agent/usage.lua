@@ -37,11 +37,31 @@ function M.add(acc, role, model, res)
   if res and res.model and res.model ~= key then
     m.resolved = res.model
   end
+  if res and res.effort then
+    m.efforts = m.efforts or {}
+    m.efforts[res.effort] = (m.efforts[res.effort] or 0) + 1
+  end
   acc.roles = acc.roles or {}
   local r = acc.roles[role] or { requests = 0, tokens = 0 }
   acc.roles[role] = r
   r.requests = r.requests + 1
   r.tokens = r.tokens + tokens
+end
+
+--- "; effort high x3, low x1" (empty without efforts).
+---@param efforts table<string, integer>?
+---@param prefix string
+---@return string
+function M.efforts_text(efforts, prefix)
+  if type(efforts) ~= 'table' or next(efforts) == nil then
+    return ''
+  end
+  local parts = {}
+  for e, n in pairs(efforts) do
+    table.insert(parts, e .. ' x' .. n)
+  end
+  table.sort(parts)
+  return prefix .. table.concat(parts, ', ')
 end
 
 --- Compact token count: 950, 4.2k, 48k, 1.3M.

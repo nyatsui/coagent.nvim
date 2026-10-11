@@ -79,6 +79,7 @@ function M.run(ctrl, gen, args, item)
       tools = last and {} or tools,
       model = model,
       temperature = ctrl.config.temperature,
+      effort = roles.explorer_effort,
       -- headless requests are independent of CopilotChat's single cancellable
       -- job, so several explorers can run at once; stop() soft-cancels them.
       headless = true,

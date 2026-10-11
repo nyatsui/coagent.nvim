@@ -138,6 +138,14 @@ end
 --- Per-role request/token accounting (shown in :CoagentUsage), plus the
 --- running task's and the session's totals.
 function Controller:_record_role(role, model, res)
+  -- backend notices (reasoning effort clamped / unsupported), once per text
+  self.effort_notices = self.effort_notices or {}
+  for _, text in ipairs(res and res.notices or {}) do
+    if not self.effort_notices[text] then
+      self.effort_notices[text] = true
+      self:notice('info', text)
+    end
+  end
   self.session.usage_totals = self.session.usage_totals or Usage.new()
   Usage.add(self.session.usage_totals, role, model, res)
   -- `/compact summary` runs while idle or paused: it counts for the session only
@@ -154,10 +162,39 @@ function Controller:_record_role(role, model, res)
   end
   local used = (res and res.model) or model
   s.models[used] = (s.models[used] or 0) + 1
+  if res and res.effort then
+    s.efforts = s.efforts or {}
+    s.efforts[res.effort] = (s.efforts[res.effort] or 0) + 1
+  end
   if role == 'builder' and res and res.model then
     self.session.resolved_model = res.model
   end
   self.events:emit('roles', self:roles())
+end
+
+--- Reasoning effort override for this session.
+---@param level string? 'minimal'|'low'|'medium'|'high', 'off' (never send) or nil (back to the config)
+---@param role string? 'builder'|'explorer'|'advisor'; nil = every role
+---@return boolean ok, string? err
+function Controller:set_effort(level, role)
+  if level ~= nil and level ~= 'off' and not vim.tbl_contains(Roles.EFFORTS, level) then
+    return false, 'unknown reasoning effort: ' .. tostring(level) .. ' (' .. table.concat(Roles.EFFORTS, ' | ') .. ' | off | default)'
+  end
+  if role ~= nil and not vim.tbl_contains(Roles.ROLES, role) then
+    return false, 'unknown role: ' .. tostring(role) .. ' (' .. table.concat(Roles.ROLES, ' | ') .. ')'
+  end
+  self.session.roles = self.session.roles or {}
+  if role then
+    self.session.roles[role .. '_effort'] = level
+  else
+    -- a session-wide level replaces earlier per-role session overrides
+    self.session.roles.reasoning_effort = level
+    for _, r in ipairs(Roles.ROLES) do
+      self.session.roles[r .. '_effort'] = nil
+    end
+  end
+  self.events:emit('roles', self:roles())
+  return true
 end
 
 function Controller:set_model(model)
@@ -717,6 +754,7 @@ function Controller:_compact_summary()
         tools = {},
         model = model,
         temperature = self.config.temperature,
+        effort = self:roles().builder_effort,
         role = 'builder',
       })
       async.main()
@@ -1133,6 +1171,7 @@ function Controller:_request(gen)
       tools = tools,
       model = model,
       temperature = self.config.temperature,
+      effort = roles.builder_effort,
       role = 'builder',
       on_delta = function(content)
         if content and content ~= '' then

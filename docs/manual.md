@@ -79,6 +79,7 @@
 | `/compact summary` | 古いやり取りを現在のモデルで 1 回要約し、1 メッセージに置換（1 リクエスト。`<C-c>` で中止可） |
 | `/new` `/sessions` `/model [role]` `/mode [mode]` `/roles [preset]` | 対応する `:Coagent*` コマンドと同じ |
 | `/usage [billing]` `/changes` `/diff` `/review` `/stop` `/processes` | 同上（`/usage billing` は GitHub の請求ページを開く） |
+| `/effort <level\|off\|default> [role]` | 推論の強さをこのセッションだけ変更（`:CoagentEffort` と同じ。[6. モードとモデル](#6-モードとモデル)） |
 | `/rewind` | 過去のプロンプトの直前まで巻き戻す（`:CoagentRewind` と同じ。[4. 変更の確認と巻き戻し](#4-変更の確認と巻き戻し)） |
 | `/format [changed\|file]` | AI が変更したファイルを整形（`:CoagentFormat` と同じ。[4. 変更の確認と巻き戻し](#4-変更の確認と巻き戻し)） |
 | `/clear` | 入力欄をクリア（履歴には残らない） |
@@ -227,6 +228,15 @@ Neovim にフォーカスが無いとき、承認待ち・完了・失敗（`not
   - `auto` は `auto.workspaces` に登録済みでなければ確認ダイアログが出ます。サンドボックスの有無も表示されます
   - モード変更は次のツール実行から有効（実行時にも再判定されます）
 - `:CoagentModel` — tool calling 対応モデルから選択（セッションごとに保持）
+- `/effort` / `:CoagentEffort` — 推論の強さ（reasoning effort）
+  - `/effort high`（全役割）、`/effort low explorer`（役割だけ）、`/effort off`（送らない）、`/effort default`（設定値に戻す）。
+    引数なしなら一覧から選択。セッションと一緒に保存されます
+  - 設定は `reasoning_effort = 'medium'` と `roles.builder_effort` / `explorer_effort` / `advisor_effort`（`'off'` で送らない）。
+    優先順位はセッションの役割別 > セッション全体 > 設定の役割別 > 設定の `reasoning_effort`
+  - winbar のモデル表示に `effort:high`、`gu` / `:CoagentUsage` に役割ごとの設定と実際に送った回数
+  - 上げるほど推論トークン（費用・クォータ）と待ち時間が増えます。モデル `auto` では無視（Copilot Free は実質 `auto` のみ）
+  - モデルが対応しないレベルは、CopilotChat がレベル一覧を持つ版なら最も近いレベルに丸めて通知。400 で拒否されたら
+    effort なしで 1 回再送し、そのモデルには以後送りません（[互換性](compatibility.md#reasoning-effort-の送り方)）
 
 ## 7. セッション
 

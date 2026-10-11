@@ -55,6 +55,10 @@ Check the setup with |:checkhealth| coagent.
 :CoagentMode [mode]      supervised | readonly | auto
 :CoagentModel            Pick a tool-calling capable model (per role when roles are on).
 :CoagentRoles [preset]   Model roles: single (default) | advisor | explorers | full
+:CoagentEffort [level] [role]
+                         Reasoning effort for this session: minimal | low |
+                              medium | high | off | default, optionally for
+                              one role. See |coagent-effort|.
 :CoagentNew              New session.
 :CoagentSessions         Restore a saved session of this project.
 :CoagentLayout [layout]  vertical | float
@@ -84,6 +88,33 @@ total tokens. Rates are yours to fill in; nothing is shown without them. >lua
     },
   }
 <
+
+                                                        *coagent-effort*
+Reasoning effort. Not sent by default. Set it in the config or per session:
+>lua
+  reasoning_effort = 'medium',     -- nil | 'minimal' | 'low' | 'medium' | 'high'
+  roles = {
+    explorer_effort = 'low',       -- per role; 'off' = never send for it
+    advisor_effort = 'high',
+  },
+<
+"/effort high" sets it for every role in this session, "/effort low explorer"
+for one role, "/effort off" stops sending it and "/effort default" goes back
+to the config (:CoagentEffort takes the same arguments; without one it opens
+a picker). Session overrides are saved with the session. Order: session role
+> session > config `roles.<role>_effort` > config `reasoning_effort`.
+
+The status bar shows "effort:high" next to the model and :CoagentUsage lists
+the effort of each role and how often each level was sent.
+
+Higher effort spends more reasoning tokens (cost / quota) and time. The
+"auto" model ignores it (the server picks the model); on Copilot Free, which
+effectively only allows "auto", it has no effect. When CopilotChat lists the
+levels a model advertises (CopilotChat PR #1585), the nearest supported level
+is used, with a notice. A 400 that rejects the parameter is retried once
+without it and the model is not sent an effort again until Neovim restarts
+(never retried on 401/403). Only the request body changes: headers, auth,
+client identity and URLs stay CopilotChat's.
 
 ==============================================================================
 3. PANEL KEYS                                             *coagent-keys*
@@ -154,6 +185,8 @@ Commands go into the input history like prompts.
   /new  /sessions  /model [role]  /mode [mode]  /roles [preset]
   /usage [billing]  /changes  /diff  /review  /stop  /processes
                       Same as the matching :Coagent* command.
+  /effort <level> [role]
+                      Same as :CoagentEffort (|coagent-effort|).
   /rewind             Same as :CoagentRewind (|coagent-rewind|).
   /format [mode]      Same as :CoagentFormat (|coagent-format|).
   /queue [clear]      List the messages queued while the agent works;

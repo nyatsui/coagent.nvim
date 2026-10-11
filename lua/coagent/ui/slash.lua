@@ -89,6 +89,15 @@ M.COMMANDS = {
     end,
   },
   {
+    name = 'effort',
+    args = '<level|off|default> [role]',
+    desc = 'Reasoning effort: minimal | low | medium | high (more tokens), off, default',
+    complete = { 'minimal', 'low', 'medium', 'high', 'off', 'default' },
+    run = function(arg)
+      return app().set_effort(arg)
+    end,
+  },
+  {
     name = 'usage',
     args = '[billing]',
     desc = 'Copilot quota, token usage and context (billing: GitHub billing page)',

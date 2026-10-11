@@ -178,6 +178,7 @@ nvim --clean -u scripts/demo.lua
 | `/new` / `/sessions` | 新規セッション / 保存済みセッション一覧 |
 | `/model [role]` | モデル選択（`builder` / `explorer` / `advisor`） |
 | `/mode [mode]` / `/roles [preset]` | 承認モード / 役割分担の切替 |
+| `/effort <level\|off\|default> [role]` | 推論の強さ（reasoning effort）をこのセッションだけ変更（下記「推論の強さ」） |
 | `/usage [billing]` / `/changes` / `/diff` / `/review` | 利用量（`billing` で GitHub の請求ページ） / 変更一覧 / diff / hunk レビュー |
 | `/rewind` | 過去のプロンプトの直前まで巻き戻す（コード + 会話 / 会話のみ / コードのみ。下記「巻き戻し」） |
 | `/format [changed\|file]` | このセッションで AI が変更したファイルを整形（既定 `changed` = AI が変更した行だけ。下記「AI が編集したファイルの整形」） |
@@ -372,6 +373,7 @@ require('coagent').setup({
 | `:CoagentMode [supervised\|readonly\|auto]` | 承認モード切替 |
 | `:CoagentModel` | モデル選択（tool calling 対応モデルのみ。役割分担中は役割ごと） |
 | `:CoagentRoles [preset]` | モデルの役割分担: `single` / `advisor` / `explorers` / `full` |
+| `:CoagentEffort [level] [role]` | 推論の強さ: `minimal` / `low` / `medium` / `high` / `off` / `default`（`/effort` と同じ） |
 | `:CoagentNew` / `:CoagentSessions` | 新規セッション / 保存済みセッション一覧 |
 | `:CoagentLayout [vertical\|float]` | レイアウト切替 |
 
@@ -433,6 +435,7 @@ require('coagent').setup({
 ```lua
 require('coagent').setup({
   model = nil,            -- nil = CopilotChat の設定値
+  reasoning_effort = nil, -- nil（送らない）| 'minimal' | 'low' | 'medium' | 'high'（「推論の強さ」参照）
   hide_copilotchat_ui = true, -- CopilotChat は裏で使うだけ（ログイン案内でもチャット窓を開かせない）
   usage = {
     show_in_bar = true, refresh_after_task = true, -- 残量を winbar に表示
@@ -539,6 +542,34 @@ opts = {
   fallback_models = { 'auto' },
 }
 ```
+
+## 推論の強さ（reasoning effort）
+
+推論モデルの「考える量」を指定できます。既定は `nil`（送らない = サーバー既定）です。
+
+```lua
+opts = {
+  reasoning_effort = 'medium',  -- 'minimal' | 'low' | 'medium' | 'high'
+  roles = {
+    explorer_effort = 'low',    -- 役割ごとに上書き（'off' = その役割には送らない）
+    advisor_effort = 'high',
+    -- builder_effort = nil,    -- nil = reasoning_effort を使う
+  },
+}
+```
+
+- セッション中だけ変えるには `/effort high`、役割を指定して `/effort low explorer`、送らないなら `/effort off`、
+  設定値に戻すなら `/effort default`（`:CoagentEffort` も同じ。引数なしなら一覧から選択）。セッションと一緒に保存されます
+- 優先順位: セッションの役割別 > セッション全体 > 設定の `roles.<role>_effort` > 設定の `reasoning_effort`
+- winbar のモデル表示に `gpt-5 effort:high` のように表示し、`:CoagentUsage` に役割ごとの設定と、実際に送った effort の回数を表示します
+- **effort を上げると推論トークンが増え、そのぶん費用・クォータを多く消費します**（応答も遅くなります）
+- モデル `auto` では無視されます（サーバーがモデルを選ぶため送りません）。Copilot Free では実質 `auto` しか使えないため、効果はありません
+- 対応レベルはモデルごとに異なります。CopilotChat がモデル一覧（Copilot の `/models` API の
+  `capabilities.supports.reasoning_effort`）からレベルを取得できる版では、そのモデルが対応する最も近いレベルに丸め、通知を出します
+- 未対応のモデルが 400 エラーで拒否した場合は、effort なしで 1 回だけ再送し、このモデルには以後（Neovim を再起動するまで）送りません。
+  401/403 では再送しません
+- 送り方はリクエスト本文の `reasoning_effort`（Chat Completions）/ `reasoning.effort`（Responses API）だけです。
+  認証・ヘッダー・接続先・クライアント識別は CopilotChat のまま変えません（詳細は [docs/compatibility.md](docs/compatibility.md)）
 
 ## コンテキスト長
 

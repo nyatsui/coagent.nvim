@@ -3,6 +3,11 @@ local defaults = {
   -- Model id from CopilotChat (`:CoagentModel` to pick). nil = CopilotChat's configured model.
   model = nil,
   temperature = 0.1,
+  -- Reasoning effort sent with model requests: nil (do not send) | 'minimal' |
+  -- 'low' | 'medium' | 'high'. Higher effort spends more reasoning tokens
+  -- (cost/quota). Ignored for the 'auto' model; models that do not support it
+  -- get the request without it. Per role: roles.<role>_effort. `/effort`.
+  reasoning_effort = nil,
 
   -- Model roles (opt-in). preset: 'single' (default: the selected model does
   -- everything) | 'advisor' | 'explorers' | 'full'. Each role keeps its own
@@ -12,6 +17,10 @@ local defaults = {
     preset = 'single',
     explorer_model = nil,
     advisor_model = nil,
+    -- Per-role reasoning effort (nil = use `reasoning_effort`; 'off' = never send).
+    builder_effort = nil,
+    explorer_effort = nil,
+    advisor_effort = nil,
     explorer = { max_steps = 8, max_concurrent = 2, max_summary_bytes = 6000 },
     advisor = { on_plan = true, on_repeated_failure = true, before_done = true, max_brief_bytes = 16000 },
   },
@@ -245,6 +254,19 @@ function M.setup(opts)
   end
   if opts and opts.auto and opts.auto.protected_globs then
     M.options.auto.protected_globs = opts.auto.protected_globs
+  end
+  local Roles = require('coagent.agent.roles')
+  local function check(path, v)
+    if not Roles.valid_effort(v) then
+      vim.notify(
+        string.format("[coagent] %s = %q is not a reasoning effort (%s | 'off'); it is ignored", path, tostring(v), table.concat(Roles.EFFORTS, ' | ')),
+        vim.log.levels.WARN
+      )
+    end
+  end
+  check('reasoning_effort', M.options.reasoning_effort)
+  for _, role in ipairs(Roles.ROLES) do
+    check('roles.' .. role .. '_effort', (M.options.roles or {})[role .. '_effort'])
   end
   return M.options
 end

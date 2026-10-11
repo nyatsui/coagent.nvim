@@ -660,6 +660,63 @@ function M.set_roles(preset)
   end)
 end
 
+--- Reasoning effort words accepted by :CoagentEffort and /effort.
+M.EFFORT_ARGS = { 'minimal', 'low', 'medium', 'high', 'off', 'default' }
+
+local function effort_summary(r)
+  local parts = {}
+  for _, role in ipairs({ 'builder', 'explorer', 'advisor' }) do
+    if role == 'builder' or r[role] then
+      table.insert(parts, role .. ' ' .. (r[role .. '_effort'] or 'not sent'))
+    end
+  end
+  return table.concat(parts, ', ')
+end
+
+--- Set the reasoning effort for this session: `<level|off|default> [role]`.
+--- `off` never sends it, `default` goes back to the config. No argument: pick.
+---@param arg string?
+function M.set_effort(arg)
+  local c = M.controller()
+  local Roles = require('coagent.agent.roles')
+  local words = vim.split(vim.trim(arg or ''), '%s+', { trimempty = true })
+  local function apply(level, role)
+    local ok, err = c:set_effort(level ~= 'default' and level or nil, role)
+    if not ok then
+      c:notice('error', 'effort: ' .. tostring(err))
+      return false
+    end
+    local r = c:roles()
+    local text = 'Reasoning effort: ' .. effort_summary(r) .. '.'
+    if c:active_model() == 'auto' then
+      text = text .. ' The "auto" model ignores it.'
+    elseif level and level ~= 'off' and level ~= 'default' then
+      text = text .. ' Higher effort uses more reasoning tokens (cost / quota).'
+    end
+    c:notice('info', text)
+    return true
+  end
+  if #words == 0 then
+    vim.ui.select(M.EFFORT_ARGS, {
+      prompt = 'Reasoning effort (current: ' .. effort_summary(c:roles()) .. ')',
+    }, function(level)
+      if level then
+        apply(level)
+      end
+    end)
+    return true
+  end
+  local level, role = words[1], words[2]
+  if vim.tbl_contains(Roles.ROLES, level) and role then
+    level, role = role, level
+  end
+  if not vim.tbl_contains(M.EFFORT_ARGS, level) then
+    c:notice('error', 'effort: unknown level "' .. level .. '" (' .. table.concat(M.EFFORT_ARGS, ' | ') .. ')')
+    return false
+  end
+  return apply(level, role)
+end
+
 function M.changes()
   M.view():changes()
 end
@@ -877,7 +934,7 @@ local function token_lines()
       if #names > 1 then
         for _, name in ipairs(names) do
           local m = totals.models[name]
-          table.insert(lines, string.format('      %s: %d requests, %s tokens', name, m.requests, Usage.k(m.tokens)))
+          table.insert(lines, string.format('      %s: %d requests, %s tokens%s', name, m.requests, Usage.k(m.tokens), Usage.efforts_text(m.efforts, '; effort ')))
         end
       end
     end
@@ -936,9 +993,14 @@ function M.usage(arg)
             table.insert(models, m .. ' x' .. n)
           end
           table.sort(models)
-          table.insert(lines, string.format('    %-9s %3d requests, %dk tokens  (%s)', role, s.requests, math.floor((s.tokens or 0) / 1000), table.concat(models, ', ')))
+          table.insert(lines, string.format('    %-9s %3d requests, %dk tokens  (%s%s)', role, s.requests, math.floor((s.tokens or 0) / 1000), table.concat(models, ', '), Usage.efforts_text(s.efforts, '; effort ')))
         end
       end
+    end
+    if state.controller then
+      table.insert(lines, '')
+      table.insert(lines, '  Reasoning effort   ' .. effort_summary(state.controller:roles()))
+      table.insert(lines, '    higher effort uses more reasoning tokens; ignored with the "auto" model (/effort)')
     end
     local ctx = state.controller and state.controller.session.context
     if ctx and ctx.max then

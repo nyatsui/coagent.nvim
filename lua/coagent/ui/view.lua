@@ -300,8 +300,11 @@ function View:bar()
   if resolved and resolved ~= '' and resolved ~= model_text then
     model_text = model_text .. ic.arrow .. resolved
   end
-  table.insert(segs, { 3, 3, model_text })
   local roles = c:roles()
+  if roles.builder_effort and c:active_model() ~= 'auto' then
+    model_text = model_text .. ' effort:' .. roles.builder_effort
+  end
+  table.insert(segs, { 3, 3, model_text })
   if roles.preset ~= 'single' then
     table.insert(segs, { 3, 2, 'roles:' .. roles.preset })
   end

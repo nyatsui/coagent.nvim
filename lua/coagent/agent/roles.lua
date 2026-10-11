@@ -28,8 +28,49 @@ M.ORDER = { 'single', 'advisor', 'explorers', 'full' }
 ---@field builder_model string
 ---@field explorer_model string
 ---@field advisor_model string
+---@field builder_effort string? reasoning effort sent with the role's requests (nil = not sent)
+---@field explorer_effort string?
+---@field advisor_effort string?
 ---@field explorer_opts table
 ---@field advisor_opts table
+
+--- Reasoning effort levels a user can choose (`reasoning_effort`, `/effort`).
+M.EFFORTS = { 'minimal', 'low', 'medium', 'high' }
+
+M.ROLES = { 'builder', 'explorer', 'advisor' }
+
+---@param v any
+---@return boolean
+function M.valid_effort(v)
+  return v == nil or v == false or v == 'off' or vim.tbl_contains(M.EFFORTS, v)
+end
+
+--- Reasoning effort of one role. First set value wins:
+--- session role override > session override > config `roles.<role>_effort`
+--- > config `reasoning_effort`. 'off' (or false) at any level means "do not send".
+---@param config table
+---@param session table
+---@param role 'builder'|'explorer'|'advisor'
+---@return string?
+function M.effort(config, session, role)
+  local s = session.roles or {}
+  local c = config.roles or {}
+  local key = role .. '_effort'
+  local v = s[key]
+  if v == nil then
+    v = s.reasoning_effort
+  end
+  if v == nil then
+    v = c[key]
+  end
+  if v == nil then
+    v = config.reasoning_effort
+  end
+  if v == 'off' or v == false or not vim.tbl_contains(M.EFFORTS, v) then
+    return nil
+  end
+  return v
+end
 
 --- Effective roles for a controller (session overrides config).
 ---@param config table
@@ -47,6 +88,9 @@ function M.resolve(config, session, builder_model)
     builder_model = builder_model,
     explorer_model = r.explorer_model or builder_model,
     advisor_model = r.advisor_model or builder_model,
+    builder_effort = M.effort(config, session, 'builder'),
+    explorer_effort = M.effort(config, session, 'explorer'),
+    advisor_effort = M.effort(config, session, 'advisor'),
     explorer_opts = vim.tbl_extend('force', { max_steps = 8, max_concurrent = 2, max_summary_bytes = 6000 }, r.explorer or {}),
     advisor_opts = vim.tbl_extend('force', { on_plan = true, on_repeated_failure = true, before_done = true, max_brief_bytes = 16000 }, r.advisor or {}),
   }

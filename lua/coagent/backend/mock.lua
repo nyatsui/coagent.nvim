@@ -7,6 +7,8 @@
 ---   error = 'message',                       -- request fails
 ---   delay_ms = 5,                            -- per chunk
 ---   hang = true,                             -- never answers (until cancelled)
+---   effort = 'low',                          -- effort reported as sent (default: req.effort, never for 'auto')
+---   notices = { 'text' },                    -- adapter notices returned with the result
 --- }
 local async = require('coagent.core.async')
 local util = require('coagent.core.util')
@@ -94,6 +96,7 @@ Mock.ask = async.wrap(function(self, req, cb)
     system_prompt = req.system_prompt,
     model = req.model,
     headless = req.headless,
+    effort = req.effort,
   })
   local step = next_step(self, req.messages, req)
   local finished = false
@@ -153,6 +156,8 @@ Mock.ask = async.wrap(function(self, req, cb)
         tool_calls = tool_calls,
         usage = { total_tokens = step.tokens or (#content + 100), max_tokens = step.max_tokens or 64000 },
         model = step.resolved_model or req.model,
+        effort = step.effort or (req.model ~= 'auto' and req.effort or nil),
+        notices = step.notices,
       })
     end
   end

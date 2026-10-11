@@ -110,6 +110,18 @@ end, {
     return { 'single', 'advisor', 'explorers', 'full' }
   end,
 })
+cmd('CoagentEffort', function(a)
+  agent().set_effort(a.args)
+end, {
+  nargs = '*',
+  desc = 'Reasoning effort for this session: <minimal|low|medium|high|off|default> [builder|explorer|advisor]',
+  complete = function(_, line)
+    if line:gsub('^%S+%s*', ''):match('^%S+%s') then
+      return { 'builder', 'explorer', 'advisor' }
+    end
+    return { 'minimal', 'low', 'medium', 'high', 'off', 'default' }
+  end,
+})
 cmd('CoagentUsage', function(a)
   agent().usage(a.args)
 end, {

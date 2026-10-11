@@ -180,6 +180,27 @@
   `/format` / `:CoagentFormat file` の要約、作業中の拒否、未知のモード
 - 全テスト: 220 件成功
 
+## 追加（推論の強さ・reasoning effort）
+
+- 設定 `reasoning_effort`（nil = 送らない / minimal / low / medium / high）と `roles.builder_effort` / `explorer_effort` /
+  `advisor_effort`（`'off'` で送らない）。解決は `agent/roles.lua`（セッションの役割別 > セッション > 設定の役割別 > 設定）
+- `/effort <level|off|default> [role]` / `:CoagentEffort`（セッションに保存）、winbar のモデル表示に `effort:high`、
+  `:CoagentUsage` に役割ごとの設定と実際に送った effort の回数（役割別・モデル別）
+- 送信はアダプタ（`backend/copilotchat.lua`）だけ:
+  - CopilotChat がモデルごとの `reasoning_efforts` と `<id>:<effort>` 派生を持つ版（upstream PR #1585、未マージ）では派生 ID を使い、
+    サーバーが広告したレベルに丸める（通知あり）
+  - 現行 v4.7.x では `copilot` / `github_models` の `prepare_input` を 1 回だけラップし、coagent が指定したリクエストだけ本文に
+    `reasoning_effort`（Chat Completions）/ `reasoning.effort`（Responses API）を追加。effort は `client:ask` を実行する
+    コルーチンをキーに渡すため、並列の調査担当でも混ざらない。ヘッダー・認証・URL は変更しない
+  - `auto` には送らない。400 で拒否されたら effort なしで 1 回再送し、そのモデルを記録（401/403 は再送しない）
+- 注意: effort を上げると推論トークン（費用・クォータ）が増える。Copilot Free は実質 `auto` のみなので効果なし。
+  実 API での確認は未実施（開発機に Copilot の認証情報なし）
+- テスト `tests/effort_spec.lua`（21 件）: 解決順と `off`・不正値の警告、役割ごとの effort（mock の `req.effort`）、`/effort` と
+  winbar・保存、`:CoagentUsage` 表示と `auto` での非表示、通知の重複排除、偽の provider テーブルでのラップ（Chat / Responses の
+  本文、`auto`・別モデル・派生モデルでは不変、冪等、追加ヘッダー維持、コルーチン間の分離）、upstream 派生の検出と丸め、
+  実 client 経由の送信（ヘッダー・URL 不変）、並列 headless リクエスト、400 の再送と記憶、401/403 で再送しない
+- 全テスト: 241 件成功
+
 ## 残課題
 
 | 課題 | 内容 |
@@ -189,3 +210,4 @@
 | Linux サンドボックス | Docker（Ubuntu 24.04）で全テスト通過、特権コンテナで bwrap の書込み制限を確認。非特権で bwrap が使えない環境は自動検出してサンドボックスなし扱い |
 | トークン推定 | 文字数ベースの概算（CopilotChat の tiktoken はネイティブライブラリが必要なため未使用） |
 | upstream 提案候補 | headless 要求の個別キャンセル、tool 対応を壊さない履歴切詰め、`bash` ツールの終了コード対応 |
+| reasoning effort | CopilotChat PR #1585 がマージされたら `prepare_input` のラップは不要になる（派生モデル経由に自動で切り替わる）。マージ後に実 API で確認 |

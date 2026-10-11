@@ -52,6 +52,7 @@ function Advisor:review(gen, kind, brief)
     tools = {},
     model = model,
     temperature = ctrl.config.temperature,
+    effort = roles.advisor_effort,
   })
   async.main()
   if ctrl.gen ~= gen then
