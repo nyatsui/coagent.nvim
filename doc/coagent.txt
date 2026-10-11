@@ -1,0 +1,79 @@
+*coagent.txt*  Autonomous coding agent on top of CopilotChat.nvim
+
+==============================================================================
+CONTENTS                                              *coagent-contents*
+
+  1. Introduction ............................ |coagent-intro|
+  2. Commands ................................ |coagent-commands|
+  3. Panel keys .............................. |coagent-keys|
+  4. Modes ................................... |coagent-modes|
+  5. Lua API ................................. |coagent-api|
+
+==============================================================================
+1. INTRODUCTION                                          *coagent-intro*
+
+coagent.nvim runs a multi-step coding agent (investigate, edit, run
+checks, fix, report) inside terminal Neovim. Authentication and API access
+are delegated to CopilotChat.nvim v4 (main branch); no Copilot CLI and no
+extra API keys are used. See README.md and docs/manual.md for details.
+
+Requirements: Neovim 0.11+, CopilotChat.nvim v4, plenary.nvim.
+Check the setup with |:checkhealth| coagent.
+
+==============================================================================
+2. COMMANDS                                           *coagent-commands*
+
+:Coagent [task]          Open the panel or send a task. With a range the
+                              selection is attached (#selection).
+:CoagentToggle           Toggle the panel.
+:CoagentStop             Stop now (abort request, kill command, drop
+                              pending approval).
+:CoagentPause            Pause after the current step.
+:CoagentResume           Resume a paused/interrupted/restored task.
+:CoagentApprove[!]       Approve the pending action (! = always).
+:CoagentDeny[!] [reason] Deny (! = deny and stop).
+:CoagentReview           Review the pending edit hunk by hunk.
+:CoagentChanges          List files changed by the agent.
+:CoagentDiff             Diff of all agent changes.
+:CoagentRevert [path|all] Revert agent changes.
+:CoagentOutput           Show the last command output.
+:CoagentMode [mode]      supervised | readonly | auto
+:CoagentModel            Pick a tool-calling capable model.
+:CoagentNew              New session.
+:CoagentSessions         Restore a saved session of this project.
+:CoagentLayout [layout]  vertical | float
+
+==============================================================================
+3. PANEL KEYS                                             *coagent-keys*
+
+  a  approve          A  approve always     d  deny (with reason)
+  D  deny and stop    r  review hunks       gd diff
+  <Tab>/za details    <CR> open details     gf jump to change
+  gc changes          ]] [[ next/prev item   <C-c> stop
+  p  pause            R  resume             gs sessions
+  gn new session      gm mode               i  input
+  q  close            g? help
+
+Input: <CR> (normal) / <C-s> (insert) send, <C-c> stop, <C-k> panel,
+<C-p>/<C-n> history. All keys are configurable via `keymaps`.
+
+==============================================================================
+4. MODES                                                 *coagent-modes*
+
+readonly    Only read/search tools are offered and executed.
+supervised  Reads run automatically; every edit and command asks first.
+auto        Only for workspaces in `auto.workspaces` or explicitly enabled.
+            Workspace edits and allowlisted simple commands run without
+            approval (sandboxed when sandbox-exec/bwrap exists). Dangerous
+            commands always ask.
+
+==============================================================================
+5. LUA API                                                 *coagent-api*
+
+  require('coagent').setup(opts)
+  require('coagent').ask(prompt, { range = { l1, l2 } })
+  require('coagent').open() / close() / toggle() / stop()
+  require('coagent').controller()   -- events: controller.events:on(...)
+  require('coagent').register_tool(tool)
+
+ vim:tw=78:ts=8:ft=help:norl:

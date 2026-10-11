@@ -1,0 +1,92 @@
+--- Icon sets. 'unicode' uses only BMP symbols (no emoji); 'ascii' works on
+--- any terminal; 'nerd' needs a Nerd Font.
+local sets = {
+  unicode = {
+    done = '✓',
+    failed = '✗',
+    running = '▶',
+    pending = '○',
+    awaiting = '?',
+    denied = '⊘',
+    cancelled = '⊘',
+    interrupted = '!',
+    task = '◉',
+    user = '❯',
+    assistant = '●',
+    collapsed = '▸',
+    expanded = '▾',
+    info = 'i',
+    warn = '!',
+    error = '✗',
+    paused = '‖',
+    sep = '│',
+    dot = '·',
+    bar = '│',
+    arrow = '→',
+    ellipsis = '…',
+    newline = '⏎',
+    spinner = { '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏' },
+  },
+  ascii = {
+    done = '+',
+    failed = 'x',
+    running = '>',
+    pending = 'o',
+    awaiting = '?',
+    denied = '-',
+    cancelled = '-',
+    interrupted = '!',
+    task = '*',
+    user = '>',
+    assistant = '*',
+    collapsed = '+',
+    expanded = '-',
+    info = 'i',
+    warn = '!',
+    error = 'x',
+    paused = '=',
+    sep = '|',
+    dot = '-',
+    bar = '|',
+    arrow = '->',
+    ellipsis = '...',
+    newline = '\\n',
+    spinner = { '-', '\\', '|', '/' },
+  },
+  nerd = {
+    done = '\u{f00c}',
+    failed = '\u{f00d}',
+    running = '\u{f04b}',
+    pending = '\u{f10c}',
+    awaiting = '\u{f059}',
+    denied = '\u{f05e}',
+    cancelled = '\u{f05e}',
+    interrupted = '\u{f071}',
+    task = '\u{f0ae}',
+    user = '\u{f007}',
+    assistant = '\u{f4be}',
+    collapsed = '\u{f0da}',
+    expanded = '\u{f0d7}',
+    info = '\u{f05a}',
+    warn = '\u{f071}',
+    error = '\u{f057}',
+    paused = '\u{f04c}',
+    sep = '│',
+    dot = '·',
+    bar = '│',
+    arrow = '→',
+    ellipsis = '…',
+    newline = '⏎',
+    spinner = { '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏' },
+  },
+}
+
+local M = {}
+
+---@param name string?
+---@return table
+function M.get(name)
+  return sets[name or 'unicode'] or sets.unicode
+end
+
+return M
