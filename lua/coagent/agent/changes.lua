@@ -8,6 +8,12 @@
 ---
 --- Reverting refuses (unless forced) when the file on disk no longer matches
 --- `current`, i.e. the user edited it after the agent did.
+---
+--- Checkpoints (/rewind): `mark()` is called at every user prompt and returns
+--- the write sequence number at that point. The first agent write to a file
+--- after a mark saves the file's content right before that write (a
+--- `version`), so the file can later be restored to its state at the prompt
+--- without touching edits the user made before the agent wrote again.
 local util = require('coagent.core.util')
 local diff = require('coagent.core.diff')
 
@@ -18,19 +24,29 @@ local diff = require('coagent.core.diff')
 ---@field current string?
 ---@field ops integer number of agent writes
 ---@field reverted boolean?
+---@field versions {seq:integer, before:string?}[] content before the first write after each mark
 
 ---@class Coagent.Changes
 ---@field files table<string, Coagent.Change> keyed by abs path
 ---@field order string[]
+---@field seq integer agent writes so far (never decreases)
+---@field marked integer `seq` at the latest mark (user prompt)
 local Changes = {}
 Changes.__index = Changes
 
 ---@param data table? serialized state
 function Changes.new(data)
-  local self = setmetatable({ files = {}, order = {} }, Changes)
+  local self = setmetatable({ files = {}, order = {}, seq = 0, marked = 0 }, Changes)
   if data then
+    self.seq = data.seq or 0
+    self.marked = data.marked or 0
     for _, f in ipairs(data.files or {}) do
+      local versions = {}
+      for _, v in ipairs(f.versions or {}) do
+        table.insert(versions, { seq = v.seq, before = v.before_exists and v.before or nil })
+      end
       self.files[f.abs] = {
+        versions = versions,
         rel = f.rel,
         abs = f.abs,
         baseline = f.baseline_exists and f.baseline or nil,
@@ -45,10 +61,15 @@ function Changes.new(data)
 end
 
 function Changes:serialize()
-  local out = { files = {} }
+  local out = { files = {}, seq = self.seq, marked = self.marked }
   for _, abs in ipairs(self.order) do
     local f = self.files[abs]
+    local versions = {}
+    for _, v in ipairs(f.versions or {}) do
+      table.insert(versions, { seq = v.seq, before = v.before, before_exists = v.before ~= nil })
+    end
     table.insert(out.files, {
+      versions = versions,
       rel = f.rel,
       abs = f.abs,
       baseline = f.baseline,
@@ -70,9 +91,15 @@ end
 function Changes:record(abs, rel, before, after)
   local f = self.files[abs]
   if not f then
-    f = { abs = abs, rel = rel, baseline = before, ops = 0 }
+    f = { abs = abs, rel = rel, baseline = before, ops = 0, versions = {} }
     self.files[abs] = f
     table.insert(self.order, abs)
+  end
+  self.seq = self.seq + 1
+  f.versions = f.versions or {}
+  local last = f.versions[#f.versions]
+  if not last or last.seq <= self.marked then
+    table.insert(f.versions, { seq = self.seq, before = before })
   end
   f.current = after
   f.ops = f.ops + 1
@@ -223,6 +250,97 @@ function Changes:revert_hunk(abs, index)
   end
   f.current = content
   return true
+end
+
+------------------------------------------------------------------------------
+-- Checkpoints
+------------------------------------------------------------------------------
+
+--- Start a new checkpoint (a user prompt).
+---@return integer seq writes before this point
+function Changes:mark()
+  self.marked = self.seq
+  return self.seq
+end
+
+---@class Coagent.RewindFile
+---@field abs string
+---@field rel string
+---@field target string? content at the checkpoint (nil = did not exist)
+---@field conflict boolean file changed outside the agent since its last write
+---@field unsaved boolean an open buffer has unsaved changes
+
+--- Files the agent wrote after checkpoint `seq` and their content at the
+--- checkpoint (right before the agent's first write after it, so user edits
+--- made before that write are kept).
+---@param seq integer
+---@return Coagent.RewindFile[]
+function Changes:rewind_plan(seq)
+  local out = {}
+  for _, abs in ipairs(self.order) do
+    local f = self.files[abs]
+    for _, v in ipairs(f.versions or {}) do
+      if v.seq > seq then
+        local buf = util.find_buf(abs)
+        table.insert(out, {
+          abs = abs,
+          rel = f.rel,
+          target = v.before,
+          conflict = disk(abs) ~= f.current,
+          unsaved = buf ~= nil and vim.bo[buf].modified,
+        })
+        break
+      end
+    end
+  end
+  return out
+end
+
+--- Restore the files the agent wrote after checkpoint `seq` (see rewind_plan).
+--- Files changed outside the agent since its last write are skipped unless
+--- `opts.force`; files with unsaved buffers are always skipped.
+---@param seq integer
+---@param opts {force:boolean?, skip:table<string,boolean>?}?
+---@return string[] restored rel paths, table<string,string> errors keyed by rel path
+function Changes:rewind(seq, opts)
+  opts = opts or {}
+  local restored, errors = {}, {}
+  for _, p in ipairs(self:rewind_plan(seq)) do
+    local f = self.files[p.abs]
+    if opts.skip and opts.skip[p.abs] then
+      errors[p.rel] = 'skipped (edited outside the agent)'
+    elseif p.conflict and not opts.force then
+      errors[p.rel] = 'file was modified after the agent changed it'
+    else
+      local ok, err = true, nil
+      if disk(p.abs) ~= p.target then
+        ok, err = restore(p.abs, p.target)
+      end
+      if not ok then
+        errors[p.rel] = err
+      else
+        table.insert(restored, p.rel)
+        local keep = {}
+        for _, v in ipairs(f.versions) do
+          if v.seq <= seq then
+            table.insert(keep, v)
+          end
+        end
+        if #keep == 0 then
+          -- first touched after the checkpoint: forget it entirely
+          self.files[p.abs] = nil
+          self.order = vim.tbl_filter(function(a)
+            return a ~= p.abs
+          end, self.order)
+        else
+          f.versions = keep
+          f.current = p.target
+          f.reverted = p.target == f.baseline
+        end
+      end
+    end
+  end
+  return restored, errors
 end
 
 --- Revert everything (newest first). Returns per-file errors.

@@ -107,6 +107,16 @@ function View:attach(c)
   on('context', function()
     self:refresh_bar()
   end)
+  on('rewound', function(e)
+    self.panel:reset(e.items)
+    self:refresh_bar()
+    if e.text then
+      -- after the input has cleared a submitted "/rewind"
+      vim.schedule(function()
+        self.input:set_text(e.text)
+      end)
+    end
+  end)
   on('approval_request', function(item)
     upd(item)
     if not self:visible() then

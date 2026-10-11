@@ -67,7 +67,7 @@ I'll find the `add` implementation and its tests.
   'nyatsui/coagent.nvim',
   main = 'coagent',
   dependencies = { 'CopilotC-Nvim/CopilotChat.nvim' },
-  cmd = { 'Coagent', 'CoagentToggle', 'CoagentStop', 'CoagentSessions', 'CoagentMode', 'CoagentModel', 'CoagentChanges', 'CoagentResume', 'CoagentUsage', 'CoagentProcesses' },
+  cmd = { 'Coagent', 'CoagentToggle', 'CoagentStop', 'CoagentSessions', 'CoagentMode', 'CoagentModel', 'CoagentChanges', 'CoagentRewind', 'CoagentResume', 'CoagentUsage', 'CoagentProcesses' },
   keys = {
     { '<leader>aa', '<cmd>CoagentToggle<cr>', desc = 'Coagent' },
     { '<leader>aa', ':Coagent<cr>', mode = 'v', desc = 'Coagent (selection)' },
@@ -175,6 +175,7 @@ nvim --clean -u scripts/demo.lua
 | `/model [role]` | モデル選択（`builder` / `explorer` / `advisor`） |
 | `/mode [mode]` / `/roles [preset]` | 承認モード / 役割分担の切替 |
 | `/usage [billing]` / `/changes` / `/diff` / `/review` | 利用量（`billing` で GitHub の請求ページ） / 変更一覧 / diff / hunk レビュー |
+| `/rewind` | 過去のプロンプトの直前まで巻き戻す（コード + 会話 / 会話のみ / コードのみ。下記「巻き戻し」） |
 | `/stop` / `/processes` | 停止 / バックグラウンドプロセス |
 | `/clear` / `/help` | 入力欄をクリア / コマンド一覧 |
 
@@ -182,6 +183,25 @@ nvim --clean -u scripts/demo.lua
 - `/` 自体を送りたいときは `//` で始めます（`//compact とは` → `/compact とは` を送信）。
   `/etc/hosts が…` のように先頭語がコマンド名の形でない場合はそのまま送信されます
 - `:Coagent /compact` のようにコマンドからも使えます
+
+### 巻き戻し（/rewind）
+
+プロンプトを送るたびにチェックポイント（その時点の会話の長さ・タイムライン・エージェントの変更状態）を記録し、
+セッションと一緒に保存します。`/rewind` または `:CoagentRewind` で過去のプロンプトを選び、巻き戻す範囲を選びます。
+
+| 選択肢 | 動作 |
+|---|---|
+| コード + 会話 | そのプロンプト以降の会話を削除し、以降にエージェントが変更したファイルをそのプロンプト時点の内容に戻す |
+| 会話のみ | 会話だけ削除。ファイルはそのまま |
+| コードのみ | ファイルだけ戻し、会話は残す（次のプロンプトに「ファイルが巻き戻された、読み直すこと」という注記を付けてモデルに伝える） |
+
+- 会話を巻き戻すと、そのプロンプトの文面が入力欄に戻ります（編集して送り直せます）。
+  `/compact` の要約・圧縮境界が切った位置より後を指していればリセットされます
+- 戻すのは**そのプロンプト以降にエージェントが書き込んだファイルだけ**です。各ファイルは「そのプロンプト以降でエージェントが
+  最初に書き込む直前の内容」に戻るので、その間にユーザーが加えた編集は残ります
+- エージェントの最後の書込み以降にエージェント外で変更されたファイルがあれば、`:CoagentRevert` と同様に確認します
+  （そのファイルを飛ばして自分の編集を残す / 編集を破棄して戻す / 中止）
+- 対象ファイルに未保存のバッファがあれば何も変更せずに中止します。エージェントの作業中は実行できません（`<C-c>` で停止してから）
 
 ### プロンプトテンプレート
 
@@ -252,6 +272,7 @@ require('coagent').setup({
 | `:CoagentReview` | 承認待ちの編集を hunk 単位でレビュー |
 | `:CoagentChanges` / `:CoagentDiff` | 変更一覧 / セッション全体の diff |
 | `:CoagentRevert [path\|all]` | エージェントの変更を巻き戻し |
+| `:CoagentRewind` | 過去のプロンプトの直前までコード・会話を巻き戻す（`/rewind` と同じ） |
 | `:CoagentOutput` | 直近のコマンド出力を下部パネルに表示 |
 | `:CoagentProcesses` | エージェントが起動したバックグラウンドプロセスの出力表示・停止 |
 | `:CoagentUsage [billing]` | Copilot の利用量・残量（Premium requests / Chat / Completions とリセット日）、タスク・セッションのリクエスト数とトークン数。`billing` で GitHub の請求ページをブラウザで開く |
@@ -303,7 +324,7 @@ require('coagent').setup({
 - ワークスペース外・`.git/` 内・シンボリックリンク経由の範囲外への書込みは拒否します
 - 未保存の変更があるバッファのファイルは編集しません（競合として通知）。承認待ちの間にディスク上で変更された場合も中止します
 - エージェントが変更したファイルは、作業前の内容（既存の未コミット変更を含む）を基準に巻き戻せます。
-  エージェントの後にユーザーが編集したファイルは確認なしには巻き戻しません
+  エージェントの後にユーザーが編集したファイルは確認なしには巻き戻しません。`/rewind` でプロンプト単位にも戻せます
 - `AGENTS.md` などリポジトリ内の文書は「低優先度の参考情報」としてモデルに渡し、権限やルールを上書きできないことを明示しています
 - トークンらしき文字列は UI・保存履歴・モデルへのツール結果でマスクします
 - 外部 URL を取得するツールは提供していません（CopilotChat の `url` 関数は使いません）

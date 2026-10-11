@@ -184,8 +184,9 @@ function Controller:notice(level, text)
   return self:_add({ type = 'notice', level = level, text = util.redact(text) })
 end
 
-function Controller:save()
-  if self.store and self.config.session.persist and #self.session.messages > 0 then
+---@param force boolean? save even an empty conversation (after /rewind)
+function Controller:save(force)
+  if self.store and self.config.session.persist and (force or #self.session.messages > 0) then
     self.session:touch()
     local ok, err = self.store:save(self.session, { save_tool_output = self.config.session.save_tool_output })
     if not ok then
@@ -200,9 +201,10 @@ end
 
 --- Start a new task (or a follow-up in the same session).
 ---@param text string
----@param opts {source:table?, selection:table?, readonly:boolean?}?
+---@param opts {source:table?, selection:table?, readonly:boolean?, input:string?}?
 ---  readonly: restrict this task to read/search tools (prompt templates);
 ---  it can only lower the mode, never raise it.
+---  input: the text as typed (e.g. "/fix x"), put back into the input by /rewind.
 ---@return boolean ok, string? err
 function Controller:submit(text, opts)
   opts = opts or {}
@@ -227,6 +229,9 @@ function Controller:submit(text, opts)
     self.session.title = util.ellipsize((text:gsub('\n.*', '')), 80)
   end
   self.permissions:set_task_readonly(opts.readonly)
+  self.session:checkpoint(opts.input or text)
+  local note = self.session.rewind_note
+  self.session.rewind_note = nil
   self:_add({ type = 'user', text = text })
   if opts.readonly and self.permissions.mode ~= 'readonly' then
     self:notice('info', 'Read-only for this task (' .. (opts.template or 'template') .. '): only read and search tools.')
@@ -246,6 +251,9 @@ function Controller:submit(text, opts)
       self:notice('warn', e)
     end
     local content = clean ~= '' and clean or text
+    if note then
+      content = note .. '\n\n' .. content
+    end
     if #atts > 0 then
       content = content .. '\n\n' .. table.concat(atts, '\n\n')
       self.session.items[#self.session.items].attachments = #atts
@@ -364,6 +372,108 @@ end
 ---@return table? pending {item, prepared}
 function Controller:pending()
   return self.pending_approval
+end
+
+------------------------------------------------------------------------------
+-- Checkpoints (/rewind)
+------------------------------------------------------------------------------
+
+Controller.REWIND_NOTE = '[Note: the user rewound the workspace files you changed after an earlier prompt to their state at that prompt; the conversation above was kept. Files may not contain your later edits: re-read them before editing.]'
+
+--- Past prompts, newest first.
+---@return Coagent.Checkpoint[]
+function Controller:checkpoints()
+  return vim.fn.reverse(vim.deepcopy(self.session.checkpoints))
+end
+
+--- Rewind to right before the prompt of checkpoint `id`.
+---   'all'           code + conversation
+---   'conversation'  drop the prompt and everything after it; files untouched
+---   'code'          restore the files the agent wrote after the prompt
+--- Code: only files the agent wrote after the checkpoint are restored, each to
+--- its content right before the agent's first write after it. A file changed
+--- outside the agent since the agent's last write is a conflict: without
+--- `force` or `keep_edits` nothing happens and `info.conflicts` lists them;
+--- `keep_edits` skips those files, `force` discards the outside edits.
+--- Unsaved buffers of affected files refuse the whole rewind.
+---@param id integer
+---@param mode 'all'|'conversation'|'code'
+---@param opts {force:boolean?, keep_edits:boolean?}?
+---@return boolean ok, string? err, table? info {text, restored, skipped, conflicts}
+function Controller:rewind(id, mode, opts)
+  opts = opts or {}
+  if self:busy() then
+    return false, 'the agent is busy; stop it first (<C-c>)'
+  end
+  if mode ~= 'all' and mode ~= 'conversation' and mode ~= 'code' then
+    return false, 'unknown rewind mode: ' .. tostring(mode)
+  end
+  local cp
+  for _, c in ipairs(self.session.checkpoints) do
+    if c.id == id then
+      cp = c
+    end
+  end
+  if not cp then
+    return false, 'no such checkpoint: ' .. tostring(id)
+  end
+  local code = mode ~= 'conversation'
+  local conv = mode ~= 'code'
+  if code then
+    local unsaved, conflicts = {}, {}
+    for _, p in ipairs(self.session.changes:rewind_plan(cp.changes)) do
+      if p.unsaved then
+        table.insert(unsaved, p.rel)
+      end
+      if p.conflict then
+        table.insert(conflicts, p.rel)
+      end
+    end
+    if #unsaved > 0 then
+      return false, 'unsaved changes in ' .. table.concat(unsaved, ', ') .. '; save or discard them first (nothing was rewound)'
+    end
+    if #conflicts > 0 and not (opts.force or opts.keep_edits) then
+      return false, 'changed outside the agent since its last write: ' .. table.concat(conflicts, ', '), { conflicts = conflicts }
+    end
+  end
+  if self.machine.current == S.PAUSED then
+    -- abandon the paused task (as a new prompt would)
+    self:stop('rewind')
+  end
+  local info = { text = cp.text, restored = {}, skipped = {} }
+  if code then
+    local restored, errors = self.session.changes:rewind(cp.changes, { force = opts.force })
+    info.restored = restored
+    for rel, err in pairs(errors) do
+      table.insert(info.skipped, rel .. ' (' .. err .. ')')
+    end
+    table.sort(info.skipped)
+  end
+  if conv then
+    self.session:truncate(cp)
+    if mode == 'all' then
+      self.session.rewind_note = nil
+    end
+  elseif #info.restored > 0 then
+    self.session.rewind_note = Controller.REWIND_NOTE
+  end
+  local what = ({ all = 'code and conversation', conversation = 'conversation', code = 'code' })[mode]
+  local msg = string.format('Rewound %s to before: %s', what, util.ellipsize((cp.text:gsub('\n.*', '')), 60))
+  if code then
+    msg = msg .. string.format('\nFiles restored: %s', #info.restored > 0 and table.concat(info.restored, ', ') or 'none')
+    if #info.skipped > 0 then
+      msg = msg .. '\nNot restored: ' .. table.concat(info.skipped, ', ')
+    end
+  end
+  self.events:emit('rewound', { mode = mode, text = conv and cp.text or nil, items = self.session.items })
+  self:notice(#info.skipped > 0 and 'warn' or 'info', msg)
+  if self.session.context then
+    local cinfo = self:_compact_view(self.session.compact_watermark)
+    self.session.context.estimate, self.session.context.reported = cinfo.tokens, nil
+    self.events:emit('context', self.session.context)
+  end
+  self:save(true)
+  return true, nil, info
 end
 
 ------------------------------------------------------------------------------

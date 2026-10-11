@@ -253,6 +253,7 @@ end
 --- return `{history = false}` to stay out of the input history.
 function actions.submit(text)
   local slash = require('coagent.ui.slash')
+  local orig = text
   local p = slash.parse(text)
   if p.kind == 'text' then
     p = slash.parse_template_after_refs(text) or p
@@ -265,7 +266,7 @@ function actions.submit(text)
   c.source = source()
   local sel = state.selection
   state.selection = nil
-  local ok, err = c:submit(text, { source = c.source, selection = sel })
+  local ok, err = c:submit(text, { source = c.source, selection = sel, input = orig })
   if not ok then
     notify(err, vim.log.levels.WARN)
   end
@@ -291,7 +292,8 @@ function M.run_template(name, text)
   local sel = state.selection
   state.selection = nil
   local prompt = Templates.expand(tpl, text, { selection = sel ~= nil })
-  local ok, err = c:submit(prompt, { source = c.source, selection = sel, readonly = tpl.mode == 'readonly', template = '/' .. tpl.key })
+  local input = '/' .. tpl.key .. ((text and vim.trim(text) ~= '') and (' ' .. vim.trim(text)) or '')
+  local ok, err = c:submit(prompt, { source = c.source, selection = sel, readonly = tpl.mode == 'readonly', template = '/' .. tpl.key, input = input })
   if not ok then
     notify(err, vim.log.levels.WARN)
   end
@@ -652,6 +654,74 @@ function M.revert(path)
   else
     notify('reverted ' .. info.rel)
   end
+end
+
+--- Rewind checkpoint `id` with `mode` ('all' | 'conversation' | 'code').
+--- Files edited outside the agent since its last write are a conflict: ask
+--- whether to keep those edits (skip the files) or discard them.
+---@param id integer
+---@param mode string
+---@return boolean ok
+function M.rewind_to(id, mode)
+  local c = M.controller()
+  local ok, err, info = c:rewind(id, mode)
+  if not ok and info and info.conflicts then
+    local msg = 'Changed outside the agent since its last write:\n  ' .. table.concat(info.conflicts, '\n  ') .. '\nRewind those files too (discarding the edits)?'
+    local choice = vim.fn.confirm(msg, '&Keep my edits (skip these files)\n&Discard my edits\n&Cancel', 1)
+    if choice == 1 then
+      ok, err = c:rewind(id, mode, { keep_edits = true })
+    elseif choice == 2 then
+      ok, err = c:rewind(id, mode, { force = true })
+    else
+      return false
+    end
+  end
+  if not ok then
+    notify('rewind: ' .. tostring(err), vim.log.levels.WARN)
+  end
+  return ok
+end
+
+--- `/rewind`, `:CoagentRewind`: pick a past prompt, then what to rewind.
+function M.rewind()
+  local c = M.controller()
+  if c:busy() then
+    notify('rewind: the agent is busy; stop it first (<C-c>)', vim.log.levels.WARN)
+    return false
+  end
+  local list = c:checkpoints()
+  if #list == 0 then
+    notify('rewind: no prompts in this session yet')
+    return false
+  end
+  vim.ui.select(list, {
+    prompt = 'Rewind to before which prompt?',
+    format_item = function(cp)
+      return string.format('#%d  %s  %s', cp.id, os.date('%m-%d %H:%M', cp.created_at), util.ellipsize((cp.text:gsub('\n.*', '')), 70))
+    end,
+  }, function(cp)
+    if not cp then
+      return
+    end
+    local files = #c.session.changes:rewind_plan(cp.changes)
+    local nfiles = string.format('%d file%s changed after it', files, files == 1 and '' or 's')
+    local modes = {
+      { mode = 'all', label = 'Code and conversation (' .. nfiles .. ')' },
+      { mode = 'conversation', label = 'Conversation only (files stay as they are)' },
+      { mode = 'code', label = 'Code only (keep the conversation; ' .. nfiles .. ')' },
+    }
+    vim.ui.select(modes, {
+      prompt = 'Rewind #' .. cp.id,
+      format_item = function(m)
+        return m.label
+      end,
+    }, function(m)
+      if m then
+        M.rewind_to(cp.id, m.mode)
+      end
+    end)
+  end)
+  return true
 end
 
 function M.output()

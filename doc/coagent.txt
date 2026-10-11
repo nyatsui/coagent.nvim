@@ -7,6 +7,7 @@ CONTENTS                                              *coagent-contents*
   2. Commands ................................ |coagent-commands|
   3. Panel keys .............................. |coagent-keys|
   4. Slash commands .......................... |coagent-slash|
+     Rewind .................................. |coagent-rewind|
   5. Modes ................................... |coagent-modes|
   6. Lua API ................................. |coagent-api|
 
@@ -42,6 +43,8 @@ Check the setup with |:checkhealth| coagent.
 :CoagentChanges          List files changed by the agent.
 :CoagentDiff             Diff of all agent changes.
 :CoagentRevert [path|all] Revert agent changes.
+:CoagentRewind           Rewind code and/or conversation to before a past
+                              prompt. See |coagent-rewind|.
 :CoagentOutput           Show the last command output.
 :CoagentMode [mode]      supervised | readonly | auto
 :CoagentModel            Pick a tool-calling capable model (per role when roles are on).
@@ -144,6 +147,7 @@ Commands go into the input history like prompts.
   /new  /sessions  /model [role]  /mode [mode]  /roles [preset]
   /usage [billing]  /changes  /diff  /review  /stop  /processes
                       Same as the matching :Coagent* command.
+  /rewind             Same as :CoagentRewind (|coagent-rewind|).
   /clear              Clear the input.
   /help               List the commands in the timeline.
 
@@ -154,6 +158,28 @@ command name (e.g. "/etc/hosts is wrong") is sent as a normal prompt.
 /compact is refused while the agent is working. The session history itself
 is not changed; only what later requests send. Because the start of the
 request changes, the next request is a one-time prompt-cache miss.
+
+                                                        *coagent-rewind*
+Every prompt records a checkpoint (conversation length, timeline position
+and the change tracker's state), saved with the session. /rewind and
+:CoagentRewind pick a past prompt, then what to rewind:
+
+  Code and conversation  Drop the prompt and everything after it, and
+                         restore the files the agent wrote after it.
+  Conversation only      Drop the conversation; files stay as they are.
+  Code only              Restore the files; keep the conversation (the next
+                         prompt tells the model the files were rewound).
+
+Rewinding the conversation puts the prompt text back into the input. A
+`/compact` summary or watermark that reaches past the cut is reset.
+
+Only files the agent wrote after the prompt are touched. Each goes back to
+its content right before the agent's first write after the prompt, so edits
+you made before that write are kept. A file changed outside the agent since
+its last write is a conflict and you are asked, as with :CoagentRevert:
+keep your edits (skip the file), discard them, or cancel. If an affected
+file has an unsaved buffer nothing is rewound. Rewinding is refused while
+the agent is working.
 
                                                      *coagent-templates*
 Prompt templates run as /name [text] (or :CoagentPrompt name [text]). The

@@ -23,6 +23,15 @@ local M = {}
 ---@field status string last agent state
 ---@field next_item integer
 ---@field usage_totals Coagent.UsageAcc? requests/tokens over the session's lifetime
+---@field checkpoints Coagent.Checkpoint[] one per user prompt (/rewind)
+---@class Coagent.Checkpoint
+---@field id integer
+---@field text string the prompt as typed (put back into the input on rewind)
+---@field messages integer #session.messages before the prompt
+---@field items integer #session.items before the prompt
+---@field changes integer change-tracker write sequence at the prompt
+---@field created_at integer
+
 local Session = {}
 Session.__index = Session
 M.Session = Session
@@ -42,6 +51,7 @@ function M.new(opts)
     messages = {},
     items = {},
     changes = Changes.new(),
+    checkpoints = {},
     status = 'IDLE',
     next_item = 0,
   }, Session)
@@ -66,6 +76,49 @@ function Session:get_item(id)
       return self.items[i]
     end
   end
+end
+
+--- Record a checkpoint right before a user prompt is added.
+---@param text string
+---@return Coagent.Checkpoint
+function Session:checkpoint(text)
+  local last = self.checkpoints[#self.checkpoints]
+  local cp = {
+    id = (last and last.id or 0) + 1,
+    text = text,
+    messages = #self.messages,
+    items = #self.items,
+    changes = self.changes:mark(),
+    created_at = os.time(),
+  }
+  table.insert(self.checkpoints, cp)
+  return cp
+end
+
+--- Drop the conversation from checkpoint `cp` on (its prompt included).
+--- A `/compact` summary or watermark that reaches past the cut is reset.
+---@param cp Coagent.Checkpoint
+function Session:truncate(cp)
+  for i = #self.messages, cp.messages + 1, -1 do
+    self.messages[i] = nil
+  end
+  for i = #self.items, cp.items + 1, -1 do
+    self.items[i] = nil
+  end
+  local n = #self.messages
+  if self.compact_summary and self.compact_summary.upto > n then
+    self.compact_summary = nil
+    self.compact_watermark = nil
+  end
+  if self.compact_watermark then
+    local sent = require('coagent.agent.context').with_summary(self.messages, self.compact_summary)
+    if self.compact_watermark > #sent then
+      self.compact_watermark = nil
+    end
+  end
+  self.checkpoints = vim.tbl_filter(function(c)
+    return c.id < cp.id
+  end, self.checkpoints)
 end
 
 function Session:touch()
@@ -179,6 +232,10 @@ function Session:serialize(opts)
     roles = self.roles,
     role_stats = self.role_stats,
     usage_totals = self.usage_totals,
+    rewind_note = self.rewind_note,
+    checkpoints = vim.tbl_map(function(c)
+      return vim.tbl_extend('force', c, { text = clean(c.text) })
+    end, self.checkpoints),
     messages = messages,
     items = items,
     changes = self.changes:serialize(),
@@ -202,6 +259,8 @@ function M.deserialize(data)
   s.roles = data.roles
   s.role_stats = data.role_stats
   s.usage_totals = data.usage_totals
+  s.checkpoints = data.checkpoints or {}
+  s.rewind_note = data.rewind_note
   s.changes = Changes.new(data.changes)
   return s
 end

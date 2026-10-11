@@ -112,6 +112,13 @@ M.COMMANDS = {
     end,
   },
   {
+    name = 'rewind',
+    desc = 'Rewind code and/or conversation to before a past prompt',
+    run = function()
+      app().rewind()
+    end,
+  },
+  {
     name = 'review',
     desc = 'Review the pending edit hunk by hunk',
     run = function()
