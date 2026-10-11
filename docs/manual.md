@@ -232,7 +232,7 @@ Skipped:
 `write_file` / `edit_file` が成功するたびに整形し、ツール結果に
 「auto-formatted (N lines changed); re-read before further edits」と付けてモデルに読み直しを促します。
 整形に追加の承認は求めません（編集は承認済みで、整形はローカルの決定的な処理のため）。
-conform.nvim と ruff の設定例は README の「AI が編集したファイルの整形」を参照してください。
+conform.nvim と ruff の設定例は README_ja.md の「AI が編集したファイルの整形」を参照してください。
 
 ## 5. 停止・一時停止・再開
 

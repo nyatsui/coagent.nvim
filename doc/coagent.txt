@@ -22,7 +22,8 @@ CONTENTS                                              *coagent-contents*
 coagent.nvim runs a multi-step coding agent (investigate, edit, run
 checks, fix, report) inside terminal Neovim. Authentication and API access
 are delegated to CopilotChat.nvim v4 (main branch); no Copilot CLI and no
-extra API keys are used. See README.md and docs/manual.md for details.
+extra API keys are used. See README.md (English), README_ja.md (Japanese)
+and docs/manual.md for details.
 
 Requirements: Neovim 0.11+, CopilotChat.nvim v4, plenary.nvim.
 Check the setup with |:checkhealth| coagent.
