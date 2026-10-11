@@ -647,10 +647,11 @@ function M.select_model(role)
       end, models)
       local current = ({ builder = roles.builder_model, explorer = roles.explorer_model, advisor = roles.advisor_model })[role]
       local fmt = c.backend.format_multiplier or require('coagent.backend.copilotchat').format_multiplier
+      local label_opts = { multiplier = config.options.ui.show_multiplier and fmt or nil, rates = config.options.usage.rates }
       vim.ui.select(usable, {
-        prompt = (role == 'builder' and 'Model (tool calling capable)' or ('Model for the ' .. role)) .. '  (xN = cost multiplier)',
+        prompt = role == 'builder' and 'Model (tool calling capable)' or ('Model for the ' .. role),
         format_item = function(m)
-          return M._model_label(m, current, fmt)
+          return M._model_label(m, current, label_opts)
         end,
       }, function(m)
         if not m then
@@ -666,16 +667,24 @@ function M.select_model(role)
   end)
 end
 
---- One line of the model picker: current marker, name, id and cost multiplier.
+--- One line of the model picker: current marker, name, id, and optionally the
+--- price from `usage.rates` and the legacy premium-request multiplier.
 ---@param m table
 ---@param current string?
----@param fmt fun(n:number?):string?
+---@param opts {multiplier:(fun(n:number?):string?)?, rates:table?}?
 ---@return string
-function M._model_label(m, current, fmt)
+function M._model_label(m, current, opts)
+  opts = opts or {}
   local label = (m.id == current and '* ' or '  ') .. m.name .. ' [' .. m.id .. ']'
-  local mult = fmt(m.multiplier)
+  local Usage = require('coagent.agent.usage')
+  local rate = opts.rates and opts.rates[m.id]
+  local price = Usage.price_label(rate)
+  if price then
+    label = label .. '  ' .. price
+  end
+  local mult = opts.multiplier and opts.multiplier(m.multiplier)
   if mult then
-    label = label .. '  ' .. mult
+    label = label .. '  (legacy ' .. mult .. ')'
   end
   return label
 end
@@ -967,7 +976,7 @@ local function token_lines()
   local any_credits = false
   local function row(label, acc)
     local credits, unpriced = Usage.estimate(acc, rates)
-    local long = Usage.long({ requests = acc.requests, tokens = acc.tokens, credits = credits }, ', ')
+    local long = Usage.long(Usage.summary(acc, rates), ', ')
     local text = string.format('    %-9s %s', label, long)
     if credits and unpriced > 0 then
       text = text .. string.format(' (%s tokens without a rate)', Usage.k(unpriced))
@@ -979,7 +988,7 @@ local function token_lines()
   local totals = c.session.usage_totals
   if (task and task.requests > 0) or (totals and totals.requests > 0) then
     table.insert(lines, '')
-    table.insert(lines, '  Tokens (Copilot reports totals only)')
+    table.insert(lines, '  Tokens (in = input incl. cached, cN% = prompt-cache hits)')
     if task and task.requests > 0 then
       row(c:busy() and 'this task' or 'last task', task)
     end
@@ -990,12 +999,13 @@ local function token_lines()
       if #names > 1 then
         for _, name in ipairs(names) do
           local m = totals.models[name]
-          table.insert(lines, string.format('      %s: %d requests, %s tokens%s', name, m.requests, Usage.k(m.tokens), Usage.efforts_text(m.efforts, '; effort ')))
+          local b = Usage.breakdown(m, ', ')
+          table.insert(lines, string.format('      %s: %d requests, %s tokens%s%s', name, m.requests, Usage.k(m.tokens), b and (' (' .. b .. ')') or '', Usage.efforts_text(m.efforts, '; effort ')))
         end
       end
     end
     if any_credits then
-      table.insert(lines, '    credits are an ESTIMATE from usage.rates, not billing data')
+      table.insert(lines, '    credits are an ESTIMATE from usage.rates (1 credit = $0.01), not billing data')
     end
   end
   return lines

@@ -201,6 +201,18 @@
   実 client 経由の送信（ヘッダー・URL 不変）、並列 headless リクエスト、400 の再送と記憶、401/403 で再送しない
 - 全テスト: 241 件成功
 
+## トークン内訳・キャッシュ率・料金表形式の概算
+
+- 応答の `usage` から入力・キャッシュ読み込み・キャッシュ書き込み・出力・reasoning トークンを取得
+  （`prepare_output` を読み取り専用でラップ。Chat Completions / Responses API / Anthropic 形式に対応、内訳がなければ合計のみ）
+- 応答ごとの内訳（`in 12k (cached 11k, 92%) · out 450`）をタイムラインに、キャッシュヒット率を winbar（`c91%`）に表示
+- `usage.rates` を料金表の形式（USD / 100 万トークン: input / cached / cache_write / output）に対応。内訳のない応答は input 単価で
+  「rough estimate」。旧形式 `per_1k_tokens` も維持。`:CoagentModel` に単価を表示
+- 旧方式の料金倍率（`billing.multiplier`）は現在のトークン課金と対応しないため既定で非表示（`ui.show_multiplier = true` で `(legacy xN)`）
+- テスト: 実 client 経由の内訳取得（本文は不変）、Responses / Anthropic 形式の正規化、集計とヒット率、料金表形式の計算、
+  タイムライン表示と非表示設定、モデル一覧の表示
+- 全テスト: 275 件成功
+
 ## 残課題
 
 | 課題 | 内容 |
@@ -210,4 +222,5 @@
 | Linux サンドボックス | Docker（Ubuntu 24.04）で全テスト通過、特権コンテナで bwrap の書込み制限を確認。非特権で bwrap が使えない環境は自動検出してサンドボックスなし扱い |
 | トークン推定 | 文字数ベースの概算（CopilotChat の tiktoken はネイティブライブラリが必要なため未使用） |
 | upstream 提案候補 | headless 要求の個別キャンセル、tool 対応を壊さない履歴切詰め、`bash` ツールの終了コード対応 |
+| トークン内訳 | 実 API（Copilot）がストリームの最終チャンクで `prompt_tokens_details.cached_tokens` などを返すかは未確認。返さない場合は合計のみ表示 |
 | reasoning effort | CopilotChat PR #1585 がマージされたら `prepare_input` のラップは不要になる（派生モデル経由に自動で切り替わる）。マージ後に実 API で確認 |

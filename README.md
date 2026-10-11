@@ -445,7 +445,7 @@ require('coagent').setup({
 | `:CoagentProcesses` | エージェントが起動したバックグラウンドプロセスの出力表示・停止 |
 | `:CoagentUsage [billing]` | Copilot の利用量・残量（Premium requests / Chat / Completions とリセット日）、タスク・セッションのリクエスト数とトークン数。`billing` で GitHub の請求ページをブラウザで開く |
 | `:CoagentMode [supervised\|readonly\|auto]` | 承認モード切替 |
-| `:CoagentModel` | モデル選択（tool calling 対応モデルのみ。役割分担中は役割ごと）。各モデルに料金倍率（`x0` = プラン内、`x1`、`x10` など）を表示 |
+| `:CoagentModel` | モデル選択（tool calling 対応モデルのみ。役割分担中は役割ごと）。`usage.rates` を設定したモデルには単価（`$3/$15 per 1M`）を表示 |
 | `:CoagentRoles [preset]` | モデルの役割分担: `single` / `advisor` / `explorers` / `full` |
 | `:CoagentEffort [level] [role]` | 推論の強さ: `minimal` / `low` / `medium` / `high` / `off` / `default`（`/effort` と同じ） |
 | `:CoagentNew` / `:CoagentSessions` | 新規セッション / 保存済みセッション一覧 |
@@ -515,7 +515,8 @@ require('coagent').setup({
   hide_copilotchat_ui = true, -- CopilotChat は裏で使うだけ（ログイン案内でもチャット窓を開かせない）
   usage = {
     show_in_bar = true, refresh_after_task = true, -- 残量を winbar に表示
-    show_tokens = true, -- 実行中タスクのリクエスト数・トークン数を winbar に表示（`6req 48k`）
+    show_tokens = true, -- 実行中タスクのリクエスト数・トークン数・キャッシュヒット率を winbar に表示（`6req 48k c91%`）
+    show_request_usage = true, -- 応答ごとの内訳（in / cached / out）をタイムラインに表示
     rates = nil,        -- クレジットの概算用（下記「利用量とクレジット」）
   },
   mode = 'supervised',
@@ -570,26 +571,57 @@ CopilotChat.nvim は認証・通信の提供元として裏で使うだけです
 
 ## 利用量とクレジット
 
-- タスク実行中は winbar に `6req 48k` のように、そのタスクのリクエスト数と合計トークン数を表示します（幅が足りなければ省略）
-- タスク完了の項目に `3 requests · 6.6k tokens` の行、`:CoagentUsage` に直近タスクとセッション全体（モデル別）の内訳を表示。
-  セッション全体の値はセッションと一緒に保存されます。`/compact summary` の要約リクエストはセッションにだけ数えます
-- CopilotChat が返すのはリクエストごとの合計トークン数（`total_tokens`）だけで、入力・出力・キャッシュの内訳や請求額は分かりません
-- 正確なクレジット・Premium requests の消費は `:CoagentUsage billing`（または `/usage billing`）で
-  GitHub の請求ページ（https://github.com/settings/billing）をブラウザで開いて確認してください。
-  請求 API は呼ばず、追加のトークンも使いません
-- `usage.rates` を設定すると、合計トークン数からクレジットを **概算** して `≈N credits (estimate)`（winbar では `≈Ncr`）と表示します。
-  レートは自分で調べた値を入れてください（既定は未設定で、概算は表示しません）。キャッシュ割引などは反映されません
+現在の Copilot は、モデルごとの単価（100 万トークンあたりの USD。入力・キャッシュされた入力・キャッシュ書き込み・出力で別料金）で
+トークンを AI クレジット（1 クレジット = $0.01）として消費する方式です（[Models and pricing](https://docs.github.com/ja/copilot/reference/copilot-billing/models-and-pricing)）。
+
+- タスク実行中は winbar に `6req 48k c91%`（リクエスト数・合計トークン数・プロンプトキャッシュのヒット率）を表示します（幅が足りなければ省略）
+- 応答ごとに、タイムラインへ `in 12k (cached 11k, 92%) · out 450 · reasoning 300` のような内訳を表示します
+  （ツール呼び出しだけの応答は、そのツール項目の上に表示）。`cached` がキャッシュから読まれた入力で、ヒット率が低い応答は
+  キャッシュが効かず履歴全体を読み直したことを示します。`usage.show_request_usage = false` で非表示
+- 内訳は API が応答に含める usage（`prompt_tokens` / `prompt_tokens_details.cached_tokens` / `completion_tokens` など）を
+  読み取ったものです。リクエスト内容は変えません。API が内訳を返さない応答は合計だけになり、`cache not reported` と表示します
+- タスク完了の項目と `:CoagentUsage` に、直近タスクとセッション全体（モデル別）の合計と内訳を表示。セッション全体の値はセッションと一緒に保存されます。
+  `/compact summary` の要約リクエストはセッションにだけ数えます
+- 正確な消費は `:CoagentUsage billing`（または `/usage billing`）で GitHub の請求ページ（https://github.com/settings/billing）を
+  ブラウザで開いて確認してください。請求 API は呼ばず、追加のトークンも使いません
+
+### クレジットの概算（任意）
+
+coagent は単価を取得しません。`usage.rates` に料金表の値（USD / 100 万トークン）を書くと、概算を `≈N credits (estimate)`（winbar では `≈Ncr`）で表示し、
+`:CoagentModel` の一覧にも単価を表示します。
 
 ```lua
 opts = {
   usage = {
     rates = {
-      ['gpt-4.1'] = { per_1k_tokens = 0.1 },      -- モデル ID ごと
-      default = { per_1k_tokens = 0.2 },          -- それ以外のモデル
+      -- 料金表の値をそのまま（キーはモデル ID。auto の場合は実際に使われたモデル ID）
+      ['claude-sonnet-4.6'] = { input = 3.00, cached = 0.30, cache_write = 3.75, output = 15.00 },
+      ['gpt-5-mini'] = { input = 0.25, cached = 0.025, output = 2.00 },
+      -- default = { ... },  -- それ以外のモデル
     },
   },
 }
 ```
+
+計算式（1 リクエストごとの内訳を合計して計算）:
+
+```
+クレジット = ( (入力 − キャッシュ − キャッシュ書き込み) × input
+             + キャッシュ × cached
+             + キャッシュ書き込み × cache_write
+             + 出力 × output ) ÷ 1,000,000 × 100
+```
+
+- `cached` / `cache_write` / `output` を省略すると `input` の単価で計算します
+- 内訳が返らなかった応答は合計トークン数を `input` 単価で計算し、`(rough estimate)` と表示します
+- reasoning トークンは出力に含まれるものとして出力単価で計算されます（API の出力トークン数に含まれます）
+- Long context 料金（一定の入力量を超えた場合の割増）は反映しません
+- 以前の `{ per_1k_tokens = n }`（1,000 トークンあたりのクレジット）形式も引き続き使えます
+
+### 旧方式の料金倍率（multiplier）
+
+Copilot のモデル一覧 API は旧方式（Premium requests の回数課金）の倍率 `billing.multiplier` も返しますが、現在のトークン課金とは対応しません。
+既定では表示せず、旧方式の契約の場合だけ `ui.show_multiplier = true` で `(legacy x1)` のように表示できます。
 
 ## モデルの役割分担（任意）
 

@@ -1282,6 +1282,13 @@ function Controller:_request(gen)
       end
       if res.usage then
         res.usage.requested_model = model
+        if item then
+          item.usage = res.usage
+          self:_update(item)
+        elseif self.task then
+          -- tool-call-only response: shown on the first tool item of this step
+          self.task.pending_usage = res.usage
+        end
         self.session.usage = res.usage
         local ctx = self.session.context
         if ctx then
@@ -1393,6 +1400,10 @@ end
 
 --- Execute one tool call. Returns {content, stop?} or nil when superseded.
 function Controller:_execute(gen, tc)
+  local request_usage = self.task and self.task.pending_usage
+  if self.task then
+    self.task.pending_usage = nil
+  end
   local item = self:_add({
     type = 'tool',
     call_id = tc.id,
@@ -1400,6 +1411,7 @@ function Controller:_execute(gen, tc)
     title = tc.name,
     status = 'pending',
     args_raw = tc.arguments,
+    request_usage = request_usage,
   })
   local function fail(status, msg)
     item.status = status
@@ -1648,7 +1660,7 @@ function Controller:_finish_now(state, info)
   local u = t.usage
   if u and u.requests > 0 then
     local rates = self.config.usage and self.config.usage.rates
-    summary.usage = { requests = u.requests, tokens = u.tokens, credits = (Usage.estimate(u, rates)) }
+    summary.usage = Usage.summary(u, rates)
   end
   if #self.queue > 0 then
     if state == S.CANCELLED then

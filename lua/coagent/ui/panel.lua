@@ -51,6 +51,7 @@ function Panel:opts()
     icons = icons.get(self.config.ui.icons),
     keys = self.config.keymaps.panel,
     show_reasoning = self.config.ui.show_reasoning,
+    show_request_usage = self.config.usage.show_request_usage,
     max_output_lines = 20,
     max_diff_lines = 40,
   }

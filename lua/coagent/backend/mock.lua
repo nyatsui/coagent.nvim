@@ -154,7 +154,15 @@ Mock.ask = async.wrap(function(self, req, cb)
       finish({
         content = content,
         tool_calls = tool_calls,
-        usage = { total_tokens = step.tokens or (#content + 100), max_tokens = step.max_tokens or 64000 },
+        usage = {
+          total_tokens = step.tokens or (#content + 100),
+          max_tokens = step.max_tokens or 64000,
+          input_tokens = step.input_tokens,
+          output_tokens = step.output_tokens,
+          cached_tokens = step.cached_tokens,
+          cache_write_tokens = step.cache_write_tokens,
+          reasoning_tokens = step.reasoning_tokens,
+        },
         model = step.resolved_model or req.model,
         effort = step.effort or (req.model ~= 'auto' and req.effort or nil),
         notices = step.notices,

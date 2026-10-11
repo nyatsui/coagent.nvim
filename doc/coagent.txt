@@ -64,7 +64,7 @@ Check the setup with |:checkhealth| coagent.
 :CoagentOutput           Show the last command output.
 :CoagentMode [mode]      supervised | readonly | auto
 :CoagentModel            Pick a tool-calling capable model (per role when roles are on).
-                         Each entry shows the billing multiplier (x0 = included).
+                         Models with `usage.rates` show their price per 1M tokens.
 :CoagentRoles [preset]   Model roles: single (default) | advisor | explorers | full
 :CoagentEffort [level] [role]
                          Reasoning effort for this session: minimal | low |
@@ -78,27 +78,41 @@ Check the setup with |:checkhealth| coagent.
                               opens the GitHub billing page in the browser.
 
                                                          *coagent-usage*
-Usage. While a task runs the status bar shows its requests and total tokens
-("6req 48k"; dropped first when the panel is narrow), the task-completed item
-repeats them, and :CoagentUsage lists the last task and the session (per
-model). Session totals are saved with the session; a `/compact summary`
-request counts for the session only. CopilotChat reports only total_tokens
-per request (no prompt/cached split, no billing data). Exact credits and
-premium requests are on https://github.com/settings/billing, which
-":CoagentUsage billing" (or "/usage billing") opens with |vim.ui.open()|; no
-billing API is called and no extra token is used.
+Usage. Copilot bills tokens as AI credits (1 credit = $0.01) at per-model
+prices per 1M tokens (input, cached input, cache write, output). While a task
+runs the status bar shows its requests, total tokens and the prompt-cache hit
+ratio ("6req 48k c91%"; dropped first when the panel is narrow). Each model
+response shows its breakdown in the timeline, e.g.
+"in 12k (cached 11k, 92%) · out 450 · reasoning 300" (tool-call-only
+responses: above their first tool item); a low cached share means the cache
+missed and the whole history was read again. The breakdown is read from the
+usage the API returns (the request is not changed); responses without it show
+"cache not reported". `usage.show_request_usage = false` hides the per-response
+lines. The task-completed item and :CoagentUsage show totals and breakdowns for
+the last task and the session (per model). Exact numbers are on
+https://github.com/settings/billing, which ":CoagentUsage billing" (or
+"/usage billing") opens with |vim.ui.open()|; no billing API is called and no
+extra token is used.
 
-Credit ESTIMATE (optional): with `usage.rates` set, the status bar, the
-completed item and :CoagentUsage add "≈N credits (estimate)" computed from
-total tokens. Rates are yours to fill in; nothing is shown without them. >lua
+Credit ESTIMATE (optional): coagent does not fetch prices. Copy them from
+GitHub's "Models and pricing" page (USD per 1M tokens) into `usage.rates`; the
+status bar, the completed item and :CoagentUsage then add
+"≈N credits (estimate)" and :CoagentModel shows the price. >lua
   usage = {
-    show_tokens = true, -- "6req 48k" in the status bar
     rates = {
-      ['gpt-4.1'] = { per_1k_tokens = 0.1 },  -- by model id
-      default = { per_1k_tokens = 0.2 },      -- every other model
+      ['claude-sonnet-4.6'] = { input = 3.00, cached = 0.30, cache_write = 3.75, output = 15.00 },
+      ['gpt-5-mini'] = { input = 0.25, cached = 0.025, output = 2.00 },
     },
   }
 <
+credits = ((input - cached - cache_write) * input_price + cached * cached_price
+  + cache_write * cache_write_price + output * output_price) / 1e6 * 100.
+Missing prices fall back to `input`. Responses without a breakdown are priced
+at the input rate and labelled "rough estimate". Long-context surcharges are
+not modelled. The older `{ per_1k_tokens = n }` form still works.
+
+`ui.show_multiplier = true` shows the legacy premium-request multiplier
+("(legacy x1)") in the model picker; it does not describe token billing.
 
                                                         *coagent-effort*
 Reasoning effort. Not sent by default. Set it in the config or per session:

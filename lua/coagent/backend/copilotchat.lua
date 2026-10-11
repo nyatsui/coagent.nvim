@@ -300,6 +300,12 @@ Backend._pending = pending
 -- wrapper function -> original prepare_input (weak: lets wrapping stay idempotent)
 local wrappers = setmetatable({}, { __mode = 'k' })
 
+-- CopilotChat passes the same `options` table to prepare_input and to every
+-- prepare_output call of one request, while the stream is parsed outside the
+-- requesting coroutine. This maps that table to coagent's request entry so the
+-- output wrapper can collect the token breakdown (weak keys).
+local by_options = setmetatable({}, { __mode = 'k' })
+
 ---@return thread?
 local function current_co()
   local co, is_main = coroutine.running()
@@ -329,6 +335,9 @@ function Backend.wrap_prepare_input(orig)
     local co = current_co()
     local entry = co and pending[co]
     local model = type(opts) == 'table' and opts.model or nil
+    if entry and type(opts) == 'table' then
+      by_options[opts] = entry
+    end
     if entry and entry.effort and type(request) == 'table' and type(model) == 'table' then
       -- never for 'auto'; never when CopilotChat already chose an effort (model variant);
       -- only for the model coagent asked for (not a fallback CopilotChat picked)
@@ -350,6 +359,81 @@ function Backend.wrap_prepare_input(orig)
       end
     end
     return request, extra
+  end
+  wrappers[wrapped] = orig
+  return wrapped
+end
+
+local function num(v)
+  v = tonumber(v)
+  return v and v >= 0 and v or nil
+end
+
+--- Token breakdown from one raw API chunk/response (Chat Completions,
+--- Responses API, or Anthropic-style fields). Only reads the response; nil when
+--- the chunk carries no usage. `input_tokens` always INCLUDES cached tokens.
+---@param output table
+---@return {input_tokens:integer?, output_tokens:integer?, total_tokens:integer?, cached_tokens:integer?, cache_write_tokens:integer?, reasoning_tokens:integer?}?
+function Backend.extract_usage(output)
+  if type(output) ~= 'table' then
+    return nil
+  end
+  local u
+  if type(output.usage) == 'table' then
+    u = output.usage
+  elseif type(output.response) == 'table' and type(output.response.usage) == 'table' then
+    u = output.response.usage
+  elseif type(output.choices) == 'table' and type(output.choices[1]) == 'table' and type(output.choices[1].usage) == 'table' then
+    u = output.choices[1].usage
+  end
+  if not u then
+    return nil
+  end
+  local pd = type(u.prompt_tokens_details) == 'table' and u.prompt_tokens_details or type(u.input_tokens_details) == 'table' and u.input_tokens_details or {}
+  local cd = type(u.completion_tokens_details) == 'table' and u.completion_tokens_details or type(u.output_tokens_details) == 'table' and u.output_tokens_details or {}
+  local out = {
+    input_tokens = num(u.prompt_tokens) or num(u.input_tokens),
+    output_tokens = num(u.completion_tokens) or num(u.output_tokens),
+    total_tokens = num(u.total_tokens),
+    cached_tokens = num(pd.cached_tokens),
+    cache_write_tokens = num(pd.cache_creation_tokens) or num(pd.cache_write_tokens),
+    reasoning_tokens = num(cd.reasoning_tokens),
+  }
+  -- Anthropic-style: input_tokens EXCLUDES cache reads/writes
+  local read, write = num(u.cache_read_input_tokens), num(u.cache_creation_input_tokens)
+  if read or write then
+    out.cached_tokens = out.cached_tokens or read
+    out.cache_write_tokens = out.cache_write_tokens or write
+    if out.input_tokens and not num(u.prompt_tokens) then
+      out.input_tokens = out.input_tokens + (read or 0) + (write or 0)
+    end
+  end
+  if not (out.input_tokens or out.output_tokens or out.total_tokens) then
+    return nil
+  end
+  return out
+end
+
+--- Wrap a provider's prepare_output so the token breakdown of coagent's own
+--- requests is recorded. The parsed output is returned unchanged.
+---@param orig function
+---@return function
+function Backend.wrap_prepare_output(orig)
+  if wrappers[orig] then
+    return orig
+  end
+  local function wrapped(output, opts)
+    local entry = type(opts) == 'table' and by_options[opts] or nil
+    if entry then
+      local ok, u = pcall(Backend.extract_usage, output)
+      if ok and u then
+        entry.usage = entry.usage or {}
+        for k, v in pairs(u) do
+          entry.usage[k] = v -- later chunks carry the final numbers
+        end
+      end
+    end
+    return orig(output, opts)
   end
   wrappers[wrapped] = orig
   return wrapped
@@ -393,6 +477,11 @@ function Backend.wrap_providers(providers)
       if copilot_shaped(name, provider, copilot) then
         provider.prepare_input = Backend.wrap_prepare_input(provider.prepare_input)
         n = n + 1
+      end
+    end
+    if type(provider) == 'table' and type(provider.prepare_output) == 'function' and not wrappers[provider.prepare_output] then
+      if wrappers[provider.prepare_input] then
+        provider.prepare_output = Backend.wrap_prepare_output(provider.prepare_output)
       end
     end
   end
@@ -560,8 +649,9 @@ end
 function Backend:_ask_once(client, req, plan)
   local co = current_co()
   local entry
-  if plan.via == 'body' and co then
-    entry = { effort = plan.effort, model = plan.model }
+  if co then
+    -- effort only when it goes in the body; usage is collected for every request
+    entry = { effort = plan.via == 'body' and plan.effort or nil, model = plan.model }
     pending[co] = entry
   end
 
@@ -613,7 +703,7 @@ function Backend:_ask_once(client, req, plan)
     content = res.message.content or '',
     reasoning = res.message.reasoning,
     tool_calls = tool_calls,
-    usage = { total_tokens = res.token_count, max_tokens = res.token_max_count },
+    usage = vim.tbl_extend('force', entry and entry.usage or {}, { total_tokens = res.token_count, max_tokens = res.token_max_count }),
     model = res.message.model,
   }, nil, sent
 end

@@ -55,6 +55,50 @@ describe('usage accounting', function()
     local long = Usage.long({ requests = 6, tokens = 48000, credits = 4.8 })
     assert.are.equal('6 requests · 48k tokens · ≈4.80 credits (estimate)', long)
   end)
+
+  it('sums the token breakdown and shows the prompt-cache hit ratio', function()
+    local acc = Usage.new()
+    Usage.add(acc, 'builder', 'm', { usage = { total_tokens = 10500, input_tokens = 10000, cached_tokens = 0, output_tokens = 500 } })
+    Usage.add(acc, 'builder', 'm', { usage = { total_tokens = 10400, input_tokens = 10200, cached_tokens = 9800, output_tokens = 200 } })
+    assert.are.equal(20200, acc.input_tokens)
+    assert.are.equal(9800, acc.cached_tokens)
+    assert.are.equal(700, acc.output_tokens)
+    assert.are.equal(2, acc.models.m.detailed)
+    assert.are.equal('2req 21k c49%', Usage.short(acc))
+    -- one response: cache hit visible per request
+    assert.are.equal('in 10k (cached 9.8k, 96%) · out 200', Usage.breakdown({ input_tokens = 10200, cached_tokens = 9800, output_tokens = 200 }))
+    assert.are.equal('in 10k (cached 0, 0%) · out 500', Usage.breakdown({ input_tokens = 10000, cached_tokens = 0, output_tokens = 500 }))
+    assert.are.equal('in 10k (cache not reported) · out 500', Usage.breakdown({ input_tokens = 10000, output_tokens = 500 }))
+    assert.are.equal('in 9.0k, cache write 900 · out 20 · reasoning 5', Usage.breakdown({ input_tokens = 9000, cached_tokens = 0, cache_write_tokens = 900, output_tokens = 20, reasoning_tokens = 5 }):gsub(' %(cached 0, 0%%%)', ''))
+    assert.is_nil(Usage.breakdown({ total_tokens = 5 }))
+    -- no ratio when the API never reported cached tokens
+    local acc2 = Usage.new()
+    Usage.add(acc2, 'builder', 'm', { usage = { total_tokens = 100, input_tokens = 90, output_tokens = 10 } })
+    assert.are.equal('1req 100', Usage.short(acc2))
+  end)
+
+  it('prices tokens like the models-and-pricing table (USD per 1M, 1 credit = $0.01)', function()
+    local acc = Usage.new()
+    -- 1M input of which 800k cached and 100k cache write, 100k output
+    Usage.add(acc, 'builder', 'sonnet', { usage = { total_tokens = 1100000, input_tokens = 1000000, cached_tokens = 800000, cache_write_tokens = 100000, output_tokens = 100000 } })
+    local rates = { sonnet = { input = 3.00, cached = 0.30, cache_write = 3.75, output = 15.00 } }
+    -- 100k fresh*3 + 800k*0.3 + 100k*3.75 + 100k*15 = 0.3 + 0.24 + 0.375 + 1.5 = $2.415 = 241.5 credits
+    local credits, unpriced, rough = Usage.estimate(acc, rates)
+    assert.is_true(math.abs(credits - 241.5) < 1e-6, tostring(credits))
+    assert.are.equal(0, unpriced)
+    assert.is_false(rough)
+    -- a request without a breakdown is priced at the input rate and marked rough
+    Usage.add(acc, 'builder', 'sonnet', { usage = { total_tokens = 100000 } })
+    credits, _, rough = Usage.estimate(acc, rates)
+    assert.is_true(math.abs(credits - (241.5 + 30)) < 1e-6, tostring(credits))
+    assert.is_true(rough)
+    assert.is_truthy(Usage.long(vim.tbl_extend('force', {}, acc, { credits = credits, rough = rough })):find('(rough estimate)', 1, true))
+    -- the legacy per_1k_tokens form still works
+    assert.are.equal(1.2, (Usage.estimate(acc, { sonnet = { per_1k_tokens = 0.001 } })))
+    -- price label for the model picker
+    assert.are.equal('$0.25/$2 per 1M (cached $0.025)', Usage.price_label({ input = 0.25, cached = 0.025, output = 2 }))
+    assert.is_nil(Usage.price_label({ per_1k_tokens = 1 }))
+  end)
 end)
 
 describe('controller usage', function()
@@ -197,6 +241,38 @@ describe('usage ui', function()
     assert.is_falsy(text:find('credits', 1, true))
   end)
 
+  it('shows each response\'s token breakdown and cache hits in the timeline', function()
+    setup({
+      { tool_calls = { { name = 'read_file', arguments = { path = 'a.txt' } } }, tokens = 10500, input_tokens = 10000, cached_tokens = 0, output_tokens = 500 },
+      { content = 'done', tokens = 10400, input_tokens = 10200, cached_tokens = 9800, output_tokens = 200 },
+    })
+    agent.open()
+    local c = agent.controller()
+    c:submit('look')
+    h.wait(function()
+      return c:state() == 'COMPLETED'
+    end)
+    local text = table.concat(vim.api.nvim_buf_get_lines(agent.view().panel.buf, 0, -1, false), '\n')
+    -- tool-call-only response: shown above its first tool item
+    assert.is_truthy(text:find('in 10k (cached 0, 0%) · out 500', 1, true), text)
+    -- text response: under the answer
+    assert.is_truthy(text:find('in 10k (cached 9.8k, 96%) · out 200', 1, true), text)
+    -- task summary carries the breakdown
+    assert.is_truthy(text:find('2 requests · 21k tokens (in 20k (cached 9.8k, 49%), out 700)', 1, true), text)
+
+    -- can be turned off
+    setup({ { content = 'x', input_tokens = 100, cached_tokens = 50, output_tokens = 5 } }, { usage = { show_request_usage = false } })
+    agent.open()
+    c = agent.controller()
+    c:submit('hi')
+    h.wait(function()
+      return c:state() == 'COMPLETED'
+    end)
+    text = table.concat(vim.api.nvim_buf_get_lines(agent.view().panel.buf, 0, -1, false), '\n')
+    assert.is_falsy(text:find('x\n  in 100 (cached', 1, true), text) -- no per-response line
+    assert.is_truthy(text:find('1 request · 101 tokens (in 100 (cached 50, 50%), out 5)', 1, true), text)
+  end)
+
   it('drops the usage segment first on a narrow panel', function()
     setup(edit_script)
     agent.open()
@@ -231,10 +307,10 @@ describe('usage ui', function()
 
     vim.cmd('CoagentUsage')
     local f = float_text()
-    assert.is_truthy(f:find('Tokens (Copilot reports totals only)', 1, true), f)
+    assert.is_truthy(f:find('Tokens (in = input incl. cached', 1, true), f)
     assert.is_truthy(f:find('last task 3 requests, 6.6k tokens, ≈3.30 credits (estimate)', 1, true), f)
     assert.is_truthy(f:find('session   3 requests, 6.6k tokens, ≈3.30 credits (estimate)', 1, true), f)
-    assert.is_truthy(f:find('ESTIMATE from usage.rates, not billing data', 1, true), f)
+    assert.is_truthy(f:find('ESTIMATE from usage.rates (1 credit = $0.01), not billing data', 1, true), f)
     assert.is_truthy(f:find(':CoagentUsage billing', 1, true), f)
   end)
 

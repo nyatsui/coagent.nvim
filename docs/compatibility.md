@@ -25,6 +25,7 @@ v4 の設定変更点は CopilotChat の `MIGRATION.md` を参照してくださ
 | `config.functions.file / glob / gitdiff` | ファイル読込・glob・`#gitdiff` | 公開設定（ユーザーのカスタマイズも反映） |
 | `CopilotChat.utils.notify` | device flow の案内（URL とコード）をエージェント UI に表示。`hide_copilotchat_ui`（既定）では CopilotChat 自身の MESSAGE 受信処理（チャット窓を開く）を外し、裏方に徹する | 内部モジュール（listener リストを操作。契約テストあり） |
 | provider の `prepare_input`（`copilot` / `github_models` と、同じ関数を使う provider） | reasoning effort をリクエスト本文に追加するため 1 回だけラップ（下記） | 公開 provider interface（CopilotChat が案内している provider の上書き方法） |
+| 同じ provider の `prepare_output` | 応答の `usage`（入力・キャッシュ・出力・reasoning トークン）を **読み取るだけ** のために 1 回だけラップ。戻り値は元の関数の結果そのまま。coagent 自身の要求だけが対象（CopilotChat が `prepare_input` と `prepare_output` に同じ `options` テーブルを渡すことを利用して対応付け） | 公開 provider interface |
 | `client:info()` | 利用量・残量（CopilotChat の `gc` 情報表示と同じ取得処理、5 分キャッシュ） | 内部モジュール（出力形式のパースを契約テストで固定） |
 
 契約は `tests/backend_copilotchat_spec.lua` が、CopilotChat の公開 provider interface に登録したテスト用 provider と

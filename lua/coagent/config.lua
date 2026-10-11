@@ -36,10 +36,19 @@ local defaults = {
   usage = {
     show_in_bar = true, -- remaining Copilot quota in the panel status bar
     refresh_after_task = true, -- re-fetch after every task (CopilotChat caches it for 5 minutes)
-    show_tokens = true, -- requests/tokens of the running task ("6req 48k") in the status bar
-    -- Optional credit ESTIMATE from total tokens (Copilot reports no billing
-    -- data per request). Keyed by model id; `default` covers other models:
-    --   rates = { ['gpt-4.1'] = { per_1k_tokens = 0.1 }, default = { per_1k_tokens = 0.2 } }
+    show_tokens = true, -- requests/tokens of the running task ("6req 48k c91%") in the status bar
+    -- token breakdown of each model response in the timeline
+    -- ("in 12k (cached 11k, 92%) · out 450"), when the API reports it
+    show_request_usage = true,
+    -- Optional credit ESTIMATE (1 AI credit = $0.01). Copy the per-model prices
+    -- (USD per 1M tokens) from GitHub's "Models and pricing" page; coagent does
+    -- not fetch prices. Keyed by model id (the resolved model when using auto);
+    -- `default` covers other models:
+    --   rates = {
+    --     ['claude-sonnet-4.6'] = { input = 3.00, cached = 0.30, cache_write = 3.75, output = 15.00 },
+    --     ['gpt-5-mini'] = { input = 0.25, cached = 0.025, output = 2.00 },
+    --   }
+    -- (The older { per_1k_tokens = credits } form still works.)
     rates = nil,
   },
 
@@ -192,6 +201,10 @@ local defaults = {
     output_height = 12, -- bottom command output panel
     collapse_tool_details = true,
     show_reasoning = false,
+    -- Legacy premium-request multiplier (x0/x1/x10) in the model picker. Copilot
+    -- now bills tokens per model price, so it is hidden by default; only useful
+    -- on plans still on request-based billing.
+    show_multiplier = false,
     show_context = true, -- context usage ("ctx 12k/128k") in the status bar
     slash_complete = true, -- pop up /command completion while typing "/" in the input
     mention_complete = true, -- pop up workspace files while typing "@" in the input

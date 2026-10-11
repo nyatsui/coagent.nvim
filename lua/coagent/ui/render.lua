@@ -133,6 +133,14 @@ end
 
 --- Render a tool item.
 local function tool(b, item, o)
+  if o.show_request_usage ~= false and item.request_usage then
+    -- token breakdown of the model response that requested this (and the
+    -- following) tool calls
+    local line = require('coagent.agent.usage').breakdown(item.request_usage, ' ' .. o.icons.dot .. ' ')
+    if line then
+      b.line(line, 'CoagentDim')
+    end
+  end
   local st = STATUS[item.status] or STATUS.pending
   local icon = o.icons[st[1]]
   local title = item.title or item.tool or '?'
@@ -349,6 +357,12 @@ function M.item(item, o)
     end
     if item.interrupted then
       b.line('(interrupted)', 'CoagentDim')
+    end
+    if o.show_request_usage ~= false and not item.streaming and item.usage then
+      local line = require('coagent.agent.usage').breakdown(item.usage, ' ' .. i.dot .. ' ')
+      if line then
+        b.line('  ' .. line, 'CoagentDim')
+      end
     end
   elseif item.type == 'tool' then
     tool(b, item, o)

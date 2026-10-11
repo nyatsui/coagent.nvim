@@ -94,12 +94,14 @@
 
 ### 利用量
 
-- 実行中は winbar に `6req 48k`（このタスクのリクエスト数・合計トークン数）。幅が狭いと最初に省略されます
-- 完了項目に `3 requests · 6.6k tokens`、`gu` / `:CoagentUsage` に直近タスクとセッション全体（モデル別）の内訳
-- Copilot から得られるのは合計トークン数だけです。正確なクレジットは `:CoagentUsage billing` / `/usage billing` で
-  GitHub の請求ページ（https://github.com/settings/billing）を開いて確認（API は呼ばず、追加のトークンも不要）
-- `usage.rates = { ['モデルID'] = { per_1k_tokens = n }, default = { per_1k_tokens = n } }` を設定すると
-  `≈N credits (estimate)` の **概算** を併記します（レートは自分で設定。未設定なら表示しません）
+- 実行中は winbar に `6req 48k c91%`（このタスクのリクエスト数・合計トークン数・キャッシュヒット率）。幅が狭いと最初に省略されます
+- 応答ごとにタイムラインへ `in 12k (cached 11k, 92%) · out 450` の内訳（API が返した usage を読み取ったもの）。
+  `cached` の割合が低い応答はキャッシュが効かず履歴を読み直しています。`usage.show_request_usage = false` で非表示
+- 完了項目と `gu` / `:CoagentUsage` に直近タスクとセッション全体（モデル別）の合計と内訳
+- 正確な消費は `:CoagentUsage billing` / `/usage billing` で GitHub の請求ページ（https://github.com/settings/billing）を開いて確認
+  （API は呼ばず、追加のトークンも不要）
+- `usage.rates` に料金表の単価（USD / 100 万トークン）を `{ input = 3, cached = 0.3, cache_write = 3.75, output = 15 }` の形で書くと
+  `≈N credits (estimate)` の **概算**（1 クレジット = $0.01）を併記し、`:CoagentModel` に単価を表示します
 
 ### プロンプトテンプレート
 
@@ -271,7 +273,8 @@ Neovim にフォーカスが無いとき、承認待ち・完了・失敗・上�
 - `gm` / `:CoagentMode` — `supervised` / `readonly` / `auto`
   - `auto` は `auto.workspaces` に登録済みでなければ確認ダイアログが出ます。サンドボックスの有無も表示されます
   - モード変更は次のツール実行から有効（実行時にも再判定されます）
-- `:CoagentModel` — tool calling 対応モデルから選択（セッションごとに保持）。各モデルに料金倍率を表示（`x0` はプラン内で追加料金なし、`x1` が基準、大きいほど高価）
+- `:CoagentModel` — tool calling 対応モデルから選択（セッションごとに保持）。`usage.rates` を設定したモデルには単価を表示
+  （旧方式の料金倍率は `ui.show_multiplier = true` のときだけ `(legacy x1)` と表示。現在のトークン課金とは対応しません）
 - `/effort` / `:CoagentEffort` — 推論の強さ（reasoning effort）
   - `/effort high`（全役割）、`/effort low explorer`（役割だけ）、`/effort off`（送らない）、`/effort default`（設定値に戻す）。
     引数なしなら一覧から選択。セッションと一緒に保存されます
