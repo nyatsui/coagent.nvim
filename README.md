@@ -1,5 +1,7 @@
 # coagent.nvim
 
+[![test](https://github.com/nyatsui/coagent.nvim/actions/workflows/test.yml/badge.svg)](https://github.com/nyatsui/coagent.nvim/actions/workflows/test.yml)
+
 **Co**pilot + **agent**: ターミナル Neovim で動く **GitHub Copilot ベースの自律コーディングエージェント**。
 タスクを渡すと、コードを調査し、編集し、テスト/ビルド/Lint を実行し、失敗を解析して再修正し、
 検証結果まで報告します。VS Code の Copilot Chat Agent モードや Claude Code に近い体験を Neovim 内で実現します。
@@ -44,7 +46,7 @@ I'll find the `add` implementation and its tests.
 | | |
 |---|---|
 | Neovim | 0.11 以降（ターミナル。GUI 不要） |
-| OS | macOS / Linux |
+| OS | macOS / Linux（CI で両方をテスト） |
 | [CopilotChat.nvim](https://github.com/CopilotC-Nvim/CopilotChat.nvim) | **v4 系（`main` ブランチ）**。廃止済み `canary` ブランチは不可 |
 | plenary.nvim | CopilotChat の依存 |
 | 任意 | `rg`（高速検索）、treesitter `markdown` パーサ、[render-markdown.nvim](https://github.com/MeanderingProgrammer/render-markdown.nvim) |

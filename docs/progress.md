@@ -98,7 +98,7 @@
 - Linux 対応: bwrap が実際に動くか初回に検査（Ubuntu 24.04 の AppArmor 制限やコンテナで使えない場合は無効扱い）、
   Linux のキャッシュディレクトリを書込み許可に追加、テストの `ps -g`（macOS 依存）を `pgrep -g` に変更
 - 確認: Docker の Ubuntu 24.04（rg なし、Neovim 0.11.2）で全 106 件成功、特権コンテナで bwrap による書込み制限を確認
-- MIT ライセンスを追加（GitHub Actions の設定は用意済み・未公開: push 用トークンに workflow 権限が必要）
+- MIT ライセンス、GitHub Actions（Ubuntu / macOS × Neovim 0.11.2 / stable）を追加
 
 ## 残課題
 
