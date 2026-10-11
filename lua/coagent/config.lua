@@ -124,6 +124,7 @@ local defaults = {
     show_reasoning = false,
     show_context = true, -- context usage ("ctx 12k/128k") in the status bar
     slash_complete = true, -- pop up /command completion while typing "/" in the input
+    mention_complete = true, -- pop up workspace files while typing "@" in the input
     markdown = 'auto', -- 'auto' | 'treesitter' | 'syntax' | 'off'
   },
 

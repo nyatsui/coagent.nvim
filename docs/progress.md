@@ -127,6 +127,19 @@
   watermark を動かしリクエストしないこと・以降の送信で省略が維持されること、作業中の拒否、要約（1 リクエスト・tools なし・置換・保存・中止）、補完候補
 - 全テスト: 132 件成功
 
+## 追加（入力欄の @ファイル参照）
+
+- `@path` を `#file:path` の別名として解決（`agent/context.lua` の `M.mentions`）。行頭か空白の直後で、かつ存在するパスのみ
+  （メールアドレス・`@Override`・存在しないパスは本文のまま、エラーなし）。末尾の句読点は除外、パスは本文に残す。
+  `@dir/` はディレクトリ一覧（`list_dir` と同じ処理）、`@buffer` / `@selection` は別名。参照は本文の出現順に解決
+- `#file` と `@path` に保護ファイル（`auto.protected_globs`）の拒否を追加（従来の `#file` はワークスペース外のみ拒否していた）
+- 入力欄で `@` を打つとファイル候補（`ui/mention.lua`: `git ls-files --cached --others --exclude-standard`、git 外は
+  ディレクトリ走査、保護ファイル除外、最大 2000 件、5 秒キャッシュ、`matchfuzzy` で絞り込み）。全行で有効、`/` 補完と共存。
+  `ui.mention_complete`（既定 true）、`completeopt` に `fuzzy` を追加。プレースホルダに `@file` を表示
+- テスト `tests/mention_spec.lua`（9 件）: 解決・本文保持・重複排除、メール等の非対象、ワークスペース外/シンボリックリンク/保護
+  ファイルの拒否（`#file` も）、ディレクトリ一覧、別名と出現順、候補（git/非 git・上限・あいまい検索・境界・omnifunc・設定）
+- 全テスト: 141 件成功
+
 ## 残課題
 
 | 課題 | 内容 |

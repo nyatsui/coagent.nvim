@@ -60,6 +60,29 @@ Input: <CR> (normal) / <C-s> (insert) send, <C-c> stop, <C-k> panel,
 <C-p>/<C-n> history, /help slash commands (|coagent-slash|). All keys are
 configurable via `keymaps`.
 
+                                                     *coagent-references*
+References in a prompt attach context:
+
+  @path               A workspace file (same as #file:path). "@dir/"
+                      attaches a directory listing. Only an "@" at the
+                      start or after whitespace counts, and only when the
+                      path exists, so a@b.com or "@Override" stay as typed.
+                      The path stays in the prompt text.
+  @buffer @selection  Aliases of #buffer / #selection (a file of that
+                      name wins).
+  #buffer #buffers    Current buffer / all listed buffers.
+  #selection          Visual selection the command was started with.
+  #file:path          A file.
+  #diagnostics        LSP diagnostics of the current buffer.
+  #gitdiff[:staged]   Uncommitted (or staged) diff.
+
+Files outside the workspace (symlinks resolved) and protected files
+(`auto.protected_globs`: .env, keys, .git, ...) are refused with a warning.
+Typing "@" pops up workspace files (git ls-files plus untracked files that
+are not ignored, else a directory walk; protected files hidden; at most
+2000), fuzzy-filtered as you type. Disable the popup with
+`ui.mention_complete = false` (<C-x><C-o> still works).
+
 ==============================================================================
 4. SLASH COMMANDS                                        *coagent-slash*
 

@@ -43,6 +43,12 @@
 
 - `:'<,'>Coagent 理由を説明して` — 選択範囲を添付
 - 入力中に `#buffer`, `#buffers`, `#file:src/x.py`, `#diagnostics`, `#gitdiff`, `#gitdiff:staged`, `#selection`
+- `@src/x.py` は `#file:src/x.py` と同じ（パスは本文に残る）。`@src/` はディレクトリ一覧、`@buffer` / `@selection` は別名
+  - 行頭か空白の直後の `@` で、ワークスペースに存在するパスのときだけ参照になる。`a@b.com`、`@Override`、存在しないパスは
+    そのまま送信（警告なし）。末尾の `,` `.` `)` などはパスに含めない
+  - ワークスペース外（シンボリックリンクの実体で判定）と保護ファイル（`auto.protected_globs`）は `#file` と同様に拒否して警告
+  - `@` を打つとファイル候補（`git ls-files` + 無視されていない未追跡ファイル、保護ファイル除外、最大 2000 件）が出て、
+    あいまい検索で絞り込める。`ui.mention_complete = false` で自動表示をオフ（`<C-x><C-o>` は有効）
 
 ### スラッシュコマンド
 

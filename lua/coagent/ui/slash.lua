@@ -233,22 +233,43 @@ end
 
 local function before_cursor()
   local row, col = unpack(vim.api.nvim_win_get_cursor(0))
-  if row ~= 1 then
-    return nil
+  return (vim.api.nvim_get_current_line()):sub(1, col), row
+end
+
+local function ui_opt(name)
+  return require('coagent.config').options.ui[name] ~= false
+end
+
+--- Candidates for the input buffer: /commands (first line) or @paths.
+---@param before string
+---@param row integer
+---@param auto boolean? typing (respects ui.slash_complete / ui.mention_complete)
+---@return integer? start, table[] items
+function M.input_complete(before, row, auto)
+  if row == 1 and (not auto or ui_opt('slash_complete')) then
+    local start, items = M.complete(before)
+    if start then
+      return start, items
+    end
   end
-  return (vim.api.nvim_get_current_line()):sub(1, col)
+  if not auto or ui_opt('mention_complete') then
+    local ok, c = pcall(app().controller)
+    if ok and c and c.ws then
+      return require('coagent.ui.mention').complete(before, c.ws)
+    end
+  end
+  return nil, {}
 end
 
 --- 'omnifunc' for the input buffer (<C-x><C-o>).
 function M.omnifunc(findstart, base)
-  local before = before_cursor()
+  local before, row = before_cursor()
   if findstart == 1 then
-    local start = before and M.complete(before)
+    local start = M.input_complete(before, row)
     return start or -3
   end
-  local line = before or ''
-  local start = M.complete(line)
-  local _, items = M.complete(line:sub(1, start or #line) .. base)
+  local start = M.input_complete(before, row)
+  local _, items = M.input_complete(before:sub(1, start or #before) .. base, row)
   return items
 end
 
@@ -257,11 +278,8 @@ function M.autocomplete()
   if not vim.fn.mode():match('^i') then
     return
   end
-  local before = before_cursor()
-  if not before then
-    return
-  end
-  local start, items = M.complete(before)
+  local before, row = before_cursor()
+  local start, items = M.input_complete(before, row, true)
   if not start or #items == 0 then
     return
   end

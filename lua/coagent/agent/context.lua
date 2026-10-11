@@ -13,7 +13,7 @@ M.REFERENCES = {
   buffer = 'Current editor buffer',
   buffers = 'All listed buffers',
   selection = 'Visual selection the command was started with',
-  file = 'A file: #file:path/to/file',
+  file = 'A file: #file:path/to/file (or @path/to/file)',
   diagnostics = 'LSP diagnostics of the current buffer',
   gitdiff = 'Uncommitted git diff (#gitdiff:staged for staged changes)',
 }
@@ -71,6 +71,37 @@ function M.resolve_references(text, env)
     table.insert(atts, attachment('buffer', label, buf_lang(bufnr), table.concat(lines, '\n')))
   end
 
+  --- Attach a file (or a directory listing) after the workspace and
+  --- protected-file checks. `ref` is how the user wrote it, for errors.
+  local function attach_path(ref, info)
+    if not info.inside then
+      table.insert(errors, ref .. ' is outside the workspace')
+      return
+    end
+    if info.protected then
+      table.insert(errors, ref .. ' is a protected file (' .. info.protected .. '); not attached')
+      return
+    end
+    if info.is_dir then
+      local res = require('coagent.tools.fs').list_dir.run({ depth = 2 }, nil, { path = info })
+      table.insert(atts, attachment('directory', info.rel == '.' and './' or (info.rel .. '/'), 'text', res.output))
+      return
+    end
+    local fn = cc_function('file')
+    local data
+    if fn then
+      local ok, res = pcall(fn.resolve, { path = info.real }, cc_source)
+      async.main()
+      data = ok and res and res[1] and res[1].data or nil
+    end
+    data = data or util.read_file(info.real)
+    if not data then
+      table.insert(errors, ref .. ' not found')
+      return
+    end
+    table.insert(atts, attachment('file', info.rel, vim.filetype.match({ filename = info.real }) or 'text', data))
+  end
+
   local handlers = {
     buffer = function()
       add_buffer(source.bufnr)
@@ -96,24 +127,7 @@ function M.resolve_references(text, env)
         table.insert(errors, '#file requires a path (#file:path)')
         return
       end
-      local info = env.ws:check(arg)
-      if not info.inside then
-        table.insert(errors, '#file:' .. arg .. ' is outside the workspace')
-        return
-      end
-      local fn = cc_function('file')
-      local data
-      if fn then
-        local ok, res = pcall(fn.resolve, { path = info.real }, cc_source)
-        async.main()
-        data = ok and res and res[1] and res[1].data or nil
-      end
-      data = data or util.read_file(info.real)
-      if not data then
-        table.insert(errors, '#file:' .. arg .. ' not found')
-        return
-      end
-      table.insert(atts, attachment('file', info.rel, vim.filetype.match({ filename = info.real }) or 'text', data))
+      attach_path('#file:' .. arg, env.ws:check(arg))
     end,
     diagnostics = function()
       async.main()
@@ -144,27 +158,94 @@ function M.resolve_references(text, env)
   }
 
   -- Collect first: handlers may yield (async file reads), which is not
-  -- allowed inside a string.gsub callback.
-  local refs, seen = {}, {}
-  for name, arg in text:gmatch('#(%a+):?([^%s]*)') do
-    local key = name .. ':' .. arg
-    if handlers[name] and not seen[key] then
-      seen[key] = true
-      table.insert(refs, { name = name, arg = arg })
-    end
+  -- allowed inside a string.gsub callback. Each span is replaced in the clean
+  -- text; each distinct reference is resolved once, in text order.
+  local spans = {}
+  local function add(span, key, run)
+    span.key, span.run = key, run
+    table.insert(spans, span)
   end
-  for _, r in ipairs(refs) do
-    local ok, err = pcall(handlers[r.name], r.arg)
-    if not ok then
-      table.insert(errors, '#' .. r.name .. ': ' .. tostring(err))
-    end
-  end
-  local clean = text:gsub('#(%a+):?([^%s]*)', function(name)
+  for pos, name, arg in text:gmatch('()#(%a+):?([^%s]*)') do
     if handlers[name] then
-      return ''
+      local tok = text:match('^#%a+:?[^%s]*', pos)
+      add({ s = pos, e = pos + #tok - 1, repl = '' }, '#' .. name .. ':' .. arg, function()
+        handlers[name](arg)
+      end)
     end
+  end
+  for _, m in ipairs(M.mentions(text, env.ws)) do
+    local repl = m.alias and '' or m.path -- keep the path readable in the prompt
+    add({ s = m.s, e = m.s + #m.path, repl = repl }, m.alias and ('#' .. m.alias .. ':') or ('@' .. m.info.real), function()
+      if m.alias then
+        handlers[m.alias]('')
+      else
+        attach_path('@' .. m.path, m.info)
+      end
+    end)
+  end
+  table.sort(spans, function(a, b)
+    return a.s < b.s
   end)
-  return vim.trim(clean), atts, errors
+  local seen = {}
+  for _, sp in ipairs(spans) do
+    if not seen[sp.key] then
+      seen[sp.key] = true
+      local ok, err = pcall(sp.run)
+      if not ok then
+        table.insert(errors, sp.key:gsub(':$', '') .. ': ' .. tostring(err))
+      end
+    end
+  end
+  local parts, last = {}, 1
+  for _, sp in ipairs(spans) do
+    if sp.s >= last then -- skip a #ref nested inside an @mention
+      table.insert(parts, text:sub(last, sp.s - 1))
+      table.insert(parts, sp.repl)
+      last = sp.e + 1
+    end
+  end
+  table.insert(parts, text:sub(last))
+  return vim.trim(table.concat(parts)), atts, errors
+end
+
+M.MENTION_ALIASES = { buffer = true, selection = true }
+
+--- `@path` mentions in `text`: an "@" at the start or after whitespace,
+--- followed by an existing path (trailing punctuation such as "," or ")" is
+--- not part of it). `@buffer` / `@selection` are aliases of `#buffer` /
+--- `#selection` unless a file of that name exists. Anything else (emails,
+--- `@Override`, missing paths) is not a mention and stays as typed.
+---@param text string
+---@param ws Coagent.Workspace
+---@return {s:integer, path:string, info:Coagent.PathInfo?, alias:string?}[]
+function M.mentions(text, ws)
+  local out = {}
+  for pos, tok in text:gmatch('()@([^%s]+)') do
+    if pos == 1 or text:sub(pos - 1, pos - 1):match('%s') then
+      local cands = { tok }
+      local stripped = tok:gsub('[,.;:!?%)%]}>\'"`]+$', '')
+      if stripped ~= tok then
+        table.insert(cands, stripped)
+      end
+      local found
+      for _, c in ipairs(cands) do
+        if c:find('[%w_]') then
+          local info = ws:check(c)
+          if info.exists then
+            found = { s = pos, path = c, info = info }
+            break
+          end
+        end
+      end
+      if not found and M.MENTION_ALIASES[stripped] then
+        found = { s = pos, path = stripped, alias = stripped }
+      end
+      if found then
+        table.insert(out, found)
+      end
+    end
+  end
+  return out
 end
 
 ------------------------------------------------------------------------------

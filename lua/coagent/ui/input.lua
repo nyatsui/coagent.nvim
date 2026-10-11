@@ -26,11 +26,16 @@ function Input.new(config, on_submit)
   })
   local slash = require('coagent.ui.slash')
   bo.omnifunc = "v:lua.require'coagent.ui.slash'.omnifunc"
-  if config.ui.slash_complete ~= false then
-    -- show the menu without inserting the first candidate while typing
-    pcall(function()
-      bo.completeopt = 'menuone,noinsert'
-    end)
+  if config.ui.slash_complete ~= false or config.ui.mention_complete ~= false then
+    -- show the menu without inserting the first candidate while typing; fuzzy
+    -- keeps @path matches fuzzy while the menu narrows (Neovim 0.11+)
+    if not pcall(function()
+      bo.completeopt = 'menuone,noinsert,fuzzy'
+    end) then
+      pcall(function()
+        bo.completeopt = 'menuone,noinsert'
+      end)
+    end
     vim.api.nvim_create_autocmd('TextChangedI', {
       buffer = self.buf,
       callback = function()
@@ -75,7 +80,7 @@ function Input:placeholder()
   if self:text() == '' then
     local k = self.config.keymaps.input.submit
     local ic = require('coagent.ui.icons').get(self.config.ui.icons)
-    local hint = string.format('Ask the agent%s (%s send %s #buffer #selection #file:path %s /help)', ic.ellipsis, type(k) == 'table' and (k.n or k.i) or k, ic.dot, ic.dot)
+    local hint = string.format('Ask the agent%s (%s send %s @file #buffer #selection %s /help)', ic.ellipsis, type(k) == 'table' and (k.n or k.i) or k, ic.dot, ic.dot)
     if self.busy_hint then
       hint = self.busy_hint
     end
