@@ -99,6 +99,22 @@ local defaults = {
     protected_globs = { '.git/**', '.env', '.env.*', '**/*.pem', '**/*.key', '**/id_rsa*', '**/.ssh/**' },
   },
 
+  -- Prompt templates, usable as /name in the input or :CoagentPrompt Name [text].
+  -- Built-ins: explain, codereview, fix, optimize, docs, tests, commit.
+  -- { Name = { prompt = '...', mode = 'readonly'|nil, description = '...', context = true } }
+  -- The prompt is prepended to your text; #selection (visual) or #buffer is added
+  -- unless the text names a source (context = false disables that). mode = 'readonly'
+  -- limits that task to read/search tools; templates never raise the mode.
+  -- Name = false removes a built-in. Only this config defines templates.
+  prompts = {},
+
+  -- `#references` in prompts.
+  references = {
+    url = true, -- #url:https://... fetches the page (GET, no cookies/auth) and attaches its text
+    url_max_bytes = 32 * 1024, -- page text attached at most
+    clipboard_max_bytes = 32 * 1024, -- #clipboard text attached at most
+  },
+
   -- Repository instruction files injected as *untrusted, lower-priority* project notes.
   instruction_files = { 'AGENTS.md', '.github/copilot-instructions.md', 'CLAUDE.md' },
 

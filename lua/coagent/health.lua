@@ -63,6 +63,17 @@ function M.check()
   end
 
   local cfg = require('coagent.config').options
+  local templates, warnings = require('coagent.agent.templates').all(cfg.prompts)
+  for _, w in ipairs(warnings) do
+    h.warn(w)
+  end
+  local slash = require('coagent.ui.slash')
+  for key, t in pairs(templates) do
+    if slash.get(key) and not slash.get(key).template then
+      h.warn('prompts.' .. t.name .. ': /' .. key .. ' is a built-in command; use :CoagentPrompt ' .. key)
+    end
+  end
+  h.info('#url references: ' .. (cfg.references.url == false and 'disabled' or 'enabled'))
   h.info('mode: ' .. cfg.mode .. '; sessions: ' .. (cfg.session.persist and (cfg.session.dir or (vim.fn.stdpath('state') .. '/coagent/sessions')) or 'not persisted'))
 end
 

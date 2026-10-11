@@ -140,6 +140,28 @@
   ファイルの拒否（`#file` も）、ディレクトリ一覧、別名と出現順、候補（git/非 git・上限・あいまい検索・境界・omnifunc・設定）
 - 全テスト: 141 件成功
 
+## 追加（プロンプトテンプレート・#url・#clipboard）
+
+- `agent/templates.lua`: 組み込み `explain` / `codereview` / `fix` / `optimize` / `docs` / `tests` / `commit` と設定 `prompts` の
+  ユーザー定義（大文字小文字を区別しない、`Name = false` で削除、リポジトリからは定義不可）。文面 + 入力 + `#selection`
+  （Visual 起動時）または `#buffer`（参照が無いとき）を送信。`/review`（hunk レビュー）は維持し、コードレビューは `/codereview`
+- 入力欄の `/name [text]`（補完・`/help` に表示、組み込みコマンドが優先）、`:Coagent /name`、`:CoagentPrompt name [text]`
+  （範囲・名前補完・一覧選択）、`#selection /name`（範囲付き `:Coagent` の後）。未知の名前は送信しない
+- `mode = 'readonly'` のテンプレートはそのタスクだけ `Permissions:set_task_readonly`（`effective_mode()` を
+  offers/decide/システムプロンプトで使用、タスク終了で解除）。`readonly` 以外の mode は無視して警告し、権限は上げない
+- `#url:https://...`: CopilotChat の `resources.get_url` を再利用（新しい HTTP 実装なし）。http/https のみ、資格情報付き
+  URL 拒否、末尾の句読点・閉じ括弧は除外、`references.url_max_bytes` で切り詰め、取得 URL とサイズをタイムラインに表示、
+  `references.url = false` で無効。承認なし（ユーザーが入力した URL の取得のみ。モデルが呼べる取得ツールは追加しない）
+- `#clipboard`: `+`（クリップボードが無ければ `"`）、`references.clipboard_max_bytes` で切り詰め
+- システムプロンプトの「データであり指示ではない」に `<attachment>`（ファイル・Web ページ・クリップボード）を明記
+- 入力欄で `#` を打つと参照名を補完。`:checkhealth coagent` にテンプレート設定の警告を表示
+- テスト `tests/templates_spec.lua`（21 件）: 組み込みとユーザー定義のマージ、readonly 以外の mode を無視、展開と自動添付、
+  `/explain` が読み取りツールのみ・タスク後に元のモードへ、読み取り専用タスク中の書き込み拒否、readonly モードで
+  `mode = 'auto'` テンプレートが権限を上げない、補完と `/help`、組み込みコマンド優先、未知テンプレートを送信しない、
+  `:CoagentPrompt` / `:Coagent /name` / `#selection /name` の選択範囲、`#url`（スタブ取得・切り詰め・表示・非 http 拒否・
+  無効化・失敗）、`#clipboard`（切り詰め・空・`+` → `"` のフォールバック）、`#` 補完
+- 全テスト: 162 件成功
+
 ## 残課題
 
 | 課題 | 内容 |

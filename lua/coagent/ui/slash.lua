@@ -3,6 +3,8 @@
 --- A prompt whose first word is "/name" runs a command instead of reaching the
 --- model. "//text" sends "/text" literally. Text such as "/etc/hosts is wrong"
 --- (first word is not a plain command name) is sent as a normal prompt.
+--- Prompt templates (/explain, /fix, user `prompts`) are commands too; a
+--- built-in command wins over a template of the same name.
 local M = {}
 
 local function app()
@@ -20,6 +22,7 @@ local ROLES = { 'builder', 'explorer', 'advisor' }
 ---@field args string? usage hint for the argument
 ---@field desc string
 ---@field complete string[]? argument candidates
+---@field template boolean? a prompt template
 ---@field run fun(arg:string):boolean?, table?
 
 ---@type Coagent.SlashCommand[]
@@ -148,10 +151,69 @@ for _, c in ipairs(M.COMMANDS) do
   by_name[c.name] = c
 end
 
+--- Prompt templates as commands (from the user config, read each time so
+--- changes made by setup() apply at once).
+---@return Coagent.SlashCommand[]
+function M.template_commands()
+  local out = {}
+  for _, t in ipairs(require('coagent.agent.templates').list()) do
+    if not by_name[t.key] then
+      table.insert(out, {
+        name = t.key,
+        args = '[text]',
+        desc = t.description .. ((t.mode == 'readonly' and not t.description:find('read%-only')) and ' (read-only)' or ''),
+        template = true,
+        run = function(arg)
+          return app().run_template(t.key, arg)
+        end,
+      })
+    end
+  end
+  return out
+end
+
+--- Built-in commands followed by template commands.
+---@return Coagent.SlashCommand[]
+function M.commands()
+  return vim.list_extend(vim.list_slice(M.COMMANDS), M.template_commands())
+end
+
 ---@param name string
 ---@return Coagent.SlashCommand?
 function M.get(name)
-  return by_name[name]
+  if by_name[name] then
+    return by_name[name]
+  end
+  for _, c in ipairs(M.template_commands()) do
+    if c.name == name then
+      return c
+    end
+  end
+end
+
+--- `#selection /explain why` (references typed before a template command,
+--- e.g. after `:'<,'>Coagent` put "#selection " in the input) runs the
+--- template with the references moved after the text.
+---@param text string
+---@return {kind:'command', name:string, arg:string}?
+function M.parse_template_after_refs(text)
+  local lead, rest = {}, text
+  while true do
+    local tok, after = rest:match('^(#%a+[^%s]*)%s+(.*)$')
+    if not tok then
+      break
+    end
+    table.insert(lead, tok)
+    rest = after
+  end
+  if #lead == 0 then
+    return nil
+  end
+  local p = M.parse(rest)
+  local cmd = p.kind == 'command' and M.get(p.name)
+  if cmd and cmd.template then
+    return { kind = 'command', name = p.name, arg = vim.trim(p.arg .. ' ' .. table.concat(lead, ' ')) }
+  end
 end
 
 --- Classify an input text.
@@ -173,7 +235,7 @@ end
 ---@param p {name:string, arg:string}
 ---@return boolean ok, table? opts {history:boolean?}
 function M.run(p)
-  local cmd = by_name[p.name]
+  local cmd = M.get(p.name)
   if not cmd then
     notice('error', 'Unknown command /' .. p.name .. ' (not sent to the model). /help lists commands; start with // to send a literal "/".')
     return false
@@ -195,6 +257,13 @@ function M.help_text()
     local usage = '/' .. c.name .. (c.args and (' ' .. c.args) or '')
     table.insert(lines, string.format('  %-20s %s', usage, c.desc))
   end
+  local tpls = M.template_commands()
+  if #tpls > 0 then
+    table.insert(lines, 'Prompt templates (prepended to your text; #selection or #buffer by default):')
+    for _, c in ipairs(tpls) do
+      table.insert(lines, string.format('  %-20s %s', '/' .. c.name .. ' ' .. c.args, c.desc))
+    end
+  end
   return table.concat(lines, '\n')
 end
 
@@ -210,7 +279,7 @@ function M.complete(before)
   local prefix = before:match('^/([%w_-]*)$')
   if prefix then
     local items = {}
-    for _, c in ipairs(M.COMMANDS) do
+    for _, c in ipairs(M.commands()) do
       if vim.startswith(c.name, prefix) then
         table.insert(items, { word = '/' .. c.name, abbr = '/' .. c.name .. (c.args and (' ' .. c.args) or ''), menu = c.desc })
       end
@@ -218,7 +287,7 @@ function M.complete(before)
     return 0, items
   end
   local name, argp = before:match('^/(%a[%w_-]*)%s+(%S*)$')
-  local cmd = name and by_name[name]
+  local cmd = name and M.get(name)
   if cmd and cmd.complete then
     local items = {}
     for _, a in ipairs(cmd.complete) do
@@ -240,7 +309,29 @@ local function ui_opt(name)
   return require('coagent.config').options.ui[name] ~= false
 end
 
---- Candidates for the input buffer: /commands (first line) or @paths.
+--- `#reference` names for a "#word" ending at the cursor (after whitespace
+--- or at the start of the line).
+---@param before string
+---@return integer? start, table[] items
+function M.complete_reference(before)
+  local hash, base = before:match('()#(%a*)$')
+  if not hash or (hash > 1 and not before:sub(hash - 1, hash - 1):match('%s')) then
+    return nil, {}
+  end
+  local refs = require('coagent.agent.context').REFERENCES
+  local names = vim.tbl_keys(refs)
+  table.sort(names)
+  local items = {}
+  for _, n in ipairs(names) do
+    if vim.startswith(n, base) then
+      local takes_arg = n == 'file' or n == 'url' or n == 'gitdiff'
+      table.insert(items, { word = '#' .. n .. ((n == 'file' or n == 'url') and ':' or ''), abbr = '#' .. n .. (takes_arg and ':' or ''), menu = refs[n] })
+    end
+  end
+  return hash - 1, items
+end
+
+--- Candidates for the input buffer: /commands (first line), #references or @paths.
 ---@param before string
 ---@param row integer
 ---@param auto boolean? typing (respects ui.slash_complete / ui.mention_complete)
@@ -253,6 +344,10 @@ function M.input_complete(before, row, auto)
     end
   end
   if not auto or ui_opt('mention_complete') then
+    local rstart, refs = M.complete_reference(before)
+    if rstart then
+      return rstart, refs
+    end
     local ok, c = pcall(app().controller)
     if ok and c and c.ws then
       return require('coagent.ui.mention').complete(before, c.ws)

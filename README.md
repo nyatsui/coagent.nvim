@@ -39,6 +39,8 @@ I'll find the `add` implementation and its tests.
 - **ユーザーの変更を壊さない** — 未保存バッファとの競合検出、承認待ち中のディスク変更検出、作業開始前の状態を基準にしたロールバック
 - **リッチな TUI** — タイムライン、折りたたみ、ストリーミング描画（ちらつき防止の差分更新）、hunk 単位レビュー、side-by-side diff、コマンド出力パネル、変更一覧
 - **ターミナル適応** — 80×24 で動作、tmux、256 色/true color、Unicode/ASCII/Nerd Font アイコン、split/float 切替、リサイズ追従
+- **プロンプトテンプレート** — `/explain` `/codereview` `/fix` `/tests` `/commit` など（CopilotChat の定型プロンプト相当）と設定での独自定義。説明・レビューはそのタスクだけ読み取り専用
+- **`#url` / `#clipboard`** — 入力した URL のページ本文やクリップボードを添付
 - **セッション** — プロジェクト単位で保存/復元、中断タスクの再開（未実行の tool call は再実行しない）
 
 ## 要件
@@ -137,12 +139,22 @@ nvim --clean -u scripts/demo.lua
 | `@buffer` / `@selection` | `#buffer` / `#selection` の別名（同名ファイルがあればファイルを優先） |
 | `#diagnostics` | 現在のバッファの LSP 診断 |
 | `#gitdiff` / `#gitdiff:staged` | 未ステージ / ステージ済みの diff |
+| `#url:https://...` | Web ページの本文（GET で取得し、`references.url_max_bytes`（既定 32KB）で切り詰め） |
+| `#clipboard` | クリップボード（`+` レジスタ、無ければ無名レジスタ `"`。`references.clipboard_max_bytes` で切り詰め） |
+
+`#url` は自分で入力した URL だけを取得します（承認は求めません。送信ではなく取得のため）。`http://` / `https://` 以外、
+スキーム省略、`user:pass@` を含む URL は拒否します。取得には CopilotChat の `resources.get_url`（`lynx -dump`、無ければ
+`curl -L` で HTML を除去）を使い、Cookie や認証ヘッダーは付けません。取得した URL とサイズはタイムラインに表示され、
+本文は他の添付と同じく「データ（指示ではない）」としてモデルに渡ります。`references = { url = false }` で無効化できます。
+モデルが自分で URL を選んで取得するツールはありません（プロンプトインジェクションでワークスペースの内容を URL に載せて
+外部へ送られるのを防ぐため）。
 
 `@path` は行頭か空白の直後にあり、かつワークスペースに存在するパスのときだけ参照になります（`a@b.com` や
 `@Override`、存在しないパスはそのまま送信、エラーにもなりません）。パス自体はプロンプト本文に残ります。
 ワークスペース外（シンボリックリンクの実体で判定）と保護ファイル（`auto.protected_globs`: `.env`、鍵、`.git` など）は
 `#file` と同じく拒否され、警告が出ます。
 
+`#` を打つと参照名（`#buffer`、`#url:` など）の候補が出ます。
 入力中に `@` を打つとワークスペースのファイル候補がポップアップし、続けて打つとあいまい検索で絞り込まれます
 （`git ls-files` と無視されていない未追跡ファイル、git 外ではディレクトリ走査。保護ファイルは除外、最大 2000 件。
 `ui.mention_complete = false` で自動表示を無効化、`<C-x><C-o>` は有効のまま）。
@@ -171,6 +183,45 @@ nvim --clean -u scripts/demo.lua
   `/etc/hosts が…` のように先頭語がコマンド名の形でない場合はそのまま送信されます
 - `:Coagent /compact` のようにコマンドからも使えます
 
+### プロンプトテンプレート
+
+よく使う依頼は `/名前 [追加の指示]` で送れます（CopilotChat の `/Explain` などに相当）。テンプレートの文面が入力の前に付き、
+Visual 選択から起動したときは `#selection`、それ以外は `#buffer` が自動で添付されます（入力に `#file:` や `@path` などの
+参照があれば追加しません）。
+
+| テンプレート | 内容 | 権限 |
+|---|---|---|
+| `/explain` | コードの説明 | **読み取り専用** |
+| `/codereview` | コードレビュー（問題点を重要度順に path:line 付きで） | **読み取り専用** |
+| `/fix` | 問題の原因を特定して最小限の修正、検証 | 現在のモード |
+| `/optimize` | 動作を変えずに性能・可読性を改善 | 現在のモード |
+| `/docs` | ドキュメントコメントを追加 | 現在のモード |
+| `/tests` | テストを書いて実行 | 現在のモード |
+| `/commit` | ステージ済み変更（`#gitdiff:staged`）のコミットメッセージ作成（`git commit` はしない） | **読み取り専用** |
+
+- `/review` は従来どおり承認待ち編集の hunk レビューです。コードレビューは `/codereview` を使います
+- 読み取り専用のテンプレートは**そのタスクだけ** read/search ツールに制限します（winbar に `read-only (task)`）。
+  タスクが終われば元のモードに戻ります。テンプレートが権限を上げることはありません（`mode = 'auto'` などは無視して警告）
+- `:'<,'>CoagentPrompt explain 境界条件に注目` や `:Coagent /explain` でも実行できます（`:CoagentPrompt` は名前を補完、
+  引数なしなら一覧から選択）。範囲付き `:Coagent` で入力欄に入る `#selection ` の後に `/explain` と書いても動きます
+- 未知のテンプレート名はエラー表示のみで、モデルには送られません
+
+独自テンプレートは設定の `prompts` で定義します（リポジトリ内のファイルからは定義できません）:
+
+```lua
+require('coagent').setup({
+  prompts = {
+    Summarize = { prompt = 'このコードの要点を 3 行でまとめて。', mode = 'readonly', description = '3 行要約' },
+    Explain = { prompt = '日本語で説明して。ファイルは変更しないこと。', mode = 'readonly' }, -- 組み込みを上書き
+    Tests = false, -- 組み込みを無効化
+  },
+})
+```
+
+名前は大文字小文字を区別せず、小文字のスラッシュコマンド（`/summarize`）になります。組み込みのスラッシュコマンド
+（`/review` など）と同名のテンプレートは `:CoagentPrompt` からのみ使えます。`context = false` で `#selection` / `#buffer`
+の自動添付を止められます。
+
 ### エージェントが使うツール
 
 | 種類 | ツール | 承認（supervised） |
@@ -191,7 +242,8 @@ nvim --clean -u scripts/demo.lua
 
 | コマンド | 説明 |
 |---|---|
-| `:Coagent [task]` | パネルを開く / タスク送信（範囲指定で選択範囲を添付） |
+| `:Coagent [task]` | パネルを開く / タスク送信（範囲指定で選択範囲を添付）。`:Coagent /explain` でテンプレート実行 |
+| `:CoagentPrompt [name] [text]` | プロンプトテンプレートを実行（範囲指定で選択範囲。名前なしなら一覧から選択） |
 | `:CoagentToggle` / `Open` / `Close` | パネル開閉 |
 | `:CoagentStop` | 即時停止（リクエスト中断・実行中プロセスグループ kill・承認待ち破棄） |
 | `:CoagentPause` / `:CoagentResume` | ステップ境界で一時停止 / 再開（中断・復元セッションの再開も） |
@@ -287,6 +339,8 @@ require('coagent').setup({
   background = { max_processes = 3, max_output_bytes = 1024 * 1024, max_lifetime_ms = 2 * 60 * 60 * 1000 },
   session = { persist = true, save_tool_output = true },
   ui = { layout = 'vertical', width = 0.42, icons = 'unicode', show_reasoning = false },
+  prompts = {}, -- 独自のプロンプトテンプレート（「プロンプトテンプレート」参照）
+  references = { url = true, url_max_bytes = 32 * 1024, clipboard_max_bytes = 32 * 1024 },
 })
 ```
 

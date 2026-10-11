@@ -14,6 +14,25 @@ end
 cmd('Coagent', function(a)
   agent().ask(a.args, { range = a.range > 0 and { a.line1, a.line2 } or nil })
 end, { nargs = '*', range = true, desc = 'Open Coagent or send a task (range = selection)' })
+cmd('CoagentPrompt', function(a)
+  agent().prompt(a.args, { range = a.range > 0 and { a.line1, a.line2 } or nil })
+end, {
+  nargs = '*',
+  range = true,
+  desc = 'Run a prompt template: Name [text] (range = selection)',
+  complete = function(lead, line)
+    if line:match('^%S+%s+%S+%s') then
+      return {}
+    end
+    local names = {}
+    for _, t in ipairs(require('coagent.agent.templates').list()) do
+      if vim.startswith(t.key, lead:lower()) then
+        table.insert(names, t.key)
+      end
+    end
+    return names
+  end,
+})
 cmd('CoagentToggle', function()
   agent().toggle()
 end, { desc = 'Toggle the Coagent panel' })

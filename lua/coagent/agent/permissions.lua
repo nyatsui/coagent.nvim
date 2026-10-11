@@ -31,7 +31,7 @@ Permissions.MODES = { 'supervised', 'readonly', 'auto' }
 ---@param config table
 ---@param ws Coagent.Workspace
 function Permissions.new(config, ws)
-  local self = setmetatable({ config = config, ws = ws, grants = {}, auto_enabled = false }, Permissions)
+  local self = setmetatable({ config = config, ws = ws, grants = {}, auto_enabled = false, task_readonly = false }, Permissions)
   self.mode = 'supervised'
   self:set_mode(config.mode or 'supervised')
   return self
@@ -74,11 +74,24 @@ function Permissions:set_mode(mode, explicit)
   return true
 end
 
+--- Mode in force: `mode`, or 'readonly' while a read-only template task
+--- (/explain, /codereview, ...) runs. The task override can only lower it.
+---@return string
+function Permissions:effective_mode()
+  return self.task_readonly and 'readonly' or self.mode
+end
+
+--- Restrict (true) or release (false) the current task to read-only tools.
+---@param on boolean
+function Permissions:set_task_readonly(on)
+  self.task_readonly = on and true or false
+end
+
 --- Tool kinds offered to the model in the current mode.
 ---@param kind string
 ---@return boolean
 function Permissions:offers(kind)
-  if self.mode == 'readonly' then
+  if self:effective_mode() == 'readonly' then
     return kind == 'read'
   end
   return true
@@ -100,7 +113,7 @@ end
 ---@param prepared table
 ---@return Coagent.Decision
 function Permissions:decide(tool, args, prepared)
-  local mode = self.mode
+  local mode = self:effective_mode()
   prepared = prepared or {}
 
   if tool.kind == 'read' then

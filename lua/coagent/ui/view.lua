@@ -249,6 +249,9 @@ function View:bar()
   end
   local mode = c.permissions.mode
   local mode_short = ({ supervised = 'supervised', readonly = 'read-only', auto = 'AUTO' })[mode] or mode
+  if c.permissions.task_readonly and mode ~= 'readonly' then
+    mode_short = 'read-only (task)'
+  end
   -- Optional segments: {display order, priority (lower = more important), text}
   local segs = {}
   if c.task and State.is_busy(st) then

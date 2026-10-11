@@ -26,6 +26,11 @@ Check the setup with |:checkhealth| coagent.
 
 :Coagent [task]          Open the panel or send a task. With a range the
                               selection is attached (#selection).
+                              ":Coagent /explain" runs a template.
+:CoagentPrompt [name] [text]
+                         Run a prompt template (|coagent-templates|).
+                              With a range the selection is attached;
+                              without a name pick one from a list.
 :CoagentToggle           Toggle the panel.
 :CoagentStop             Stop now (abort request, kill command, drop
                               pending approval).
@@ -75,6 +80,20 @@ References in a prompt attach context:
   #file:path          A file.
   #diagnostics        LSP diagnostics of the current buffer.
   #gitdiff[:staged]   Uncommitted (or staged) diff.
+  #url:https://...    A web page, fetched with GET and attached as text
+                      (clipped to `references.url_max_bytes`, 32 KB).
+  #clipboard          The + register (else the unnamed register), clipped
+                      to `references.clipboard_max_bytes`.
+
+#url fetches only URLs you type: no approval is asked because it is a
+fetch, not a send. Only http:// and https:// are accepted; other schemes,
+a missing scheme and credentials (user:pass@host) are refused. It reuses
+CopilotChat's resources.get_url (lynx -dump, else curl -L with HTML
+stripped) and adds no cookies or auth headers. The URL and size appear in
+the timeline; the page is untrusted data like any attachment. Disable it
+with `references = { url = false }`. The model has no web-fetch tool of its
+own (a URL it chose could leak workspace data in its query string).
+Typing "#" pops up the reference names.
 
 Files outside the workspace (symlinks resolved) and protected files
 (`auto.protected_globs`: .env, keys, .git, ...) are refused with a warning.
@@ -109,6 +128,37 @@ command name (e.g. "/etc/hosts is wrong") is sent as a normal prompt.
 /compact is refused while the agent is working. The session history itself
 is not changed; only what later requests send. Because the start of the
 request changes, the next request is a one-time prompt-cache miss.
+
+                                                     *coagent-templates*
+Prompt templates run as /name [text] (or :CoagentPrompt name [text]). The
+template text is put before yours, and #selection (started from visual
+mode) or #buffer is attached unless your text names a source.
+
+  /explain            Explain the code.                      (read-only)
+  /codereview         Review the code for problems.          (read-only)
+  /fix                Find, fix and verify the problem.
+  /optimize           Improve performance and readability.
+  /docs               Add documentation comments.
+  /tests              Write tests and run them.
+  /commit             Commit message for #gitdiff:staged.    (read-only)
+
+/review stays the hunk review of a pending edit; /codereview is the code
+review. A read-only template limits only its own task to read/search tools
+(the bar shows "read-only (task)"); the mode returns afterwards. Templates
+never raise the permission mode. Unknown names are not sent.
+
+User templates come only from the config (never from repository files):
+>lua
+  prompts = {
+    Summarize = { prompt = 'Summarize this code.', mode = 'readonly',
+                  description = 'Short summary' },
+    Tests = false,          -- remove a built-in
+  }
+<
+Names are case-insensitive and become lower-case commands (/summarize).
+`mode` accepts only 'readonly'. `context = false` skips the automatic
+#selection/#buffer. A template named like a built-in command (/review)
+is reachable only through :CoagentPrompt.
 
 ==============================================================================
 5. MODES                                                 *coagent-modes*

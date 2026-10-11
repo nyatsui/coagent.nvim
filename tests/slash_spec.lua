@@ -63,9 +63,9 @@ describe('slash completion', function()
       return i.word
     end, items)
     table.sort(words)
-    assert.are.same({ '/changes', '/clear', '/compact' }, words)
+    assert.are.same({ '/changes', '/clear', '/codereview', '/commit', '/compact' }, words)
     local _, all = slash.complete('/')
-    assert.are.equal(#slash.COMMANDS, #all)
+    assert.are.equal(#slash.commands(), #all)
     assert.is_truthy(all[1].menu ~= '')
   end)
 

@@ -42,7 +42,12 @@
 ### コンテキストを渡す
 
 - `:'<,'>Coagent 理由を説明して` — 選択範囲を添付
-- 入力中に `#buffer`, `#buffers`, `#file:src/x.py`, `#diagnostics`, `#gitdiff`, `#gitdiff:staged`, `#selection`
+- 入力中に `#buffer`, `#buffers`, `#file:src/x.py`, `#diagnostics`, `#gitdiff`, `#gitdiff:staged`, `#selection`,
+  `#url:https://...`, `#clipboard`（`#` を打つと候補が出る）
+- `#url:https://example.com/doc` — ページを GET で取得して本文を添付（既定 32KB で切り詰め、承認なし）
+  - 自分で入力した URL のみ。`http` / `https` 以外・スキーム省略・`user:pass@` 付きは拒否。Cookie・認証ヘッダーは付けない
+  - 取得した URL とサイズがタイムラインに出る。本文は他の添付と同じく「データ」扱い。`references.url = false` で無効化
+- `#clipboard` — `+` レジスタ（無ければ `"`）の内容を添付（既定 32KB で切り詰め）
 - `@src/x.py` は `#file:src/x.py` と同じ（パスは本文に残る）。`@src/` はディレクトリ一覧、`@buffer` / `@selection` は別名
   - 行頭か空白の直後の `@` で、ワークスペースに存在するパスのときだけ参照になる。`a@b.com`、`@Override`、存在しないパスは
     そのまま送信（警告なし）。末尾の `,` `.` `)` などはパスに含めない
@@ -69,6 +74,19 @@
 - `/etc/hosts` のように先頭語がコマンド名の形（英字で始まり英数字・`-`・`_` のみ）でなければ通常の送信です
 - `/compact` は作業中（応答待ち・ツール実行中・承認待ち）は拒否されます。次のリクエストは送信内容の先頭が変わるため
   1 回だけプロンプトキャッシュが効きません。セッションの履歴そのものは変わりません
+
+### プロンプトテンプレート
+
+`/explain` `/codereview` `/fix` `/optimize` `/docs` `/tests` `/commit` は定型の依頼です。テンプレート文面 + 入力した追加指示 +
+`#selection`（Visual 選択から起動時）または `#buffer` が送られます（入力に参照があれば自動添付なし。`/commit` は
+`#gitdiff:staged`）。
+
+- `:'<,'>CoagentPrompt explain` / `:'<,'>Coagent /explain` / パネル入力で `/explain ここが遅い理由も`
+- `/explain` `/codereview` `/commit` はそのタスクだけ読み取り専用（winbar `read-only (task)`）。終われば元のモードに戻る
+- テンプレートは権限を上げない（設定で `mode = 'auto'` と書いても無視して警告）
+- `/review` は hunk レビューのまま。コードレビューは `/codereview`
+- 独自テンプレートは設定の `prompts = { Name = { prompt = '...', mode = 'readonly', description = '...' } }` のみ
+  （リポジトリのファイルからは定義不可）。`Name = false` で組み込みを無効化
 
 ## 3. 承認
 

@@ -209,6 +209,26 @@ function M.controller()
   return state.controller
 end
 
+--- Remember lines `range` = {line1, line2} of the current buffer as the
+--- selection for the next submit.
+---@param range integer[]?
+local function capture_selection(range)
+  if not range then
+    return
+  end
+  local buf = vim.api.nvim_get_current_buf()
+  local l1, l2 = range[1], range[2]
+  local name = vim.api.nvim_buf_get_name(buf)
+  state.selection = {
+    bufnr = buf,
+    path = name ~= '' and vim.fn.fnamemodify(name, ':~:.') or nil,
+    start_line = l1,
+    end_line = l2,
+    filetype = vim.bo[buf].filetype,
+    text = table.concat(vim.api.nvim_buf_get_lines(buf, l1 - 1, l2, false), '\n'),
+  }
+end
+
 local actions = {}
 
 --- Current view (created on demand).
@@ -232,6 +252,9 @@ end
 function actions.submit(text)
   local slash = require('coagent.ui.slash')
   local p = slash.parse(text)
+  if p.kind == 'text' then
+    p = slash.parse_template_after_refs(text) or p
+  end
   if p.kind == 'command' then
     return slash.run(p)
   end
@@ -245,6 +268,57 @@ function actions.submit(text)
     notify(err, vim.log.levels.WARN)
   end
   return ok
+end
+
+--- Run a prompt template (/explain, :CoagentPrompt Name ...). Its text is
+--- prepended to `text`; #selection (when started from visual mode) or
+--- #buffer is attached unless `text` names a source. Unknown names are
+--- reported and nothing is sent.
+---@param name string
+---@param text string?
+---@return boolean ok
+function M.run_template(name, text)
+  local Templates = require('coagent.agent.templates')
+  local tpl = Templates.get(name)
+  local c = M.controller()
+  if not tpl then
+    c:notice('error', 'Unknown prompt template "' .. tostring(name) .. '" (not sent to the model). /help lists templates.')
+    return false
+  end
+  c.source = source()
+  local sel = state.selection
+  state.selection = nil
+  local prompt = Templates.expand(tpl, text, { selection = sel ~= nil })
+  local ok, err = c:submit(prompt, { source = c.source, selection = sel, readonly = tpl.mode == 'readonly', template = '/' .. tpl.key })
+  if not ok then
+    notify(err, vim.log.levels.WARN)
+  end
+  return ok
+end
+
+--- `:CoagentPrompt Name [text]` (range = selection).
+---@param args string
+---@param opts {range:integer[]?}?
+function M.prompt(args, opts)
+  local name, rest = vim.trim(args or ''):match('^/?(%S+)%s*(.*)$')
+  if not name then
+    local list = require('coagent.agent.templates').list()
+    vim.ui.select(list, {
+      prompt = 'Prompt template',
+      format_item = function(t)
+        return string.format('%-12s %s', t.key, t.description)
+      end,
+    }, function(t)
+      if t then
+        M.prompt(t.key, opts)
+      end
+    end)
+    return
+  end
+  track_editor()
+  capture_selection(opts and opts.range)
+  M.view():open({ focus = nil })
+  return M.run_template(name, rest)
 end
 
 function actions.stop()
@@ -307,21 +381,19 @@ end
 function M.ask(prompt, opts)
   opts = opts or {}
   track_editor()
-  if opts.range then
-    local buf = vim.api.nvim_get_current_buf()
-    local l1, l2 = opts.range[1], opts.range[2]
-    local name = vim.api.nvim_buf_get_name(buf)
-    state.selection = {
-      bufnr = buf,
-      path = name ~= '' and vim.fn.fnamemodify(name, ':~:.') or nil,
-      start_line = l1,
-      end_line = l2,
-      filetype = vim.bo[buf].filetype,
-      text = table.concat(vim.api.nvim_buf_get_lines(buf, l1 - 1, l2, false), '\n'),
-    }
-  end
+  capture_selection(opts.range)
   local view = M.view()
   if prompt and vim.trim(prompt) ~= '' then
+    local p = require('coagent.ui.slash').parse(vim.trim(prompt))
+    if p.kind == 'command' then
+      -- `:Coagent /explain ...`: templates pick #selection themselves
+      local cmd = require('coagent.ui.slash').get(p.name)
+      if not (cmd and cmd.template) then
+        state.selection = nil
+      end
+      view:open({ focus = nil })
+      return actions.submit(vim.trim(prompt))
+    end
     if state.selection and not prompt:find('#selection', 1, true) then
       prompt = prompt .. ' #selection'
     end

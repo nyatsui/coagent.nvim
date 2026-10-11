@@ -16,7 +16,72 @@ M.REFERENCES = {
   file = 'A file: #file:path/to/file (or @path/to/file)',
   diagnostics = 'LSP diagnostics of the current buffer',
   gitdiff = 'Uncommitted git diff (#gitdiff:staged for staged changes)',
+  url = 'A web page: #url:https://... (fetched with GET, text clipped)',
+  clipboard = 'The system clipboard (+ register, else the unnamed register)',
 }
+
+------------------------------------------------------------------------------
+-- #url and #clipboard
+------------------------------------------------------------------------------
+
+--- Check a user-typed #url. Only http(s), no credentials in the URL (nothing
+--- that would send auth), no characters that break the attachment label.
+---@param url string
+---@return string? url, string? err
+function M.check_url(url)
+  if not url or url == '' then
+    return nil, 'requires a URL (#url:https://...)'
+  end
+  local scheme = url:match('^(%a[%w+.-]*)://')
+  if not scheme or not (scheme:lower() == 'http' or scheme:lower() == 'https') then
+    return nil, 'only http:// and https:// URLs can be fetched: ' .. url
+  end
+  local authority = url:match('^%a+://([^/?#]*)')
+  if not authority or authority == '' then
+    return nil, 'no host in ' .. url
+  end
+  if authority:find('@', 1, true) then
+    return nil, 'URLs with credentials (user@host) are not fetched'
+  end
+  if url:find('[%c%s"<>\\`]') then
+    return nil, 'invalid characters in ' .. url
+  end
+  return url
+end
+
+--- Fetch a page as text (GET). Reuses CopilotChat's resources.get_url (lynx
+--- -dump, else curl -L with HTML stripped); no cookies or auth headers are
+--- added. Replaceable in tests. Must run inside a coroutine.
+---@param url string
+---@return string? text
+function M.fetch_url(url)
+  local ok, resources = pcall(require, 'CopilotChat.resources')
+  if not ok then
+    error('CopilotChat.nvim is not available')
+  end
+  async.main()
+  return (resources.get_url(url))
+end
+
+--- Clipboard text: the + register when a clipboard provider exists, else the
+--- unnamed register. Replaceable in tests.
+---@return string? text, string? register
+function M.read_clipboard()
+  local regs = vim.fn.has('clipboard') == 1 and { '+', '"' } or { '"' }
+  for _, r in ipairs(regs) do
+    local ok, v = pcall(vim.fn.getreg, r)
+    if ok and type(v) == 'string' and v ~= '' then
+      return v, r
+    end
+  end
+end
+
+local function human(n)
+  if n < 1024 then
+    return n .. ' B'
+  end
+  return string.format('%.1f KB', n / 1024)
+end
 
 local function cc_function(name)
   local ok, cfg = pcall(require, 'CopilotChat.config')
@@ -43,10 +108,11 @@ end
 
 --- Resolve `#refs` in `text`. Must run inside a coroutine.
 ---@param text string
----@param env {ws:Coagent.Workspace, source:{bufnr:integer?, winnr:integer?}, selection:table?}
----@return string clean_text, string[] attachments, string[] errors
+---@param env {ws:Coagent.Workspace, source:{bufnr:integer?, winnr:integer?}, selection:table?, references:table?}
+---@return string clean_text, string[] attachments, string[] errors, string[] infos
 function M.resolve_references(text, env)
-  local atts, errors = {}, {}
+  local atts, errors, infos = {}, {}, {}
+  local refcfg = env.references or require('coagent.config').options.references or {}
   local source = env.source or {}
   local cc_source = {
     bufnr = source.bufnr,
@@ -155,6 +221,43 @@ function M.resolve_references(text, env)
       end
       table.insert(atts, attachment('gitdiff', arg ~= '' and arg or 'unstaged', 'diff', data ~= '' and data or 'No changes.'))
     end,
+    url = function(arg)
+      if refcfg.url == false then
+        table.insert(errors, '#url is disabled (references.url = false); nothing was fetched')
+        return
+      end
+      local url, err = M.check_url(arg)
+      if not url then
+        table.insert(errors, '#url: ' .. err)
+        return
+      end
+      local ok, data = pcall(M.fetch_url, url)
+      async.main()
+      if not ok or type(data) ~= 'string' or data == '' then
+        table.insert(errors, '#url: could not fetch ' .. url .. (ok and '' or (': ' .. tostring(data))))
+        return
+      end
+      local max = refcfg.url_max_bytes or 32 * 1024
+      local body = util.clip(data, max)
+      local clipped = #body < #data
+      table.insert(infos, string.format('Fetched %s (%s%s)', url, human(#data), clipped and (', attached the first ' .. human(#body)) or ''))
+      table.insert(atts, attachment('url', url, 'text', body .. (clipped and '\n[... clipped]' or '')))
+    end,
+    clipboard = function()
+      async.main()
+      local data = M.read_clipboard()
+      if not data or data == '' then
+        table.insert(errors, '#clipboard: the clipboard is empty')
+        return
+      end
+      local max = refcfg.clipboard_max_bytes or 32 * 1024
+      local body = util.clip(data, max)
+      if #body < #data then
+        table.insert(infos, string.format('#clipboard: attached the first %s of %s', human(#body), human(#data)))
+        body = body .. '\n[... clipped]'
+      end
+      table.insert(atts, attachment('clipboard', 'clipboard', 'text', body))
+    end,
   }
 
   -- Collect first: handlers may yield (async file reads), which is not
@@ -168,6 +271,17 @@ function M.resolve_references(text, env)
   for pos, name, arg in text:gmatch('()#(%a+):?([^%s]*)') do
     if handlers[name] then
       local tok = text:match('^#%a+:?[^%s]*', pos)
+      if name == 'url' then
+        -- "see #url:https://x.org/a." -> the sentence's "." is not part of it
+        local stripped = arg:gsub('[.,;:!?\'"]+$', '')
+        local _, opens = stripped:gsub('%(', '')
+        local _, closes = stripped:gsub('%)', '')
+        while closes > opens and stripped:sub(-1) == ')' do
+          stripped, closes = stripped:sub(1, -2), closes - 1
+        end
+        tok = tok:sub(1, #tok - (#arg - #stripped))
+        arg = stripped
+      end
       add({ s = pos, e = pos + #tok - 1, repl = '' }, '#' .. name .. ':' .. arg, function()
         handlers[name](arg)
       end)
@@ -205,7 +319,7 @@ function M.resolve_references(text, env)
     end
   end
   table.insert(parts, text:sub(last))
-  return vim.trim(table.concat(parts)), atts, errors
+  return vim.trim(table.concat(parts)), atts, errors, infos
 end
 
 M.MENTION_ALIASES = { buffer = true, selection = true }

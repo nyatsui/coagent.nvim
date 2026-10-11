@@ -192,7 +192,9 @@ end
 
 --- Start a new task (or a follow-up in the same session).
 ---@param text string
----@param opts {source:table?, selection:table?}?
+---@param opts {source:table?, selection:table?, readonly:boolean?}?
+---  readonly: restrict this task to read/search tools (prompt templates);
+---  it can only lower the mode, never raise it.
 ---@return boolean ok, string? err
 function Controller:submit(text, opts)
   opts = opts or {}
@@ -216,14 +218,22 @@ function Controller:submit(text, opts)
   if self.session.title == 'New session' then
     self.session.title = util.ellipsize((text:gsub('\n.*', '')), 80)
   end
+  self.permissions:set_task_readonly(opts.readonly)
   self:_add({ type = 'user', text = text })
+  if opts.readonly and self.permissions.mode ~= 'readonly' then
+    self:notice('info', 'Read-only for this task (' .. (opts.template or 'template') .. '): only read and search tools.')
+  end
   return self:_start(function(gen)
-    local clean, atts, errors = context.resolve_references(text, {
+    local clean, atts, errors, infos = context.resolve_references(text, {
       ws = self.ws,
       source = opts.source or {},
       selection = opts.selection,
+      references = self.config.references,
     })
     async.main()
+    for _, i in ipairs(infos or {}) do
+      self:notice('info', i)
+    end
     for _, e in ipairs(errors) do
       self:notice('warn', e)
     end
@@ -387,7 +397,7 @@ function Controller:_compact_view(watermark)
   local model = self:active_model()
   local budget, max = self:_known_budget(model)
   local sp = (self.task and self.task.system_prompt)
-    or prompt.build({ root = self.ws.root, mode = self.permissions.mode, instruction_files = self.config.instruction_files })
+    or prompt.build({ root = self.ws.root, mode = self.permissions:effective_mode(), instruction_files = self.config.instruction_files })
   local sent = context.with_summary(self.session.messages, self.session.compact_summary)
   local _, cinfo = context.compact(sent, budget, { system_prompt = sp, watermark = watermark })
   return cinfo, { budget = budget, max = max, system_prompt = sp, sent = sent }
@@ -808,7 +818,7 @@ end
 
 function Controller:_request(gen)
   local model = self:active_model()
-  local mode = self.permissions.mode
+  local mode = self.permissions:effective_mode()
   if not self.task.system_prompt or self.task.system_mode ~= mode then
     self.task.system_prompt = prompt.build({
       root = self.ws.root,
@@ -1051,7 +1061,7 @@ function Controller:_execute(gen, tc)
   end
   item.kind = tool.kind
   if not self.permissions:offers(tool.kind) then
-    return fail('denied', 'DENIED: ' .. tc.name .. ' is not available in ' .. self.permissions.mode .. ' mode.')
+    return fail('denied', 'DENIED: ' .. tc.name .. ' is not available in ' .. self.permissions:effective_mode() .. ' mode.')
   end
 
   local ctx = self:_tool_ctx(item, gen)
@@ -1255,6 +1265,7 @@ end
 
 function Controller:_finish_now(state, info)
   info = info or {}
+  self.permissions:set_task_readonly(false)
   self.session:repair()
   self.pending_approval = nil
   local t = self.task or { started = util.now(), steps = 0, tool_calls = 0, checks = {} }
