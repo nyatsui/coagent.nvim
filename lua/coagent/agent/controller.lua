@@ -438,17 +438,28 @@ function Controller:_loop(gen)
 end
 
 --- Context budget in tokens.
-function Controller:_budget(model)
-  if self.config.limits.context_budget then
-    return self.config.limits.context_budget
+--- Context window of the model in use. With "auto" the server picks the real
+--- model per request; CopilotChat reports that model's limit in usage.max_tokens,
+--- which is more accurate than the "auto" placeholder entry.
+function Controller:_max_tokens(model)
+  local u = self.session.usage
+  if u and u.max_tokens and u.max_tokens > 0 and u.requested_model == model then
+    return u.max_tokens
   end
   if self.model_cache[model] == nil then
     local ok, info = pcall(self.backend.model_info, self.backend, model)
     self.model_cache[model] = ok and info or false
   end
   local info = self.model_cache[model]
-  local max = info and info.max_input_tokens or 64000
-  return math.floor(max * 0.7)
+  return info and info.max_input_tokens or 64000
+end
+
+--- Context budget in tokens (compaction starts above it).
+function Controller:_budget(model)
+  if self.config.limits.context_budget then
+    return self.config.limits.context_budget
+  end
+  return math.floor(self:_max_tokens(model) * 0.7)
 end
 
 function Controller:_request(gen)
@@ -476,10 +487,25 @@ function Controller:_request(gen)
   if self.gen ~= gen then
     return { cancelled = true }
   end
-  local messages, cinfo = context.compact(self.session.messages, budget, { system_prompt = system_prompt })
+  local messages, cinfo = context.compact(self.session.messages, budget, {
+    system_prompt = system_prompt,
+    watermark = self.session.compact_watermark,
+  })
+  self.session.compact_watermark = cinfo.watermark
   if cinfo.dropped > 0 or cinfo.elided > 0 then
     self.events:emit('context_compacted', cinfo)
   end
+  -- what this request sends (estimated); replaced by the server count after the reply
+  self.session.context = {
+    estimate = cinfo.tokens or context.estimate(messages, system_prompt),
+    reported = nil,
+    max = self:_max_tokens(model),
+    budget = budget,
+    elided = cinfo.elided,
+    dropped = cinfo.dropped,
+    full = context.estimate(self.session.messages, system_prompt),
+  }
+  self.events:emit('context', self.session.context)
 
   local attempts = 0
   while true do
@@ -537,7 +563,15 @@ function Controller:_request(gen)
         item = self:_add({ type = 'assistant', text = text, streaming = false, reasoning = res.reasoning })
       end
       if res.usage then
+        res.usage.requested_model = model
         self.session.usage = res.usage
+        local ctx = self.session.context
+        if ctx then
+          ctx.reported = res.usage.total_tokens
+          if res.usage.max_tokens and res.usage.max_tokens > 0 then
+            ctx.max = res.usage.max_tokens
+          end
+        end
         self.events:emit('usage', res.usage)
       end
       return res

@@ -237,26 +237,44 @@ function M.compact(messages, budget, opts)
   opts = opts or {}
   local keep_recent = opts.keep_recent or 8
   local msgs = vim.deepcopy(messages)
-  local info = { elided = 0, dropped = 0 }
+  -- Cache-friendly elision: messages up to `watermark` are always elided the
+  -- same way, so the request prefix stays identical between steps (provider
+  -- prompt caches only hit on identical prefixes; Copilot bills by tokens).
+  -- The watermark only moves when the budget is exceeded, and then jumps far
+  -- enough to get down to `target` so it does not move again every step.
+  local watermark = opts.watermark or 0
+  local target = opts.target or math.floor(budget * 0.6)
+  local info = { elided = 0, dropped = 0, watermark = watermark }
   local function size()
     return M.estimate(msgs, opts.system_prompt)
+  end
+  local cutoff = #msgs - keep_recent
+  local function elide_at(i)
+    local m = msgs[i]
+    if m and m.role == 'tool' and #(m.content or '') > 800 then
+      m.content = M.elide(m.content)
+      info.elided = info.elided + 1
+    end
+  end
+  for i = 1, math.min(watermark, cutoff) do
+    elide_at(i)
   end
   if size() <= budget then
     info.tokens = size()
     return msgs, info
   end
 
-  local cutoff = #msgs - keep_recent
-  for i = 1, cutoff do
-    local m = msgs[i]
-    if m.role == 'tool' and #(m.content or '') > 800 then
-      m.content = M.elide(m.content)
-      info.elided = info.elided + 1
-      if size() <= budget then
-        info.tokens = size()
-        return msgs, info
-      end
+  for i = math.max(watermark, 0) + 1, cutoff do
+    elide_at(i)
+    info.watermark = i
+    if size() <= target then
+      info.tokens = size()
+      return msgs, info
     end
+  end
+  if size() <= budget then
+    info.tokens = size()
+    return msgs, info
   end
   for i = 1, cutoff do
     local m = msgs[i]

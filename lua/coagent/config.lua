@@ -107,6 +107,7 @@ local defaults = {
     output_height = 12, -- bottom command output panel
     collapse_tool_details = true,
     show_reasoning = false,
+    show_context = true, -- context usage ("ctx 12k/128k") in the status bar
     markdown = 'auto', -- 'auto' | 'treesitter' | 'syntax' | 'off'
   },
 

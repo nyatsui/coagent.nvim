@@ -671,3 +671,31 @@ describe('robustness fixes from real use', function()
     assert.is_truthy(h.read(root .. '/p.py'):find('discount=0.0', 1, true))
   end)
 end)
+
+describe('cache-friendly compaction', function()
+  local context = require('coagent.agent.context')
+  local function turn(i, size)
+    return {
+      { role = 'assistant', content = 'step ' .. i, tool_calls = { { id = 'c' .. i, name = 'read_file', arguments = '{}' } } },
+      { role = 'tool', tool_call_id = 'c' .. i, content = string.rep('x', size) .. '\nError: boom ' .. i },
+    }
+  end
+  it('keeps the compacted prefix stable while the conversation grows', function()
+    local msgs = { { role = 'user', content = 'TASK' } }
+    for i = 1, 12 do
+      vim.list_extend(msgs, turn(i, 4000))
+    end
+    local budget = 12000
+    local out1, info1 = context.compact(msgs, budget)
+    assert.is_true(info1.watermark > 0)
+    -- next step: two more messages, same watermark is reused
+    vim.list_extend(msgs, turn(13, 1000))
+    local out2, info2 = context.compact(msgs, budget, { watermark = info1.watermark })
+    assert.are.equal(info1.watermark, info2.watermark)
+    for i = 1, info1.watermark do
+      assert.are.same(out1[i], out2[i], 'prefix changed at ' .. i)
+    end
+    -- compacted well below the budget so the watermark does not move every step
+    assert.is_true(info1.tokens <= math.floor(budget * 0.6) + 1)
+  end)
+end)

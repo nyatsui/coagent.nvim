@@ -558,6 +558,18 @@ function M.usage()
       table.insert(lines, '')
       table.insert(lines, '  resets on ' .. usage.reset)
     end
+    local ctx = state.controller and state.controller.session.context
+    if ctx and ctx.max then
+      local used = ctx.reported or ctx.estimate or 0
+      table.insert(lines, '')
+      table.insert(lines, '  Context (last request)')
+      table.insert(lines, string.format('    used     %d tokens%s', used, ctx.reported and '' or ' (estimated)'))
+      table.insert(lines, string.format('    window   %d tokens (%.0f%% used)', ctx.max, used / ctx.max * 100))
+      table.insert(lines, string.format('    compact  above %d tokens', ctx.budget or 0))
+      if (ctx.elided or 0) + (ctx.dropped or 0) > 0 then
+        table.insert(lines, string.format('    history  %d tokens in session; %d outputs shortened, %d old messages summarized', ctx.full or 0, ctx.elided or 0, ctx.dropped or 0))
+      end
+    end
     table.insert(lines, '')
     table.insert(lines, '  (cached up to 5 minutes; q to close)')
     local buf = vim.api.nvim_create_buf(false, true)

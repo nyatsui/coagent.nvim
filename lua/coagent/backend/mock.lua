@@ -140,7 +140,7 @@ Mock.ask = async.wrap(function(self, req, cb)
       finish({
         content = content,
         tool_calls = tool_calls,
-        usage = { total_tokens = step.tokens or (#content + 100), max_tokens = 64000 },
+        usage = { total_tokens = step.tokens or (#content + 100), max_tokens = step.max_tokens or 64000 },
         model = 'mock-model',
       })
     end

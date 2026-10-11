@@ -100,6 +100,9 @@ function View:attach(c)
   on('usage', function()
     self:refresh_bar()
   end)
+  on('context', function()
+    self:refresh_bar()
+  end)
   on('approval_request', function(item)
     upd(item)
     if not self:visible() then
@@ -269,9 +272,25 @@ function View:bar()
   if bg > 0 then
     table.insert(segs, { 4, 2, bg .. ' bg' })
   end
-  local usage = c.session.usage
-  if usage and usage.total_tokens and usage.max_tokens then
-    table.insert(segs, { 5, 5, string.format('%dk/%dk tok', math.floor(usage.total_tokens / 1000), math.floor(usage.max_tokens / 1000)) })
+  local ctx = c.session.context
+  if self.config.ui.show_context ~= false and ctx and ctx.max then
+    local function k(n)
+      if n < 1000 then
+        return tostring(n)
+      elseif n < 10000 then
+        return string.format('%.1fk', n / 1000)
+      end
+      return string.format('%dk', math.floor(n / 1000 + 0.5))
+    end
+    local used = ctx.reported or ctx.estimate or 0
+    local text = 'ctx ' .. k(used) .. '/' .. k(ctx.max)
+    if width >= 70 then
+      text = text .. string.format(' %d%%', math.floor(used / ctx.max * 100 + 0.5))
+    end
+    if (ctx.elided or 0) + (ctx.dropped or 0) > 0 then
+      text = text .. (width >= 70 and ' compacted' or '*')
+    end
+    table.insert(segs, { 5, 2, text })
   end
   local sep = ' ' .. ic.dot .. ' '
   local used = vim.fn.strdisplaywidth(' ' .. ic.task .. ' ' .. label)
