@@ -7,6 +7,7 @@ CONTENTS                                              *coagent-contents*
   2. Commands ................................ |coagent-commands|
   3. Panel keys .............................. |coagent-keys|
   4. Slash commands .......................... |coagent-slash|
+     Inline edit ............................. |coagent-inline|
      Rewind .................................. |coagent-rewind|
      Formatting .............................. |coagent-format|
      Queue ................................... |coagent-queue|
@@ -36,6 +37,12 @@ Check the setup with |:checkhealth| coagent.
                          Run a prompt template (|coagent-templates|).
                               With a range the selection is attached;
                               without a name pick one from a list.
+:[range]CoagentInline [instruction]
+                         Rewrite the selected lines in place with ONE
+                              request (no tools), previewed in the buffer
+                              (|coagent-inline|). Without an instruction
+                              it is asked for; without a range the
+                              current line is used.
 :CoagentToggle           Toggle the panel.
 :CoagentStop             Stop now (abort request, kill command, drop
                               pending approval).
@@ -206,6 +213,54 @@ command name (e.g. "/etc/hosts is wrong") is sent as a normal prompt.
 is not changed; only what later requests send. Because the start of the
 request changes, the next request is a one-time prompt-cache miss.
 
+                                                *coagent-inline* *:CoagentInline*
+Inline edit: rewrite a selection without the panel (like Copilot inline chat
+or codecompanion's inline assistant). >
+
+  :'<,'>CoagentInline handle the error instead of ignoring it
+  vim.keymap.set('x', '<leader>ai', ':CoagentInline<CR>')
+<
+`keymaps.global.inline = '<leader>ai'` sets that mapping (visual: the
+selection, normal: the current line).
+
+ONE request is sent: no tools, no agent loop. It contains the instruction,
+the selected lines, `inline.context_lines` (default 40) lines of context
+before and after, the file path and the filetype, and asks for the
+replacement of exactly the selected lines in one fenced code block. It uses
+the builder model and reasoning effort and counts in the usage stats.
+
+The reply is previewed in the buffer: changed lines are highlighted as
+deleted and the new lines are shown as virtual lines below them. While the
+preview is open these buffer-local keys exist (`inline.keymaps`; earlier
+buffer-local mappings are restored afterwards):
+
+  ga    Accept: edit the buffer (one undo step; the file is NOT saved).
+  gr    Reject (cancels the request while it is still running).
+  gi    Follow-up instruction; the last reply is sent along. Empty input
+        just retries.
+  gd    Side-by-side diff of the whole file in a new tab.
+
+Without a code fence the whole reply is used, an unclosed fence takes the
+rest of the reply (both are flagged in the preview); an empty block deletes
+the selection.
+
+The edit works on the live buffer, unsaved changes included. An accepted
+edit is recorded as an agent change (baseline = the buffer right before it),
+so it shows in :CoagentChanges / :CoagentDiff, can be reverted with
+:CoagentRevert, and adds a checkpoint "[inline] path: instruction" to
+|coagent-rewind|. While the buffer still holds exactly that unsaved result,
+reverting or rewinding updates the buffer and leaves the disk alone.
+
+The selection is tracked with an extmark, so edits elsewhere only move it.
+If the selected lines themselves changed while waiting, nothing is applied;
+`gi` retries with the current lines.
+
+Permissions: readonly mode refuses (checked again on accept). In supervised
+and auto mode the preview is the approval. Protected files and files
+outside the workspace ask before anything is sent, as edit_file does;
+`.git/` is refused. Not available while the agent is working (CopilotChat
+tracks one request at a time).
+
                                                         *coagent-rewind*
 Every prompt records a checkpoint (conversation length, timeline position
 and the change tracker's state), saved with the session. /rewind and
@@ -225,8 +280,10 @@ its content right before the agent's first write after the prompt, so edits
 you made before that write are kept. A file changed outside the agent since
 its last write is a conflict and you are asked, as with :CoagentRevert:
 keep your edits (skip the file), discard them, or cancel. If an affected
-file has an unsaved buffer nothing is rewound. Rewinding is refused while
-the agent is working.
+file has an unsaved buffer nothing is rewound (unless the unsaved text is
+exactly a recorded inline edit: then the buffer is restored). Rewinding is
+refused while the agent is working. Accepted inline edits add checkpoints
+too; rewinding to one puts nothing back into the input.
 
                                                         *coagent-format*
 Formatting of agent-edited files (ALEFix-like). Nothing is formatted
@@ -384,6 +441,7 @@ auto        Only for workspaces in `auto.workspaces` or explicitly enabled.
 
   require('coagent').setup(opts)
   require('coagent').ask(prompt, { range = { l1, l2 } })
+  require('coagent').inline(instruction, { range = { l1, l2 } })
   require('coagent').open() / close() / toggle() / stop()
   require('coagent').compact({ summary = false })
   require('coagent').clear_queue({ restore = false })  -- returns the count

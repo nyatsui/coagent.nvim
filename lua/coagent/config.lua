@@ -160,6 +160,18 @@ local defaults = {
   -- Repository instruction files injected as *untrusted, lower-priority* project notes.
   instruction_files = { 'AGENTS.md', '.github/copilot-instructions.md', 'CLAUDE.md' },
 
+  -- Inline edit (:'<,'>CoagentInline [instruction]): one request with the
+  -- builder model/effort, no tools; the reply is previewed in the buffer.
+  inline = {
+    context_lines = 40, -- lines of context sent before and after the selection
+    keymaps = { -- buffer-local while a preview is open; false disables one
+      accept = 'ga',
+      reject = 'gr',
+      retry = 'gi', -- follow-up instruction (empty = plain retry)
+      diff = 'gd', -- side-by-side diff of the whole file
+    },
+  },
+
   session = {
     persist = true,
     dir = nil, -- nil = stdpath('state')/coagent/sessions
@@ -190,6 +202,7 @@ local defaults = {
   keymaps = {
     global = {
       toggle = false, -- e.g. '<leader>aa'
+      inline = false, -- visual/normal mode :CoagentInline, e.g. '<leader>ai'
     },
     panel = {
       close = 'q',

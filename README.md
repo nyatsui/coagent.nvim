@@ -41,6 +41,8 @@ I'll find the `add` implementation and its tests.
 - **ターミナル適応** — 80×24 で動作、tmux、256 色/true color、Unicode/ASCII/Nerd Font アイコン、split/float 切替、リサイズ追従
 - **プロンプトテンプレート** — `/explain` `/codereview` `/fix` `/tests` `/commit` など（CopilotChat の定型プロンプト相当）と設定での独自定義。説明・レビューはそのタスクだけ読み取り専用
 - **`#url` / `#clipboard`** — 入力した URL のページ本文やクリップボードを添付
+- **インライン編集** — `:'<,'>CoagentInline 指示` で選択範囲だけを 1 リクエスト（ツールなし）で書き換え、
+  バッファ内に diff プレビュー（`ga` 適用 / `gr` 破棄 / `gi` 追加指示）。適用した変更は巻き戻し可能
 - **作業中の追加指示** — 作業中に送ったメッセージはキューに入り、次のステップ境界で届く（ツールや承認は中断しない）
 - **AI が編集したファイルの整形** — conform.nvim / LSP で整形（ALEFix 相当）。既定は自動整形なし（`/format` で手動）。
   `format_after_edit = 'changed'` で AI が変更した行だけを編集のたびに整形。整形結果も巻き戻し可能
@@ -71,11 +73,12 @@ I'll find the `add` implementation and its tests.
   'nyatsui/coagent.nvim',
   main = 'coagent',
   dependencies = { 'CopilotC-Nvim/CopilotChat.nvim' },
-  cmd = { 'Coagent', 'CoagentToggle', 'CoagentStop', 'CoagentSessions', 'CoagentMode', 'CoagentModel', 'CoagentChanges', 'CoagentRewind', 'CoagentFormat', 'CoagentResume', 'CoagentUsage', 'CoagentProcesses' },
+  cmd = { 'Coagent', 'CoagentToggle', 'CoagentStop', 'CoagentSessions', 'CoagentMode', 'CoagentModel', 'CoagentChanges', 'CoagentRewind', 'CoagentFormat', 'CoagentInline', 'CoagentResume', 'CoagentUsage', 'CoagentProcesses' },
   keys = {
     { '<leader>aa', '<cmd>CoagentToggle<cr>', desc = 'Coagent' },
     { '<leader>aa', ':Coagent<cr>', mode = 'v', desc = 'Coagent (selection)' },
     { '<leader>as', '<cmd>CoagentStop<cr>', desc = 'Coagent stop' },
+    { '<leader>ai', ':CoagentInline<cr>', mode = 'x', desc = 'Coagent inline edit' },
   },
   opts = {
     -- model = 'gpt-4.1',      -- 省略時は CopilotChat の model
@@ -164,6 +167,49 @@ nvim --clean -u scripts/demo.lua
 `ui.mention_complete = false` で自動表示を無効化、`<C-x><C-o>` は有効のまま）。
 
 ワークスペースのファイルが無条件に送信されることはありません。モデルは必要に応じてツールで読みます。
+
+### インライン編集（:CoagentInline）
+
+パネルを開かずに、選択した行だけをその場で書き換えます（Copilot のインラインチャットや codecompanion の inline assistant 相当）。
+
+```vim
+:'<,'>CoagentInline 例外を握りつぶさずに呼び出し元へ返して
+:'<,'>CoagentInline          " 指示を vim.ui.input で入力
+```
+
+Visual モードのキーマップ例（`keymaps.global.inline = '<leader>ai'` でも設定できます。ノーマルモードでは現在行が対象）:
+
+```lua
+vim.keymap.set('x', '<leader>ai', ':CoagentInline<CR>', { desc = 'Coagent inline edit' })
+```
+
+- **1 回のリクエストだけ**: ツールもエージェントループも使いません。送るのは指示・選択行・前後の文脈
+  （`inline.context_lines`、既定 40 行ずつ）・ファイルパス・filetype だけで、選択範囲ちょうどの置き換えを
+  1 つのコードブロックで返すよう求めます。モデルと推論の強さはビルダーのもの（`:CoagentModel` / `/effort`）。
+  リクエストは利用量（`:CoagentUsage`、winbar）に builder として数えられます
+- **バッファ内プレビュー**: 変わる行を削除色でハイライトし、新しい行を仮想行（virtual lines）で下に表示します。
+  プレビュー中だけ次のバッファローカルキーが有効です（`inline.keymaps` で変更、`false` で無効化。元のバッファローカル
+  マッピングは終了時に戻します）
+
+  | キー | 動作 |
+  |---|---|
+  | `ga` | 適用（1 回の undo で戻せる。**保存はしない**） |
+  | `gr` | 破棄（応答待ちならリクエストを中断） |
+  | `gi` | 追加指示を入力して再リクエスト（前回の応答も送る。空なら単純な再試行） |
+  | `gd` | ファイル全体の side-by-side diff（新しいタブ、`q` で閉じる） |
+
+- **ライブバッファを編集**: 未保存の変更があるバッファでもそのまま使えます（その内容を基準にします）。
+  適用した変更はエージェントの変更として記録され、`:CoagentChanges` / `:CoagentDiff` / `:CoagentRevert` / `/rewind`
+  に現れます（巻き戻しの一覧には `[inline] パス: 指示` として並びます）。未保存のままなら巻き戻しはバッファを書き換え、
+  ディスクには触りません。基準は適用直前のバッファなので、それ以前の未保存の編集は巻き戻しても残ります
+- **競合の検出**: 選択範囲はマークで追跡し、範囲外の編集（上に行を足すなど）には追従します。応答を待つ間に
+  **選択した行そのもの**が変わったら適用を拒否し、`gi` で現在の内容から再リクエストできます
+- **権限**: `readonly` モードでは送信も適用もしません（プレビュー中にモードを変えても適用時に再確認）。
+  `supervised` / `auto` ではプレビューそのものが承認です。保護ファイル（`auto.protected_globs`）と
+  ワークスペース外のファイルは、`edit_file` と同様に送信前に確認します。`.git/` 内は拒否します
+- 応答にコードブロックが無ければ応答全体を、閉じていなければ開始以降をプレビューし、その旨を表示します。
+  空のコードブロックは選択行の削除です
+- エージェントの作業中は使えません（CopilotChat のクライアントは同時に 1 リクエストのみ追跡するため）
 
 ### スラッシュコマンド
 
@@ -264,7 +310,10 @@ notify = {
   最初に書き込む直前の内容」に戻るので、その間にユーザーが加えた編集は残ります
 - エージェントの最後の書込み以降にエージェント外で変更されたファイルがあれば、`:CoagentRevert` と同様に確認します
   （そのファイルを飛ばして自分の編集を残す / 編集を破棄して戻す / 中止）
-- 対象ファイルに未保存のバッファがあれば何も変更せずに中止します。エージェントの作業中は実行できません（`<C-c>` で停止してから）
+- インライン編集（`:CoagentInline`）を適用するたびにもチェックポイントを作ります。これを選ぶと入力欄には何も戻らず、
+  コードはインライン編集の直前に戻ります
+- 対象ファイルに未保存のバッファがあれば何も変更せずに中止します（未保存の内容が記録済みのインライン編集の結果そのもの
+  なら、そのバッファを書き換えて戻します）。エージェントの作業中は実行できません（`<C-c>` で停止してから）
 
 ### AI が編集したファイルの整形（/format）
 
@@ -380,6 +429,7 @@ require('coagent').setup({
 | コマンド | 説明 |
 |---|---|
 | `:Coagent [task]` | パネルを開く / タスク送信（範囲指定で選択範囲を添付）。`:Coagent /explain` でテンプレート実行 |
+| `:'<,'>CoagentInline [指示]` | 選択行をその場で書き換え（1 リクエスト、バッファ内 diff プレビュー。`ga` 適用 / `gr` 破棄 / `gi` 追加指示 / `gd` diff） |
 | `:CoagentPrompt [name] [text]` | プロンプトテンプレートを実行（範囲指定で選択範囲。名前なしなら一覧から選択） |
 | `:CoagentToggle` / `Open` / `Close` | パネル開閉 |
 | `:CoagentStop` | 即時停止（リクエスト中断・実行中プロセスグループ kill・承認待ち破棄） |
@@ -422,7 +472,7 @@ require('coagent').setup({
 入力欄の Normal mode では `a` `d` `i` などは通常の編集キーのままなので、パネル操作は `g` 付きで使えます:
 `ga` 承認 / `gA` 常に承認 / `gx` 拒否 / `gX` 拒否して停止 / `gr` hunk レビュー / `gd` diff / `gc` 変更一覧 /
 `gu` 利用量 / `gs` セッション / `gn` 新規 / `gm` モード / `g?` ヘルプ（承認待ちの間はステータスラインにも表示）。
-グローバルキーは既定で設定しません（`keymaps.global.toggle` で設定）。Alt キーなどターミナル依存の
+グローバルキーは既定で設定しません（`keymaps.global.toggle` / `keymaps.global.inline` で設定）。Alt キーなどターミナル依存の
 キーは既定値に使っていません。
 
 ## 承認モードと安全性
@@ -441,7 +491,9 @@ require('coagent').setup({
   ③引数のワークスペース外パス・保護ファイル・`-exec` 等のフラグを検出、④自動実行コマンドは OS サンドボックスでワークスペースと一時領域以外への書込みを禁止、を組み合わせています
 - `git reset --hard` / `git clean` 等は自動実行されません
 - ワークスペース外・`.git/` 内・シンボリックリンク経由の範囲外への書込みは拒否します
-- 未保存の変更があるバッファのファイルは編集しません（競合として通知）。承認待ちの間にディスク上で変更された場合も中止します
+- 未保存の変更があるバッファのファイルは編集しません（競合として通知）。承認待ちの間にディスク上で変更された場合も中止します。
+  例外はユーザーが自分で起動するインライン編集で、ライブバッファを書き換え（保存はしない）、応答待ちの間に選択行が
+  変わっていれば適用しません
 - エージェントが変更したファイルは、作業前の内容（既存の未コミット変更を含む）を基準に巻き戻せます。
   エージェントの後にユーザーが編集したファイルは確認なしには巻き戻しません。`/rewind` でプロンプト単位にも戻せます
 - 自動整形（`format_after_edit`）は既定で無効。有効にしても保護ファイル・ワークスペース外・未保存バッファのファイルは整形せず、
@@ -490,6 +542,7 @@ require('coagent').setup({
   ui = { layout = 'vertical', width = 0.42, icons = 'unicode', show_reasoning = false },
   prompts = {}, -- 独自のプロンプトテンプレート（「プロンプトテンプレート」参照）
   references = { url = true, url_max_bytes = 32 * 1024, clipboard_max_bytes = 32 * 1024 },
+  inline = { context_lines = 40, keymaps = { accept = 'ga', reject = 'gr', retry = 'gi', diff = 'gd' } },
   notify = { on = { 'approval', 'done', 'failed', 'limit' }, bell = true, desktop = false, only_when_unfocused = true },
 })
 ```

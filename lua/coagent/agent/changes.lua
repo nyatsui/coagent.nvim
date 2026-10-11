@@ -9,6 +9,12 @@
 --- Reverting refuses (unless forced) when the file on disk no longer matches
 --- `current`, i.e. the user edited it after the agent did.
 ---
+--- "The file" is what the user sees: the text of a loaded buffer with unsaved
+--- changes, else the file on disk. Inline edits (:CoagentInline) change the
+--- live buffer without saving it; they are recorded the same way, and a
+--- buffer whose unsaved text is exactly what was recorded can be reverted /
+--- rewound in place (the buffer is updated, nothing is written to disk).
+---
 --- Checkpoints (/rewind): `mark()` is called at every user prompt and returns
 --- the write sequence number at that point. The first agent write to a file
 --- after a mark saves the file's content right before that write (a
@@ -106,9 +112,43 @@ function Changes:record(abs, rel, before, after)
   f.reverted = false
 end
 
+--- Buffer text as `:write` would save it (fileformat line endings, final EOL).
+---@param buf integer
+---@return string
+function Changes.buffer_text(buf)
+  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  if #lines == 1 and lines[1] == '' then
+    return ''
+  end
+  local nl = ({ dos = '\r\n', mac = '\r' })[vim.bo[buf].fileformat] or '\n'
+  local eol = (vim.bo[buf].eol or vim.bo[buf].fixeol) and nl or ''
+  return table.concat(lines, nl) .. eol
+end
+
+--- Replace a buffer's whole text (one undo step). The buffer stays modified
+--- unless its new text equals the file on disk.
+---@param buf integer
+---@param content string
+local function set_buffer_text(buf, content)
+  local lines = vim.split(content, '\r?\n', { plain = false })
+  if lines[#lines] == '' then
+    table.remove(lines)
+  end
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  local name = vim.api.nvim_buf_get_name(buf)
+  if name ~= '' and util.read_file(name) == Changes.buffer_text(buf) then
+    vim.bo[buf].modified = false
+  end
+end
+
+--- Current content as the user sees it: a modified buffer's text, else the disk.
 ---@param abs string
 ---@return string?
 local function disk(abs)
+  local buf = util.find_buf(abs)
+  if buf and vim.bo[buf].modified then
+    return Changes.buffer_text(buf)
+  end
   return util.read_file(abs)
 end
 
@@ -182,11 +222,19 @@ function Changes:diff(abs)
   return diff.unified(f.baseline, disk(abs), f.rel)
 end
 
---- Write `content` (nil = delete) honoring an open buffer.
+--- Write `content` (nil = delete) honoring an open buffer. A buffer with
+--- unsaved changes is only touched when its text is exactly `expected` (the
+--- unsaved text is the recorded change, e.g. an inline edit): then the buffer
+--- is updated in place and the disk is left alone.
+---@param expected string? recorded content the buffer may hold
 ---@return boolean, string?
-local function restore(abs, content)
+local function restore(abs, content, expected)
   local buf = util.find_buf(abs)
   if buf and vim.bo[buf].modified then
+    if content ~= nil and expected ~= nil and Changes.buffer_text(buf) == expected then
+      set_buffer_text(buf, content)
+      return true
+    end
     return false, 'buffer has unsaved changes: ' .. abs
   end
   if content == nil then
@@ -219,7 +267,7 @@ function Changes:revert(abs, opts)
   if now ~= f.current and not (opts and opts.force) then
     return false, 'file was modified after the agent changed it; use force to discard those edits too'
   end
-  local ok, err = restore(abs, f.baseline)
+  local ok, err = restore(abs, f.baseline, f.current)
   if not ok then
     return false, err
   end
@@ -244,7 +292,7 @@ function Changes:revert_hunk(abs, index)
     keep[h.index] = h.index ~= index
   end
   local content = diff.apply_hunks(f.baseline or '', now, keep)
-  local ok, err = restore(abs, content)
+  local ok, err = restore(abs, content, now)
   if not ok then
     return false, err
   end
@@ -268,7 +316,7 @@ end
 ---@field rel string
 ---@field target string? content at the checkpoint (nil = did not exist)
 ---@field conflict boolean file changed outside the agent since its last write
----@field unsaved boolean an open buffer has unsaved changes
+---@field unsaved boolean an open buffer has unsaved changes other than the recorded ones
 
 --- Files the agent wrote after checkpoint `seq` and their content at the
 --- checkpoint (right before the agent's first write after it, so user edits
@@ -282,12 +330,14 @@ function Changes:rewind_plan(seq)
     for _, v in ipairs(f.versions or {}) do
       if v.seq > seq then
         local buf = util.find_buf(abs)
+        local now = disk(abs)
         table.insert(out, {
           abs = abs,
           rel = f.rel,
           target = v.before,
-          conflict = disk(abs) ~= f.current,
-          unsaved = buf ~= nil and vim.bo[buf].modified,
+          conflict = now ~= f.current,
+          -- unsaved text that is exactly the recorded change can be rewound in place
+          unsaved = buf ~= nil and vim.bo[buf].modified and now ~= f.current,
         })
         break
       end
@@ -314,7 +364,7 @@ function Changes:rewind(seq, opts)
     else
       local ok, err = true, nil
       if disk(p.abs) ~= p.target then
-        ok, err = restore(p.abs, p.target)
+        ok, err = restore(p.abs, p.target, f.current)
       end
       if not ok then
         errors[p.rel] = err

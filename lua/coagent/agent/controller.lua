@@ -305,6 +305,25 @@ function Controller:submit(text, opts)
   end)
 end
 
+--- Record an accepted inline edit (:CoagentInline) of a live buffer: a
+--- checkpoint (so /rewind can undo it), the change itself (revertible in
+--- :CoagentChanges) and a notice in the conversation. The model's
+--- conversation is not touched.
+---@param info Coagent.PathInfo
+---@param before string buffer text before the edit
+---@param after string buffer text after it
+---@param label string short description (instruction)
+function Controller:record_inline(info, before, after, label)
+  local cp = self.session:checkpoint('[inline] ' .. info.rel .. ': ' .. label)
+  cp.inline = true
+  self.session.changes:record(info.real, info.rel, before, after)
+  local diff = require('coagent.core.diff')
+  local added, removed = diff.stats(before, after)
+  self:notice('info', string.format('Inline edit applied to %s (+%d -%d, unsaved): %s', info.rel, added, removed, label))
+  self.events:emit('file_changed', { path = info.real, rel = info.rel })
+  self:save()
+end
+
 --- Continue after a pause, an interruption or a restored session.
 ---@return boolean ok, string? err
 function Controller:resume()
@@ -614,7 +633,8 @@ function Controller:rewind(id, mode, opts)
       msg = msg .. '\nNot restored: ' .. table.concat(info.skipped, ', ')
     end
   end
-  self.events:emit('rewound', { mode = mode, text = conv and cp.text or nil, items = self.session.items })
+  -- an inline edit checkpoint has no prompt to put back into the input
+  self.events:emit('rewound', { mode = mode, text = (conv and not cp.inline) and cp.text or nil, items = self.session.items })
   self:notice(#info.skipped > 0 and 'warn' or 'info', msg)
   if self.session.context then
     local cinfo = self:_compact_view(self.session.compact_watermark)

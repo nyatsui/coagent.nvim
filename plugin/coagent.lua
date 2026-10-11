@@ -33,6 +33,9 @@ end, {
     return names
   end,
 })
+cmd('CoagentInline', function(a)
+  agent().inline(a.args, { range = a.range > 0 and { a.line1, a.line2 } or nil })
+end, { nargs = '*', range = true, desc = 'Inline edit of the selected lines (one request, previewed in place)' })
 cmd('CoagentToggle', function()
   agent().toggle()
 end, { desc = 'Toggle the Coagent panel' })

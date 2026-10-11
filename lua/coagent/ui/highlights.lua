@@ -25,6 +25,10 @@ M.groups = {
   CoagentPlaceholder = { link = 'Comment' },
   CoagentAccepted = { link = 'DiagnosticOk' },
   CoagentRejected = { link = 'DiagnosticError' },
+  -- inline edit preview (whole-line backgrounds)
+  CoagentInlineAdd = { link = 'DiffAdd' },
+  CoagentInlineDelete = { link = 'DiffDelete' },
+  CoagentInlinePending = { link = 'Visual' },
 }
 
 function M.setup()

@@ -89,6 +89,11 @@ function M.setup(opts)
       M.toggle()
     end, { desc = 'Coagent: toggle' })
   end
+  local inline = config.options.keymaps.global.inline
+  if inline then
+    vim.keymap.set('x', inline, ':CoagentInline<CR>', { desc = 'Coagent: inline edit of the selection' })
+    vim.keymap.set('n', inline, '<cmd>CoagentInline<CR>', { desc = 'Coagent: inline edit of the current line' })
+  end
 end
 
 local function ensure_setup()
@@ -421,6 +426,38 @@ function M.ask(prompt, opts)
       view.input:append('#selection ')
     end
   end
+end
+
+--- Inline edit of lines `range` (default: the current line) of the current
+--- buffer: one request, previewed in place (accept / reject / follow-up).
+--- Without an instruction it is asked for with vim.ui.input.
+---@param instruction string?
+---@param opts {range:integer[]?, buf:integer?}?
+---@return Coagent.InlineJob? job, string? err
+function M.inline(instruction, opts)
+  opts = opts or {}
+  ensure_setup()
+  local buf = opts.buf or vim.api.nvim_get_current_buf()
+  local range = opts.range
+  if not range then
+    local l = vim.api.nvim_win_get_cursor(0)[1]
+    range = { l, l }
+  end
+  local function start(text)
+    local job, err = require('coagent.ui.inline').start(M.controller(), buf, range[1], range[2], text, config.options.inline)
+    if not job and err and err ~= 'inline: cancelled' then
+      notify(err, vim.log.levels.WARN)
+    end
+    return job, err
+  end
+  if instruction and vim.trim(instruction) ~= '' then
+    return start(instruction)
+  end
+  vim.ui.input({ prompt = string.format('Coagent inline (lines %d-%d): ', range[1], range[2]) }, function(text)
+    if text and vim.trim(text) ~= '' then
+      start(text)
+    end
+  end)
 end
 
 function M.stop()
@@ -1067,6 +1104,10 @@ end
 
 --- Reset all state (tests).
 function M._reset()
+  local inline = package.loaded['coagent.ui.inline']
+  if inline and inline.active then
+    inline.active:close()
+  end
   if state.view then
     state.view:destroy()
   end
