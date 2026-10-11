@@ -1,5 +1,6 @@
 --- Pure rendering of timeline items into lines + highlights (no buffer access).
 local util = require('coagent.core.util')
+local Usage = require('coagent.agent.usage')
 
 local M = {}
 
@@ -281,6 +282,9 @@ local function summary(b, item, o)
   b.hl(r, #icon + 1 + #title, -1, 'CoagentDim')
   if item.message and item.state ~= 'COMPLETED' then
     b.line('  ' .. item.message, group)
+  end
+  if item.usage and (item.usage.requests or 0) > 0 then
+    b.line('  ' .. Usage.long(item.usage, ' ' .. i.dot .. ' ', i.approx), 'CoagentDim')
   end
   local v = item.verification or {}
   if v.status == 'verified' then

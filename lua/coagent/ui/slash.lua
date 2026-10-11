@@ -90,9 +90,11 @@ M.COMMANDS = {
   },
   {
     name = 'usage',
-    desc = 'Copilot usage, quota and context',
-    run = function()
-      app().usage()
+    args = '[billing]',
+    desc = 'Copilot quota, token usage and context (billing: GitHub billing page)',
+    complete = { 'billing' },
+    run = function(arg)
+      app().usage(arg)
     end,
   },
   {

@@ -1,5 +1,7 @@
 --- coagent.nvim: autonomous coding agent on top of CopilotChat.nvim.
 local config = require('coagent.config')
+local util = require('coagent.core.util')
+local Usage = require('coagent.agent.usage')
 
 local M = {}
 
@@ -694,15 +696,85 @@ function M.processes()
   end)
 end
 
+--- Open GitHub's billing page (exact premium request / credit usage). Only a
+--- browser link: coagent never calls a billing API and needs no extra token.
+function M.open_billing()
+  local ok, res, err = pcall(vim.ui.open, Usage.BILLING_URL)
+  if not ok or (res == nil and err) then
+    notify('cannot open ' .. Usage.BILLING_URL .. ': ' .. tostring(ok and err or res), vim.log.levels.WARN)
+    return false
+  end
+  return true
+end
+
+--- Requests/tokens of the current (or last) task and of the session.
+---@return string[]
+local function token_lines()
+  local c = state.controller
+  if not c then
+    return {}
+  end
+  local rates = config.options.usage.rates
+  local lines = {}
+  local any_credits = false
+  local function row(label, acc)
+    local credits, unpriced = Usage.estimate(acc, rates)
+    local long = Usage.long({ requests = acc.requests, tokens = acc.tokens, credits = credits }, ', ')
+    local text = string.format('    %-9s %s', label, long)
+    if credits and unpriced > 0 then
+      text = text .. string.format(' (%s tokens without a rate)', Usage.k(unpriced))
+    end
+    any_credits = any_credits or credits ~= nil
+    table.insert(lines, text)
+  end
+  local task = c.task and c.task.usage
+  local totals = c.session.usage_totals
+  if (task and task.requests > 0) or (totals and totals.requests > 0) then
+    table.insert(lines, '')
+    table.insert(lines, '  Tokens (Copilot reports totals only)')
+    if task and task.requests > 0 then
+      row(c:busy() and 'this task' or 'last task', task)
+    end
+    if totals and totals.requests > 0 then
+      row('session', totals)
+      local names = vim.tbl_keys(totals.models or {})
+      table.sort(names)
+      if #names > 1 then
+        for _, name in ipairs(names) do
+          local m = totals.models[name]
+          table.insert(lines, string.format('      %s: %d requests, %s tokens', name, m.requests, Usage.k(m.tokens)))
+        end
+      end
+    end
+    if any_credits then
+      table.insert(lines, '    credits are an ESTIMATE from usage.rates, not billing data')
+    end
+  end
+  return lines
+end
+
 --- Show Copilot usage / remaining quota in a float.
-function M.usage()
+--- `:CoagentUsage billing` opens GitHub's billing page instead.
+---@param arg string?
+function M.usage(arg)
+  arg = vim.trim(arg or '')
+  if arg == 'billing' then
+    return M.open_billing()
+  elseif arg ~= '' then
+    notify('unknown argument: ' .. arg .. ' (expected: billing)', vim.log.levels.WARN)
+    return
+  end
   M.refresh_usage(function(usage, err)
-    if not usage then
+    local tokens = token_lines()
+    if not usage and #tokens == 0 then
       notify('cannot get usage: ' .. tostring(err), vim.log.levels.WARN)
       return
     end
     local lines = { '' }
-    for _, q in ipairs(usage.quotas) do
+    if not usage then
+      table.insert(lines, '  Quota unavailable: ' .. util.clip(tostring(err), 80))
+    end
+    for _, q in ipairs(usage and usage.quotas or {}) do
       if q.unlimited then
         table.insert(lines, string.format('  %-18s unlimited', q.name))
       elseif q.total == 0 then
@@ -712,10 +784,11 @@ function M.usage()
         table.insert(lines, string.format('  %-18s %d / %d used (%.0f%%), %d left', q.name, q.used, q.total, pct, q.remaining or (q.total - q.used)))
       end
     end
-    if usage.reset then
+    if usage and usage.reset then
       table.insert(lines, '')
       table.insert(lines, '  resets on ' .. usage.reset)
     end
+    vim.list_extend(lines, tokens)
     local stats = state.controller and state.controller.session.role_stats
     if stats and next(stats) then
       table.insert(lines, '')
@@ -745,6 +818,7 @@ function M.usage()
       end
     end
     table.insert(lines, '')
+    table.insert(lines, '  Exact billing: :CoagentUsage billing (' .. Usage.BILLING_URL .. ')')
     table.insert(lines, '  (cached up to 5 minutes; q to close)')
     local buf = vim.api.nvim_create_buf(false, true)
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)

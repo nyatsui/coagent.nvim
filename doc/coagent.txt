@@ -49,6 +49,32 @@ Check the setup with |:checkhealth| coagent.
 :CoagentNew              New session.
 :CoagentSessions         Restore a saved session of this project.
 :CoagentLayout [layout]  vertical | float
+:CoagentUsage [billing]  Copilot quota, plus requests/tokens of the last task
+                              and the session (|coagent-usage|). "billing"
+                              opens the GitHub billing page in the browser.
+
+                                                         *coagent-usage*
+Usage. While a task runs the status bar shows its requests and total tokens
+("6req 48k"; dropped first when the panel is narrow), the task-completed item
+repeats them, and :CoagentUsage lists the last task and the session (per
+model). Session totals are saved with the session; a `/compact summary`
+request counts for the session only. CopilotChat reports only total_tokens
+per request (no prompt/cached split, no billing data). Exact credits and
+premium requests are on https://github.com/settings/billing, which
+":CoagentUsage billing" (or "/usage billing") opens with |vim.ui.open()|; no
+billing API is called and no extra token is used.
+
+Credit ESTIMATE (optional): with `usage.rates` set, the status bar, the
+completed item and :CoagentUsage add "≈N credits (estimate)" computed from
+total tokens. Rates are yours to fill in; nothing is shown without them. >lua
+  usage = {
+    show_tokens = true, -- "6req 48k" in the status bar
+    rates = {
+      ['gpt-4.1'] = { per_1k_tokens = 0.1 },  -- by model id
+      default = { per_1k_tokens = 0.2 },      -- every other model
+    },
+  }
+<
 
 ==============================================================================
 3. PANEL KEYS                                             *coagent-keys*
@@ -116,7 +142,7 @@ Commands go into the input history like prompts.
                       turns into one message (costs one request; <C-c>
                       cancels it).
   /new  /sessions  /model [role]  /mode [mode]  /roles [preset]
-  /usage  /changes  /diff  /review  /stop  /processes
+  /usage [billing]  /changes  /diff  /review  /stop  /processes
                       Same as the matching :Coagent* command.
   /clear              Clear the input.
   /help               List the commands in the timeline.

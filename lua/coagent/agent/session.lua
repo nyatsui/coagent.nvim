@@ -22,6 +22,7 @@ local M = {}
 ---@field changes Coagent.Changes
 ---@field status string last agent state
 ---@field next_item integer
+---@field usage_totals Coagent.UsageAcc? requests/tokens over the session's lifetime
 local Session = {}
 Session.__index = Session
 M.Session = Session
@@ -177,6 +178,7 @@ function Session:serialize(opts)
     compact_summary = self.compact_summary and vim.tbl_extend('force', self.compact_summary, { content = clean(self.compact_summary.content) }) or nil,
     roles = self.roles,
     role_stats = self.role_stats,
+    usage_totals = self.usage_totals,
     messages = messages,
     items = items,
     changes = self.changes:serialize(),
@@ -199,6 +201,7 @@ function M.deserialize(data)
   s.compact_summary = data.compact_summary
   s.roles = data.roles
   s.role_stats = data.role_stats
+  s.usage_totals = data.usage_totals
   s.changes = Changes.new(data.changes)
   return s
 end

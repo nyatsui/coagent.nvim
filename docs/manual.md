@@ -65,7 +65,7 @@
 | `/compact` | 直近 8 メッセージより前の長いツール出力を今すぐ省略（リクエストなし） |
 | `/compact summary` | 古いやり取りを現在のモデルで 1 回要約し、1 メッセージに置換（1 リクエスト。`<C-c>` で中止可） |
 | `/new` `/sessions` `/model [role]` `/mode [mode]` `/roles [preset]` | 対応する `:Coagent*` コマンドと同じ |
-| `/usage` `/changes` `/diff` `/review` `/stop` `/processes` | 同上 |
+| `/usage [billing]` `/changes` `/diff` `/review` `/stop` `/processes` | 同上（`/usage billing` は GitHub の請求ページを開く） |
 | `/clear` | 入力欄をクリア（履歴には残らない） |
 | `/help` | コマンド一覧をタイムラインに表示 |
 
@@ -74,6 +74,15 @@
 - `/etc/hosts` のように先頭語がコマンド名の形（英字で始まり英数字・`-`・`_` のみ）でなければ通常の送信です
 - `/compact` は作業中（応答待ち・ツール実行中・承認待ち）は拒否されます。次のリクエストは送信内容の先頭が変わるため
   1 回だけプロンプトキャッシュが効きません。セッションの履歴そのものは変わりません
+
+### 利用量
+
+- 実行中は winbar に `6req 48k`（このタスクのリクエスト数・合計トークン数）。幅が狭いと最初に省略されます
+- 完了項目に `3 requests · 6.6k tokens`、`gu` / `:CoagentUsage` に直近タスクとセッション全体（モデル別）の内訳
+- Copilot から得られるのは合計トークン数だけです。正確なクレジットは `:CoagentUsage billing` / `/usage billing` で
+  GitHub の請求ページ（https://github.com/settings/billing）を開いて確認（API は呼ばず、追加のトークンも不要）
+- `usage.rates = { ['モデルID'] = { per_1k_tokens = n }, default = { per_1k_tokens = n } }` を設定すると
+  `≈N credits (estimate)` の **概算** を併記します（レートは自分で設定。未設定なら表示しません）
 
 ### プロンプトテンプレート
 

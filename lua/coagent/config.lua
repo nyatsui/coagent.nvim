@@ -27,6 +27,11 @@ local defaults = {
   usage = {
     show_in_bar = true, -- remaining Copilot quota in the panel status bar
     refresh_after_task = true, -- re-fetch after every task (CopilotChat caches it for 5 minutes)
+    show_tokens = true, -- requests/tokens of the running task ("6req 48k") in the status bar
+    -- Optional credit ESTIMATE from total tokens (Copilot reports no billing
+    -- data per request). Keyed by model id; `default` covers other models:
+    --   rates = { ['gpt-4.1'] = { per_1k_tokens = 0.1 }, default = { per_1k_tokens = 0.2 } }
+    rates = nil,
   },
 
   -- 'supervised' (default): read tools run automatically, edits and commands need approval.

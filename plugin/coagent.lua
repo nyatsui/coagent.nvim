@@ -98,9 +98,15 @@ end, {
     return { 'single', 'advisor', 'explorers', 'full' }
   end,
 })
-cmd('CoagentUsage', function()
-  agent().usage()
-end, { desc = 'Show Copilot usage / remaining quota' })
+cmd('CoagentUsage', function(a)
+  agent().usage(a.args)
+end, {
+  nargs = '?',
+  desc = 'Show Copilot usage / remaining quota and token usage (billing: open the GitHub billing page)',
+  complete = function()
+    return { 'billing' }
+  end,
+})
 cmd('CoagentProcesses', function()
   agent().processes()
 end, { desc = 'Show or stop background processes started by the agent' })

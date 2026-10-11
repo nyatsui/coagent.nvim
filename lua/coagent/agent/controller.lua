@@ -17,6 +17,7 @@ local Background = require('coagent.tools.background')
 local Roles = require('coagent.agent.roles')
 local subagent = require('coagent.agent.subagent')
 local Advisor = require('coagent.agent.advisor')
+local Usage = require('coagent.agent.usage')
 
 local S = State
 
@@ -133,8 +134,15 @@ function Controller:active_model()
   return (self.task and self.task.model_override) or self:model()
 end
 
---- Per-role request/token accounting (shown in :CoagentUsage).
+--- Per-role request/token accounting (shown in :CoagentUsage), plus the
+--- running task's and the session's totals.
 function Controller:_record_role(role, model, res)
+  self.session.usage_totals = self.session.usage_totals or Usage.new()
+  Usage.add(self.session.usage_totals, role, model, res)
+  -- `/compact summary` runs while idle or paused: it counts for the session only
+  if self.task and self.task.usage and State.is_busy(self.machine.current) then
+    Usage.add(self.task.usage, role, model, res)
+  end
   local stats = self.session.role_stats or {}
   self.session.role_stats = stats
   local s = stats[role] or { requests = 0, tokens = 0, models = {} }
@@ -540,6 +548,7 @@ function Controller:_start(body)
     denials = 0,
     abort = nil,
     fail_streak = {},
+    usage = Usage.new(),
   }
   self.task.advisor = Advisor.new(self)
   self.machine:to(S.THINKING)
@@ -1286,6 +1295,11 @@ function Controller:_finish_now(state, info)
     verification = self:_verification(),
     changes = changes,
   }
+  local u = t.usage
+  if u and u.requests > 0 then
+    local rates = self.config.usage and self.config.usage.rates
+    summary.usage = { requests = u.requests, tokens = u.tokens, credits = (Usage.estimate(u, rates)) }
+  end
   self:_add(summary)
   if self.machine:can(state) then
     self.machine:to(state, info)

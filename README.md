@@ -174,7 +174,7 @@ nvim --clean -u scripts/demo.lua
 | `/new` / `/sessions` | 新規セッション / 保存済みセッション一覧 |
 | `/model [role]` | モデル選択（`builder` / `explorer` / `advisor`） |
 | `/mode [mode]` / `/roles [preset]` | 承認モード / 役割分担の切替 |
-| `/usage` / `/changes` / `/diff` / `/review` | 利用量 / 変更一覧 / diff / hunk レビュー |
+| `/usage [billing]` / `/changes` / `/diff` / `/review` | 利用量（`billing` で GitHub の請求ページ） / 変更一覧 / diff / hunk レビュー |
 | `/stop` / `/processes` | 停止 / バックグラウンドプロセス |
 | `/clear` / `/help` | 入力欄をクリア / コマンド一覧 |
 
@@ -254,7 +254,7 @@ require('coagent').setup({
 | `:CoagentRevert [path\|all]` | エージェントの変更を巻き戻し |
 | `:CoagentOutput` | 直近のコマンド出力を下部パネルに表示 |
 | `:CoagentProcesses` | エージェントが起動したバックグラウンドプロセスの出力表示・停止 |
-| `:CoagentUsage` | Copilot の利用量・残量（Premium requests / Chat / Completions とリセット日） |
+| `:CoagentUsage [billing]` | Copilot の利用量・残量（Premium requests / Chat / Completions とリセット日）、タスク・セッションのリクエスト数とトークン数。`billing` で GitHub の請求ページをブラウザで開く |
 | `:CoagentMode [supervised\|readonly\|auto]` | 承認モード切替 |
 | `:CoagentModel` | モデル選択（tool calling 対応モデルのみ。役割分担中は役割ごと） |
 | `:CoagentRoles [preset]` | モデルの役割分担: `single` / `advisor` / `explorers` / `full` |
@@ -318,7 +318,11 @@ require('coagent').setup({
 require('coagent').setup({
   model = nil,            -- nil = CopilotChat の設定値
   hide_copilotchat_ui = true, -- CopilotChat は裏で使うだけ（ログイン案内でもチャット窓を開かせない）
-  usage = { show_in_bar = true, refresh_after_task = true }, -- 残量を winbar に表示
+  usage = {
+    show_in_bar = true, refresh_after_task = true, -- 残量を winbar に表示
+    show_tokens = true, -- 実行中タスクのリクエスト数・トークン数を winbar に表示（`6req 48k`）
+    rates = nil,        -- クレジットの概算用（下記「利用量とクレジット」）
+  },
   mode = 'supervised',
   limits = {
     max_steps = 40,               -- 1 タスクあたりのモデル要求数
@@ -364,6 +368,29 @@ CopilotChat.nvim は認証・通信の提供元として裏で使うだけです
   プランに含まれない枠（Free の Premium requests 0/0 など）は表示しません
 - lazy.nvim では CopilotChat を `lazy = true` の依存にしておけば、エージェント起動時に読み込まれます
   （`:CopilotChat` も使いたい場合は `cmd = 'CopilotChat'` を残してください）
+
+## 利用量とクレジット
+
+- タスク実行中は winbar に `6req 48k` のように、そのタスクのリクエスト数と合計トークン数を表示します（幅が足りなければ省略）
+- タスク完了の項目に `3 requests · 6.6k tokens` の行、`:CoagentUsage` に直近タスクとセッション全体（モデル別）の内訳を表示。
+  セッション全体の値はセッションと一緒に保存されます。`/compact summary` の要約リクエストはセッションにだけ数えます
+- CopilotChat が返すのはリクエストごとの合計トークン数（`total_tokens`）だけで、入力・出力・キャッシュの内訳や請求額は分かりません
+- 正確なクレジット・Premium requests の消費は `:CoagentUsage billing`（または `/usage billing`）で
+  GitHub の請求ページ（https://github.com/settings/billing）をブラウザで開いて確認してください。
+  請求 API は呼ばず、追加のトークンも使いません
+- `usage.rates` を設定すると、合計トークン数からクレジットを **概算** して `≈N credits (estimate)`（winbar では `≈Ncr`）と表示します。
+  レートは自分で調べた値を入れてください（既定は未設定で、概算は表示しません）。キャッシュ割引などは反映されません
+
+```lua
+opts = {
+  usage = {
+    rates = {
+      ['gpt-4.1'] = { per_1k_tokens = 0.1 },      -- モデル ID ごと
+      default = { per_1k_tokens = 0.2 },          -- それ以外のモデル
+    },
+  },
+}
+```
 
 ## モデルの役割分担（任意）
 

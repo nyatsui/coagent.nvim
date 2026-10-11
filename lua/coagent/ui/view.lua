@@ -8,6 +8,7 @@ local diffview = require('coagent.ui.diffview')
 local changes_ui = require('coagent.ui.changes')
 local util = require('coagent.core.util')
 local State = require('coagent.agent.state')
+local Usage = require('coagent.agent.usage')
 
 ---@class Coagent.View
 local View = {}
@@ -256,6 +257,10 @@ function View:bar()
   local segs = {}
   if c.task and State.is_busy(st) then
     table.insert(segs, { 1, 2, 'step ' .. c.task.steps })
+    local u = c.task.usage
+    if self.config.usage.show_tokens ~= false and u and u.requests > 0 then
+      table.insert(segs, { 1.5, 3.5, Usage.short(u, self.config.usage.rates, ic.approx) })
+    end
   end
   table.insert(segs, { 2, 1, mode_short })
   local model_text = tostring(c:active_model())
@@ -289,14 +294,7 @@ function View:bar()
   end
   local ctx = c.session.context
   if self.config.ui.show_context ~= false and ctx and ctx.max then
-    local function k(n)
-      if n < 1000 then
-        return tostring(n)
-      elseif n < 10000 then
-        return string.format('%.1fk', n / 1000)
-      end
-      return string.format('%dk', math.floor(n / 1000 + 0.5))
-    end
+    local k = Usage.k
     local used = ctx.reported or ctx.estimate or 0
     local text = 'ctx ' .. k(used) .. '/' .. k(ctx.max)
     if width >= 70 then
