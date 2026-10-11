@@ -699,3 +699,25 @@ describe('cache-friendly compaction', function()
     assert.is_true(info1.tokens <= math.floor(budget * 0.6) + 1)
   end)
 end)
+
+describe('render roles', function()
+  local render = require('coagent.ui.render')
+  local icons = require('coagent.ui.icons')
+  local o = { icons = icons.get('unicode'), keys = require('coagent.config').defaults().keymaps.panel }
+  local function text(item)
+    return table.concat(render.item(item, o).lines, '\n')
+  end
+  it('shows advisor reviews and explorer lookups', function()
+    local t = text({ type = 'advisor', kind = 'PLAN', model = 'smart', text = '1. Keep the name.' })
+    assert.is_truthy(t:find('◆ Advisor · plan review · smart\n1. Keep the name.', 1, true))
+    local ex = { type = 'tool', kind = 'read', tool = 'explore', title = 'Explore: callers', status = 'done', summary = '2 lookups', model = 'cheap', children = { { title = 'Search "x"', status = 'done', summary = '3 matches' }, { title = 'Read a.py', status = 'done' } } }
+    assert.is_truthy(text(ex):find('2 lookups by cheap', 1, true))
+    ex.expanded = true
+    assert.is_truthy(text(ex):find('    ✓ Search "x"  3 matches', 1, true))
+    assert.is_truthy(text({ type = 'tool', kind = 'write', title = 'Edit a.py', status = 'deferred', output = 'NOT EXECUTED: advisor' }):find('? Edit a.py', 1, true))
+    for _, set in ipairs({ 'ascii', 'nerd' }) do
+      local oo = vim.tbl_extend('force', o, { icons = icons.get(set) })
+      assert.is_truthy(table.concat(render.item({ type = 'advisor', kind = 'BEFORE_DONE', text = 'LGTM', lgtm = true }, oo).lines, '\n'):find('Advisor', 1, true))
+    end
+  end)
+end)

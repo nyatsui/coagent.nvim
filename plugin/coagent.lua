@@ -70,6 +70,15 @@ end, { nargs = '?', complete = 'file' })
 cmd('CoagentOutput', function()
   agent().output()
 end, {})
+cmd('CoagentRoles', function(a)
+  agent().set_roles(a.args)
+end, {
+  nargs = '?',
+  desc = 'Choose model roles: single | advisor | explorers | full',
+  complete = function()
+    return { 'single', 'advisor', 'explorers', 'full' }
+  end,
+})
 cmd('CoagentUsage', function()
   agent().usage()
 end, { desc = 'Show Copilot usage / remaining quota' })

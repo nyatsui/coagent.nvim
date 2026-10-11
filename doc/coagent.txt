@@ -38,7 +38,8 @@ Check the setup with |:checkhealth| coagent.
 :CoagentRevert [path|all] Revert agent changes.
 :CoagentOutput           Show the last command output.
 :CoagentMode [mode]      supervised | readonly | auto
-:CoagentModel            Pick a tool-calling capable model.
+:CoagentModel            Pick a tool-calling capable model (per role when roles are on).
+:CoagentRoles [preset]   Model roles: single (default) | advisor | explorers | full
 :CoagentNew              New session.
 :CoagentSessions         Restore a saved session of this project.
 :CoagentLayout [layout]  vertical | float

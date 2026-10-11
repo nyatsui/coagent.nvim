@@ -15,6 +15,7 @@ local STATUS = {
   denied = { 'denied', 'CoagentWarn' },
   cancelled = { 'cancelled', 'CoagentDim' },
   interrupted = { 'interrupted', 'CoagentWarn' },
+  deferred = { 'awaiting', 'CoagentInfo' },
 }
 M.STATUS = STATUS
 
@@ -157,6 +158,23 @@ local function tool(b, item, o)
     local grp = item.status == 'done' and 'CoagentOk' or (item.status == 'failed' and 'CoagentError' or 'CoagentDim')
     local r = b.line('  ' .. item.summary)
     b.hl(r, 2, -1, grp)
+  end
+
+  -- explorer subagent lookups (nested, compact)
+  if item.children and #item.children > 0 then
+    local show = item.expanded or item.status == 'running'
+    if show then
+      for _, ch in ipairs(item.children) do
+        local cst = STATUS[ch.status] or STATUS.pending
+        local line = '    ' .. o.icons[cst[1]] .. ' ' .. tostring(ch.title) .. (ch.summary and ('  ' .. ch.summary) or '')
+        local r = b.line(line)
+        b.hl(r, 4, 4 + #o.icons[cst[1]], cst[2])
+        b.hl(r, 4 + #o.icons[cst[1]], -1, 'CoagentDim')
+      end
+    else
+      local r = b.line(string.format('    %d lookups by %s', #item.children, tostring(item.model or 'explorer')))
+      b.hl(r, 0, -1, 'CoagentDim')
+    end
   end
 
   local awaiting = item.status == 'awaiting_approval'
@@ -326,6 +344,19 @@ function M.item(item, o)
     end
   elseif item.type == 'tool' then
     tool(b, item, o)
+  elseif item.type == 'advisor' then
+    local label = ({ PLAN = 'plan review', REPEATED_FAILURE = 'repeated failure', BEFORE_DONE = 'final review' })[item.kind] or 'review'
+    local head = string.format('%s Advisor · %s · %s', i.advisor or '#', label, tostring(item.model or ''))
+    local r = b.line(head)
+    b.hl(r, 0, -1, item.failed and 'CoagentWarn' or 'CoagentSummary')
+    if item.streaming then
+      b.icon_row = r
+      b.line(i.ellipsis, 'CoagentDim')
+    else
+      for _, l in ipairs(vim.split(item.text or '', '\n', { plain = true })) do
+        b.line(l, item.lgtm and 'CoagentDim' or nil)
+      end
+    end
   elseif item.type == 'notice' then
     local icon = item.level == 'error' and i.error or (item.level == 'warn' and i.warn or i.info)
     local group = item.level == 'error' and 'CoagentError' or (item.level == 'warn' and 'CoagentWarn' or 'CoagentInfo')

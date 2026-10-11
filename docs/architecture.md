@@ -28,6 +28,9 @@ lua/coagent/
     context.lua                  #参照の解決・コンテキスト圧縮
     prompt.lua                   システムプロンプト（プロジェクト文書は低優先度で同梱）
     session.lua                  セッションモデル・保存/読込・中断修復
+    roles.lua                    役割プリセット（single / advisor / explorers / full）の解決
+    subagent.lua                 調査担当（explore ツール。読み取り専用・新規コンテキスト・並列）
+    advisor.lua                  アドバイザー（追記のみの専用履歴、PLAN / REPEATED_FAILURE / BEFORE_DONE）
     changes.lua                  変更追跡・巻き戻し
   tools/
     init.lua                     ツールレジストリ
@@ -91,6 +94,21 @@ submit(text)
 | COMPLETED / FAILED / CANCELLED | ✓ | | | | | | | | ✓ |
 
 不正な遷移は例外になり、テストで検出されます（`tests/unit_spec.lua`）。
+
+## モデルの役割
+
+作業担当（builder）の会話は 1 つのモデルで最後まで続け、他の役割は別の会話で動かします。
+
+```
+builder 履歴 --explore(task)--> explorer（新規履歴, headless, 並列, 読み取りツールのみ）--要約--> builder
+builder 履歴 --brief(task/plan/diff/失敗出力)--> advisor（追記のみの専用履歴）--指摘 or LGTM--> builder
+```
+
+- PLAN: 最初の書込みツールの前。指摘があればその書込みを実行せず、指摘をツール結果として返す（再発行を促す）
+- REPEATED_FAILURE: 編集後に同じ `run_command` が 2 回失敗したとき、そのツール結果に指摘を追記
+- BEFORE_DONE: 変更があるタスクの完了直前。指摘があればユーザーメッセージとして渡し、1 度だけ作業を続行
+- 調査担当は CopilotChat の headless 要求（単一ジョブ制約の外）で並列実行し、停止時は結果を破棄（ソフトキャンセル）
+- モデル選択は設定・セッションのみ（リポジトリ内の文書からは変更不可）
 
 ## イベント
 

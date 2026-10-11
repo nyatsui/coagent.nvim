@@ -292,7 +292,7 @@ function Panel:_spinner_tick()
   local start = 0
   for _, b in ipairs(self.blocks) do
     local item = b.item
-    if item and b.icon_row and ((item.type == 'tool' and item.status == 'running') or (item.type == 'assistant' and item.streaming)) then
+    if item and b.icon_row and ((item.type == 'tool' and item.status == 'running') or ((item.type == 'assistant' or item.type == 'advisor') and item.streaming)) then
       any = true
       local row = start + b.icon_row
       vim.api.nvim_buf_clear_namespace(self.buf, ns_spin, row, row + 1)

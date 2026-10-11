@@ -97,6 +97,9 @@ function View:attach(c)
   on('processes', function()
     self:refresh_bar()
   end)
+  on('roles', function()
+    self:refresh_bar()
+  end)
   on('usage', function()
     self:refresh_bar()
   end)
@@ -252,7 +255,16 @@ function View:bar()
     table.insert(segs, { 1, 2, 'step ' .. c.task.steps })
   end
   table.insert(segs, { 2, 1, mode_short })
-  table.insert(segs, { 3, 3, tostring(c:model()) })
+  local model_text = tostring(c:active_model())
+  local resolved = c.session.resolved_model
+  if resolved and resolved ~= '' and resolved ~= model_text then
+    model_text = model_text .. ic.arrow .. resolved
+  end
+  table.insert(segs, { 3, 3, model_text })
+  local roles = c:roles()
+  if roles.preset ~= 'single' then
+    table.insert(segs, { 3, 2, 'roles:' .. roles.preset })
+  end
   local n = c.session.changes:count()
   if n > 0 then
     table.insert(segs, { 4, 4, n .. ' changed' })

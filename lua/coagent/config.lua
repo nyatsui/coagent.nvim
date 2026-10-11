@@ -4,6 +4,21 @@ local defaults = {
   model = nil,
   temperature = 0.1,
 
+  -- Model roles (opt-in). preset: 'single' (default: the selected model does
+  -- everything) | 'advisor' | 'explorers' | 'full'. Each role keeps its own
+  -- history; only summaries/briefs travel between roles (cache friendly).
+  -- Models default to the selected model. Repository files cannot set these.
+  roles = {
+    preset = 'single',
+    explorer_model = nil,
+    advisor_model = nil,
+    explorer = { max_steps = 8, max_concurrent = 2, max_summary_bytes = 6000 },
+    advisor = { on_plan = true, on_repeated_failure = true, before_done = true, max_brief_bytes = 16000 },
+  },
+  -- Switch to these models (in order) when the selected one is rate limited,
+  -- out of quota or not allowed. Empty = never switch automatically.
+  fallback_models = {},
+
   -- Use CopilotChat.nvim only behind the scenes: never let agent activity open
   -- CopilotChat's chat window (e.g. for the GitHub login code). Messages appear
   -- in the agent panel and via vim.notify instead.

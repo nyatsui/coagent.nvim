@@ -259,7 +259,9 @@ function Backend:ask(req)
   -- client tracks a single active job); the controller reports that as an
   -- interruption instead of a failure.
   local ok_ask, res = pcall(client.ask, client, {
-    headless = false,
+    -- req.headless: independent requests (explorer subagents) that may run in
+    -- parallel; they cannot be aborted mid-stream and are soft-cancelled.
+    headless = req.headless == true,
     history = to_history(req.messages),
     tools = vim.tbl_map(function(t)
       return { name = t.name, description = t.description, schema = require('coagent.tools').normalize_schema(t.schema) }
@@ -306,6 +308,23 @@ function Backend:cancel()
   local ok, client = pcall(require, 'CopilotChat.client')
   if ok and client.stop then
     return client:stop()
+  end
+  return false
+end
+
+--- Errors meaning "this model cannot be used right now" (switch to a fallback
+--- model instead of retrying). Authentication errors are never included.
+---@param err string
+---@return boolean
+function Backend.is_model_unavailable(err)
+  err = tostring(err or ''):lower()
+  if err:find('401', 1, true) or err:find('unauthorized', 1, true) or err:find('authorize', 1, true) then
+    return false
+  end
+  for _, pat in ipairs({ '429', 'rate limit', 'quota', 'limit exceeded', 'exceeded your', 'model not found', 'not supported', 'unsupported model', 'model_not_supported', '403', 'policy', 'not available' }) do
+    if err:find(pat, 1, true) then
+      return true
+    end
   end
   return false
 end

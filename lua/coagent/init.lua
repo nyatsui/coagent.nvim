@@ -438,8 +438,34 @@ function M.set_mode(mode)
   end)
 end
 
-function M.select_model()
+--- Pick a model. With a roles preset other than 'single' you first choose
+--- which role (builder / explorer / advisor) to configure.
+---@param role 'builder'|'explorer'|'advisor'|nil
+function M.select_model(role)
   local c = M.controller()
+  local roles = c:roles()
+  if not role and roles.preset ~= 'single' then
+    local choices = { 'builder' }
+    if roles.explorer then
+      table.insert(choices, 'explorer')
+    end
+    if roles.advisor then
+      table.insert(choices, 'advisor')
+    end
+    vim.ui.select(choices, {
+      prompt = 'Model for which role?',
+      format_item = function(r)
+        local current = ({ builder = roles.builder_model, explorer = roles.explorer_model, advisor = roles.advisor_model })[r]
+        return string.format('%-9s %s', r, current)
+      end,
+    }, function(r)
+      if r then
+        M.select_model(r)
+      end
+    end)
+    return
+  end
+  role = role or 'builder'
   require('plenary.async').run(function()
     local ok, models = pcall(c.backend.models, c.backend)
     vim.schedule(function()
@@ -452,17 +478,59 @@ function M.select_model()
       local usable = vim.tbl_filter(function(m)
         return (m.tools or m.id == 'auto') and m.picker ~= false
       end, models)
+      local current = ({ builder = roles.builder_model, explorer = roles.explorer_model, advisor = roles.advisor_model })[role]
       vim.ui.select(usable, {
-        prompt = 'Model (tool calling capable)',
+        prompt = role == 'builder' and 'Model (tool calling capable)' or ('Model for the ' .. role),
         format_item = function(m)
-          return (m.id == c:model() and '* ' or '  ') .. m.name .. ' [' .. m.id .. ']'
+          return (m.id == current and '* ' or '  ') .. m.name .. ' [' .. m.id .. ']'
         end,
       }, function(m)
-        if m then
+        if not m then
+          return
+        end
+        if role == 'builder' then
           c:set_model(m.id)
+        else
+          c:set_roles(roles.preset, { [role .. '_model'] = m.id })
         end
       end)
     end)
+  end)
+end
+
+--- Choose the model roles preset for this session.
+---@param preset string?
+function M.set_roles(preset)
+  local c = M.controller()
+  local Roles = require('coagent.agent.roles')
+  local function apply(p)
+    local ok, err = c:set_roles(p)
+    if not ok then
+      notify(err, vim.log.levels.WARN)
+      return
+    end
+    local r = c:roles()
+    local parts = { 'builder ' .. r.builder_model }
+    if r.explorer then
+      table.insert(parts, 'explorer ' .. r.explorer_model)
+    end
+    if r.advisor then
+      table.insert(parts, 'advisor ' .. r.advisor_model)
+    end
+    c:notice('info', 'Model roles: ' .. p .. ' (' .. table.concat(parts, ', ') .. '). Change a role\'s model with :CoagentModel.')
+  end
+  if preset and preset ~= '' then
+    return apply(preset)
+  end
+  vim.ui.select(Roles.ORDER, {
+    prompt = 'Model roles (current: ' .. c:roles().preset .. ')',
+    format_item = function(p)
+      return string.format('%-10s %s', p, Roles.PRESETS[p].description)
+    end,
+  }, function(p)
+    if p then
+      apply(p)
+    end
   end)
 end
 
@@ -557,6 +625,22 @@ function M.usage()
     if usage.reset then
       table.insert(lines, '')
       table.insert(lines, '  resets on ' .. usage.reset)
+    end
+    local stats = state.controller and state.controller.session.role_stats
+    if stats and next(stats) then
+      table.insert(lines, '')
+      table.insert(lines, '  Requests by role (this session)')
+      for _, role in ipairs({ 'builder', 'explorer', 'advisor' }) do
+        local s = stats[role]
+        if s then
+          local models = {}
+          for m, n in pairs(s.models or {}) do
+            table.insert(models, m .. ' x' .. n)
+          end
+          table.sort(models)
+          table.insert(lines, string.format('    %-9s %3d requests, %dk tokens  (%s)', role, s.requests, math.floor((s.tokens or 0) / 1000), table.concat(models, ', ')))
+        end
+      end
     end
     local ctx = state.controller and state.controller.session.context
     if ctx and ctx.max then

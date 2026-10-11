@@ -172,7 +172,8 @@ nvim --clean -u scripts/demo.lua
 | `:CoagentProcesses` | エージェントが起動したバックグラウンドプロセスの出力表示・停止 |
 | `:CoagentUsage` | Copilot の利用量・残量（Premium requests / Chat / Completions とリセット日） |
 | `:CoagentMode [supervised\|readonly\|auto]` | 承認モード切替 |
-| `:CoagentModel` | モデル選択（tool calling 対応モデルのみ） |
+| `:CoagentModel` | モデル選択（tool calling 対応モデルのみ。役割分担中は役割ごと） |
+| `:CoagentRoles [preset]` | モデルの役割分担: `single` / `advisor` / `explorers` / `full` |
 | `:CoagentNew` / `:CoagentSessions` | 新規セッション / 保存済みセッション一覧 |
 | `:CoagentLayout [vertical\|float]` | レイアウト切替 |
 
@@ -277,6 +278,35 @@ CopilotChat.nvim は認証・通信の提供元として裏で使うだけです
   プランに含まれない枠（Free の Premium requests 0/0 など）は表示しません
 - lazy.nvim では CopilotChat を `lazy = true` の依存にしておけば、エージェント起動時に読み込まれます
   （`:CopilotChat` も使いたい場合は `cmd = 'CopilotChat'` を残してください）
+
+## モデルの役割分担（任意）
+
+既定（`single`）は `:CoagentModel` で選んだモデル 1 つですべてを行います。`:CoagentRoles` で役割分担を選べます。
+
+| プリセット | 構成 |
+|---|---|
+| `single`（既定） | 選んだモデルだけ |
+| `advisor` | 作業担当 ＋ アドバイザー（計画の確定前・同じチェックが 2 回失敗したとき・完了の直前にレビュー） |
+| `explorers` | 作業担当 ＋ 調査担当（`explore` ツール。読み取り専用のサブエージェントを並列実行） |
+| `full` | 作業担当 ＋ 調査担当 ＋ アドバイザー |
+
+- 役割ごとのモデルは `:CoagentModel`（役割を選んでからモデルを選択）か設定の `roles.explorer_model` / `roles.advisor_model` で指定。
+  未指定なら選んだモデルを使います
+- **役割ごとに別の会話履歴**を持ち、受け渡すのは要約だけです。調査担当は「調べる内容」だけを受け取り `path:line` 付きの要約を返し、
+  アドバイザーは計画・差分・失敗出力の要約だけを受け取ります（作業担当の全履歴は送りません）。どの履歴も追記のみなので
+  プロンプトキャッシュが効きやすく、作業担当のモデルはタスク中に変わりません
+- 代償として要約で細部が落ちる・リクエスト回数は増えます（Copilot Free ではチャット枠を早く消費。Premium が 0 のプランでは
+  強いモデルをアドバイザーに使えません）
+- `fallback_models = { 'auto' }` のように指定すると、選んだモデルが利用制限・枠切れ・ポリシーで使えないときだけ切り替えます（401 は対象外）
+- AGENTS.md などリポジトリ内の文書からはモデルを変更できません（費用に直結するため設定でのみ指定）
+- winbar に実際に使われたモデル（`auto→gpt-4.1`）と `roles:…` を表示、`:CoagentUsage` に役割別のリクエスト数
+
+```lua
+opts = {
+  roles = { preset = 'full', explorer_model = 'gpt-4.1-mini', advisor_model = 'claude-sonnet' },
+  fallback_models = { 'auto' },
+}
+```
 
 ## コンテキスト長
 

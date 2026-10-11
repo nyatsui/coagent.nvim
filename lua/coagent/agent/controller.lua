@@ -14,6 +14,9 @@ local State = require('coagent.agent.state')
 local context = require('coagent.agent.context')
 local prompt = require('coagent.agent.prompt')
 local Background = require('coagent.tools.background')
+local Roles = require('coagent.agent.roles')
+local subagent = require('coagent.agent.subagent')
+local Advisor = require('coagent.agent.advisor')
 
 local S = State
 
@@ -106,6 +109,46 @@ end
 ---@return string
 function Controller:model()
   return self.session.model or self.config.model or self.backend:default_model() or 'gpt-4.1'
+end
+
+--- Effective model roles (preset 'single' unless the user opted in).
+---@return CopilotAgent.Roles
+function Controller:roles()
+  return Roles.resolve(self.config, self.session, self:model())
+end
+
+---@param preset string
+---@return boolean ok, string? err
+function Controller:set_roles(preset, models)
+  if not Roles.PRESETS[preset] then
+    return false, 'unknown roles preset: ' .. tostring(preset)
+  end
+  self.session.roles = vim.tbl_extend('force', self.session.roles or {}, models or {}, { preset = preset })
+  self.events:emit('roles', self:roles())
+  return true
+end
+
+--- Model used for the builder in the current task (after a fallback switch).
+function Controller:active_model()
+  return (self.task and self.task.model_override) or self:model()
+end
+
+--- Per-role request/token accounting (shown in :CoagentUsage).
+function Controller:_record_role(role, model, res)
+  local stats = self.session.role_stats or {}
+  self.session.role_stats = stats
+  local s = stats[role] or { requests = 0, tokens = 0, models = {} }
+  stats[role] = s
+  s.requests = s.requests + 1
+  if res and res.usage and res.usage.total_tokens then
+    s.tokens = s.tokens + res.usage.total_tokens
+  end
+  local used = (res and res.model) or model
+  s.models[used] = (s.models[used] or 0) + 1
+  if role == 'builder' and res and res.model then
+    self.session.resolved_model = res.model
+  end
+  self.events:emit('roles', self:roles())
 end
 
 function Controller:set_model(model)
@@ -315,7 +358,9 @@ function Controller:_start(body)
     call_counts = {},
     denials = 0,
     abort = nil,
+    fail_streak = {},
   }
+  self.task.advisor = Advisor.new(self)
   self.machine:to(S.THINKING)
   async.run(function()
     local ok, err = xpcall(function()
@@ -406,35 +451,163 @@ function Controller:_loop(gen)
     })
 
     if #tool_calls == 0 then
-      return self:_finish(gen, S.COMPLETED, { reason = 'model_done' })
-    end
-
-    local stop_reason = nil
-    for _, tc in ipairs(tool_calls) do
+      local advice = self:_advise_before_done(gen)
       if self.gen ~= gen then
         return
       end
-      local content
-      if stop_reason then
-        content = 'NOT EXECUTED: the user stopped the task.'
-      else
-        local out = self:_execute(gen, tc)
-        if self.gen ~= gen or out == nil then
+      if not advice then
+        return self:_finish(gen, S.COMPLETED, { reason = 'model_done' })
+      end
+      -- the advisor found issues: hand them to the builder and keep going
+      table.insert(self.session.messages, {
+        role = 'user',
+        content = 'Advisor review before finishing:\n' .. advice
+          .. '\nAddress these points (or explain briefly why they do not apply), re-run the relevant checks, then finish.',
+      })
+      goto next_step
+    end
+
+    do
+      local stop_reason = nil
+      local results = {}
+      local i = 1
+      while i <= #tool_calls do
+        if self.gen ~= gen then
           return
         end
-        content = out.content
-        if out.stop then
-          stop_reason = out.stop
+        local tc = tool_calls[i]
+        if stop_reason then
+          results[i] = 'NOT EXECUTED: the user stopped the task.'
+          i = i + 1
+        elseif tc.name == 'explore' then
+          -- consecutive explore calls run in parallel (bounded)
+          local group = {}
+          while i <= #tool_calls and tool_calls[i].name == 'explore' do
+            table.insert(group, i)
+            i = i + 1
+          end
+          local outs = self:_execute_parallel(gen, tool_calls, group)
+          if outs == nil then
+            return
+          end
+          for k, idx in ipairs(group) do
+            results[idx] = outs[k].content
+          end
+        else
+          local out = self:_execute(gen, tc)
+          if self.gen ~= gen or out == nil then
+            return
+          end
+          results[i] = out.content
+          if out.stop then
+            stop_reason = out.stop
+          end
+          i = i + 1
         end
       end
-      table.insert(self.session.messages, { role = 'tool', tool_call_id = tc.id, content = content })
+      for k, tc in ipairs(tool_calls) do
+        table.insert(self.session.messages, { role = 'tool', tool_call_id = tc.id, content = results[k] or '(no result)' })
+      end
+      if stop_reason then
+        self:save()
+        return self:_finish(gen, S.CANCELLED, { reason = 'denied', message = stop_reason })
+      end
     end
     self:save()
+    ::next_step::
+  end
+end
 
-    if stop_reason then
-      return self:_finish(gen, S.CANCELLED, { reason = 'denied', message = stop_reason })
+--- Run several tool calls concurrently (used for explorer subagents).
+---@return table[]? outs in group order, nil when superseded
+function Controller:_execute_parallel(gen, tool_calls, group)
+  local limit = math.max(1, self:roles().explorer_opts.max_concurrent or 2)
+  local outs = {}
+  local start = 1
+  while start <= #group do
+    local batch = {}
+    for k = start, math.min(#group, start + limit - 1) do
+      table.insert(batch, k)
+    end
+    local remaining = #batch
+    local fut = async.future()
+    for _, k in ipairs(batch) do
+      async.run(function()
+        local ok, out = pcall(self._execute, self, gen, tool_calls[group[k]])
+        outs[k] = ok and out or { content = 'Error: ' .. tostring(out) }
+        remaining = remaining - 1
+        if remaining == 0 then
+          fut.resolve(true)
+        end
+      end)
+    end
+    fut.wait()
+    async.main()
+    if self.gen ~= gen then
+      return nil
+    end
+    for _, k in ipairs(batch) do
+      if outs[k] == nil then
+        return nil
+      end
+    end
+    start = start + limit
+  end
+  return outs
+end
+
+--- Compact text of what the builder said so far in this task.
+function Controller:_task_brief()
+  local first_user, said = nil, {}
+  for i = #self.session.messages, 1, -1 do
+    local m = self.session.messages[i]
+    if m.role == 'user' and not (m.content or ''):match('^Advisor review') then
+      first_user = m.content
+      break
     end
   end
+  local started = false
+  for _, m in ipairs(self.session.messages) do
+    if m.content == first_user then
+      started = true
+    elseif started and m.role == 'assistant' and vim.trim(m.content or '') ~= '' then
+      table.insert(said, vim.trim(m.content))
+    end
+  end
+  return util.clip(first_user or '', 3000), util.clip(table.concat(said, '\n---\n'), 4000)
+end
+
+function Controller:_changes_diff()
+  local parts = {}
+  for _, ch in ipairs(self.session.changes:list()) do
+    local d = self.session.changes:diff(ch.abs)
+    if d ~= '' then
+      table.insert(parts, d)
+    end
+  end
+  return table.concat(parts, '\n')
+end
+
+--- BEFORE_DONE checkpoint. Returns advice when the builder must continue.
+function Controller:_advise_before_done(gen)
+  local roles = self:roles()
+  local t = self.task
+  if not (roles.advisor and roles.advisor_opts.before_done and t and t.edit_seq) then
+    return nil
+  end
+  local task, plan = self:_task_brief()
+  local v = self:_verification()
+  local brief = table.concat({
+    'Task:\n' .. task,
+    'Agent notes:\n' .. plan,
+    'Verification: ' .. v.status .. (v.command and (' (' .. v.command .. ' -> ' .. tostring(v.summary) .. ')') or ''),
+    'Full diff:\n' .. util.truncate_middle(self:_changes_diff(), 10000),
+  }, '\n\n')
+  local advice = t.advisor:review(gen, 'BEFORE_DONE', brief)
+  if advice and not Advisor.is_lgtm(advice) then
+    return advice
+  end
+  return nil
 end
 
 --- Context budget in tokens.
@@ -463,7 +636,7 @@ function Controller:_budget(model)
 end
 
 function Controller:_request(gen)
-  local model = self:model()
+  local model = self:active_model()
   local mode = self.permissions.mode
   if not self.task.system_prompt or self.task.system_mode ~= mode then
     self.task.system_prompt = prompt.build({
@@ -474,9 +647,12 @@ function Controller:_request(gen)
     self.task.system_mode = mode
   end
   local system_prompt = self.task.system_prompt
-  local tools = self.registry:schemas(function(kind)
+  local roles = self:roles()
+  local tools = vim.tbl_filter(function(t)
+    return t.name ~= 'explore' or roles.explorer
+  end, self.registry:schemas(function(kind)
     return self.permissions:offers(kind)
-  end)
+  end))
   local budget = self:_budget(model)
   async.main()
   local info = self.model_cache[model]
@@ -536,6 +712,7 @@ function Controller:_request(gen)
       tools = tools,
       model = model,
       temperature = self.config.temperature,
+      role = 'builder',
       on_delta = function(content)
         if content and content ~= '' then
           table.insert(pending_text, content)
@@ -553,6 +730,7 @@ function Controller:_request(gen)
     flush()
 
     if res and not res.cancelled then
+      self:_record_role('builder', model, res)
       local text = res.content or ''
       if item then
         item.text = text
@@ -590,17 +768,42 @@ function Controller:_request(gen)
       item.interrupted = true
       self:_update(item)
     end
-    local retryable = self.backend.is_retryable and self.backend.is_retryable(err)
-    if not retryable or attempts > self.config.limits.max_request_retries then
-      return nil, err
+    -- The model cannot be used right now (rate limit, quota, policy, unknown):
+    -- switch to the next configured fallback model for the rest of the task.
+    local unavailable = self.backend.is_model_unavailable and self.backend.is_model_unavailable(err)
+    if unavailable then
+      local chain = self.config.fallback_models or {}
+      self.task.fallback_index = (self.task.fallback_index or 0) + 1
+      local next_model = chain[self.task.fallback_index]
+      while next_model == model do
+        self.task.fallback_index = self.task.fallback_index + 1
+        next_model = chain[self.task.fallback_index]
+      end
+      if next_model then
+        self:notice('warn', string.format('Switched model %s -> %s for this task: %s', model, next_model, util.clip(tostring(err), 160)))
+        self.task.model_override = next_model
+        model = next_model
+        attempts = 0
+        self.events:emit('model', model)
+        goto continue
+      end
     end
-    local wait = 1000 * (2 ^ (attempts - 1))
-    self:notice('warn', string.format('Request failed (%s). Retrying in %ds...', util.clip(tostring(err), 120), wait / 1000))
-    async.sleep(wait)
-    async.main()
-    if self.gen ~= gen then
-      return { cancelled = true }
+    do
+      local retryable = self.backend.is_retryable and self.backend.is_retryable(err)
+      if not retryable or attempts > self.config.limits.max_request_retries then
+        return nil, err
+      end
     end
+    do
+      local wait = 1000 * (2 ^ (attempts - 1))
+      self:notice('warn', string.format('Request failed (%s). Retrying in %ds...', util.clip(tostring(err), 120), wait / 1000))
+      async.sleep(wait)
+      async.main()
+      if self.gen ~= gen then
+        return { cancelled = true }
+      end
+    end
+    ::continue::
     if self.machine.current ~= S.THINKING then
       self.machine:to(S.THINKING)
     end
@@ -639,6 +842,9 @@ function Controller:_tool_ctx(item, gen)
     set_cancel = function(fn)
       self.cancel_fn = fn
     end,
+    explore = self:roles().explorer and function(args)
+      return subagent.run(self, gen, args, item)
+    end or nil,
     on_file_changed = function(info)
       self.events:emit('file_changed', { path = info.real, rel = info.rel })
     end,
@@ -701,6 +907,25 @@ function Controller:_execute(gen, tc)
     item.preview = { diff = prepared.diff, added = prepared.added, removed = prepared.removed, path = prepared.path.rel, abs = prepared.path.real, op = prepared.op, hunks = prepared.hunks }
   elseif tool.kind == 'exec' then
     item.preview = { command = prepared.command, cwd = prepared.cwd_rel, timeout_ms = prepared.timeout_ms }
+  end
+
+  -- PLAN checkpoint: let the advisor look at the plan before the first change.
+  local roles = self:roles()
+  if tool.kind == 'write' and roles.advisor and roles.advisor_opts.on_plan and not self.task.plan_reviewed then
+    self.task.plan_reviewed = true
+    local task, plan = self:_task_brief()
+    local advice = self.task.advisor:review(gen, 'PLAN', table.concat({
+      'Task:\n' .. task,
+      'Agent plan / notes so far:\n' .. plan,
+      'First proposed change (' .. tostring(item.title) .. '):\n' .. util.truncate_middle(prepared.diff or '', 6000),
+    }, '\n\n'))
+    if self.gen ~= gen then
+      return nil
+    end
+    if advice and not Advisor.is_lgtm(advice) then
+      return fail('deferred', 'NOT EXECUTED: an advisor reviewed your plan before the first change:\n' .. advice
+        .. '\nAdjust the plan if needed, then issue this change (or a corrected one) again.')
+    end
   end
 
   local decision = self.permissions:decide(tool, args, prepared)
@@ -790,6 +1015,28 @@ function Controller:_execute(gen, tc)
   end
 
   local content = util.truncate_middle(util.redact(res.output or ''), self.config.limits.max_tool_output_bytes)
+
+  -- REPEATED_FAILURE checkpoint: the same check failed twice (after edits).
+  if tool.name == 'run_command' then
+    local key = vim.trim(prepared.command or '')
+    t.fail_streak[key] = res.ok and 0 or ((t.fail_streak[key] or 0) + 1)
+    local roles = self:roles()
+    if not res.ok and t.fail_streak[key] >= 2 and t.edit_seq and roles.advisor and roles.advisor_opts.on_repeated_failure then
+      local task, plan = self:_task_brief()
+      local advice = t.advisor:review(gen, 'REPEATED_FAILURE', table.concat({
+        'Task:\n' .. task,
+        'Agent notes:\n' .. plan,
+        'Failing check (twice): ' .. key .. '\n' .. util.truncate_middle(util.redact(res.output or ''), 4000),
+        'Diff so far:\n' .. util.truncate_middle(self:_changes_diff(), 6000),
+      }, '\n\n'))
+      if self.gen ~= gen then
+        return nil
+      end
+      if advice and not Advisor.is_lgtm(advice) then
+        content = content .. '\n\nADVISOR (the same check failed twice):\n' .. advice
+      end
+    end
+  end
   return { content = content ~= '' and content or '(no output)' }
 end
 

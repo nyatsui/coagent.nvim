@@ -70,21 +70,32 @@ function Mock:usage()
   return res
 end
 
+function Mock.is_model_unavailable(err)
+  err = tostring(err)
+  return err:find('429', 1, true) ~= nil or err:find('quota', 1, true) ~= nil
+end
+
 function Mock.is_retryable(err)
   return tostring(err):find('retryable', 1, true) ~= nil
 end
 
-local function next_step(self, messages)
+local function next_step(self, messages, req)
   self.calls = self.calls + 1
   if type(self.script) == 'function' then
-    return self.script(messages, self.calls) or { content = 'done' }
+    return self.script(messages, self.calls, req) or { content = 'done' }
   end
   return self.script[self.calls] or { content = 'done' }
 end
 
 Mock.ask = async.wrap(function(self, req, cb)
-  table.insert(self.requests, { messages = vim.deepcopy(req.messages), tools = req.tools, system_prompt = req.system_prompt })
-  local step = next_step(self, req.messages)
+  table.insert(self.requests, {
+    messages = vim.deepcopy(req.messages),
+    tools = req.tools,
+    system_prompt = req.system_prompt,
+    model = req.model,
+    headless = req.headless,
+  })
+  local step = next_step(self, req.messages, req)
   local finished = false
   local function finish(res, err)
     if finished then
@@ -141,7 +152,7 @@ Mock.ask = async.wrap(function(self, req, cb)
         content = content,
         tool_calls = tool_calls,
         usage = { total_tokens = step.tokens or (#content + 100), max_tokens = step.max_tokens or 64000 },
-        model = 'mock-model',
+        model = step.resolved_model or req.model,
       })
     end
   end
