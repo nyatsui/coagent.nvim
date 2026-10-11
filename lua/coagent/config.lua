@@ -87,6 +87,19 @@ local defaults = {
     max_results = 100,
   },
 
+  -- Format files after the agent edits them (ALEFix-like). Default false:
+  -- never automatic; /format or :CoagentFormat formats on demand.
+  --   'changed'  only the lines the agent changed (range formatting; skipped
+  --              when the formatter cannot format ranges)
+  --   'file'     the whole file
+  -- Uses conform.nvim when installed (lsp_format = 'fallback'), else an LSP
+  -- client that formats. Results are recorded as agent changes (revertible).
+  format_after_edit = false,
+  format = {
+    timeout_ms = 2000,
+    filetypes = nil, -- e.g. { 'python', 'lua' }; nil = every filetype
+  },
+
   background = {
     max_processes = 3, -- concurrent background processes (start_process)
     max_output_bytes = 1024 * 1024, -- retained output per process (tail)

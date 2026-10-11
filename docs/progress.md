@@ -162,6 +162,24 @@
   無効化・失敗）、`#clipboard`（切り詰め・空・`+` → `"` のフォールバック）、`#` 補完
 - 全テスト: 162 件成功
 
+## 追加（AI が編集したファイルの整形・/format）
+
+- `tools/format.lua`: conform.nvim（`lsp_format = 'fallback'`、`quiet`、同期）→ 無ければ整形対応の LSP（`vim.lsp.buf.format`、
+  範囲は `rangeFormatting` 対応時のみ）→ 無ければ何もしない。`changed` はベースラインとの diff（`core/diff.lua`）から変更行の範囲を
+  求めて下から順に整形し、範囲整形できなければスキップ（ファイル全体には広げない）
+- 自動（`format_after_edit = 'changed' | 'file'`、既定 `false`）: `write_file` / `edit_file` の成功後に実行し、ツール結果に
+  「auto-formatted (N lines changed); re-read before further edits」を追加。整形失敗・範囲整形非対応も注記
+- 手動: `/format [changed|file]` / `:CoagentFormat`（既定 `changed`）。作業中は拒否、結果をタイムラインに要約
+- 安全性: 未保存バッファ・保護ファイル・ワークスペース外・エージェント外で編集済みのファイルは整形しない。開いている未変更バッファは
+  再利用、無ければ非表示バッファに読み込み後に削除。整形結果は変更トラッカーに記録（ベースラインは作業前のまま）するので
+  diff・revert・`/rewind` に含まれる。改行コード（CRLF）と末尾改行の有無は維持
+- 発見・修正: conform は整形ツールが無いとき callback にエラーを渡しつつ `false` を返す → 失敗ではなく「整形ツールなし」として静かにスキップ
+- テスト `tests/format_spec.lua`（20 件、conform のスタブとプロセス内の偽 LSP サーバー）: 既定で無効、`file` / `changed`、
+  開いているバッファの再利用、`filetypes`、diff・revert・rewind に整形が含まれる、整形ツールなし、整形失敗、保護ファイル、
+  エージェント外の編集、未保存バッファ、CRLF・末尾改行なし、範囲の結合、LSP の全体整形と範囲整形非対応の注記、
+  `/format` / `:CoagentFormat file` の要約、作業中の拒否、未知のモード
+- 全テスト: 220 件成功
+
 ## 残課題
 
 | 課題 | 内容 |

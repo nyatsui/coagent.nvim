@@ -89,6 +89,15 @@ end, { nargs = '?', complete = 'file' })
 cmd('CoagentRewind', function()
   agent().rewind()
 end, { desc = 'Rewind code and/or conversation to before a past prompt' })
+cmd('CoagentFormat', function(a)
+  agent().format(a.args)
+end, {
+  nargs = '?',
+  desc = 'Format the files the agent changed: changed (default, only its lines) | file',
+  complete = function()
+    return { 'changed', 'file' }
+  end,
+})
 cmd('CoagentOutput', function()
   agent().output()
 end, {})

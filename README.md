@@ -42,6 +42,8 @@ I'll find the `add` implementation and its tests.
 - **プロンプトテンプレート** — `/explain` `/codereview` `/fix` `/tests` `/commit` など（CopilotChat の定型プロンプト相当）と設定での独自定義。説明・レビューはそのタスクだけ読み取り専用
 - **`#url` / `#clipboard`** — 入力した URL のページ本文やクリップボードを添付
 - **作業中の追加指示** — 作業中に送ったメッセージはキューに入り、次のステップ境界で届く（ツールや承認は中断しない）
+- **AI が編集したファイルの整形** — conform.nvim / LSP で整形（ALEFix 相当）。既定は自動整形なし（`/format` で手動）。
+  `format_after_edit = 'changed'` で AI が変更した行だけを編集のたびに整形。整形結果も巻き戻し可能
 - **通知** — 承認待ち・完了・失敗をベル（tmux 対応）や任意のデスクトップ通知で知らせる（文面は定型文のみ）
 - **セッション** — プロジェクト単位で保存/復元、中断タスクの再開（未実行の tool call は再実行しない）
 
@@ -69,7 +71,7 @@ I'll find the `add` implementation and its tests.
   'nyatsui/coagent.nvim',
   main = 'coagent',
   dependencies = { 'CopilotC-Nvim/CopilotChat.nvim' },
-  cmd = { 'Coagent', 'CoagentToggle', 'CoagentStop', 'CoagentSessions', 'CoagentMode', 'CoagentModel', 'CoagentChanges', 'CoagentRewind', 'CoagentResume', 'CoagentUsage', 'CoagentProcesses' },
+  cmd = { 'Coagent', 'CoagentToggle', 'CoagentStop', 'CoagentSessions', 'CoagentMode', 'CoagentModel', 'CoagentChanges', 'CoagentRewind', 'CoagentFormat', 'CoagentResume', 'CoagentUsage', 'CoagentProcesses' },
   keys = {
     { '<leader>aa', '<cmd>CoagentToggle<cr>', desc = 'Coagent' },
     { '<leader>aa', ':Coagent<cr>', mode = 'v', desc = 'Coagent (selection)' },
@@ -178,6 +180,7 @@ nvim --clean -u scripts/demo.lua
 | `/mode [mode]` / `/roles [preset]` | 承認モード / 役割分担の切替 |
 | `/usage [billing]` / `/changes` / `/diff` / `/review` | 利用量（`billing` で GitHub の請求ページ） / 変更一覧 / diff / hunk レビュー |
 | `/rewind` | 過去のプロンプトの直前まで巻き戻す（コード + 会話 / 会話のみ / コードのみ。下記「巻き戻し」） |
+| `/format [changed\|file]` | このセッションで AI が変更したファイルを整形（既定 `changed` = AI が変更した行だけ。下記「AI が編集したファイルの整形」） |
 | `/stop` / `/processes` | 停止 / バックグラウンドプロセス |
 | `/queue [clear]` | 作業中に送ったメッセージ（キュー）の一覧 / `clear` で破棄 |
 | `/clear` / `/help` | 入力欄をクリア / コマンド一覧 |
@@ -237,6 +240,60 @@ notify = {
 - エージェントの最後の書込み以降にエージェント外で変更されたファイルがあれば、`:CoagentRevert` と同様に確認します
   （そのファイルを飛ばして自分の編集を残す / 編集を破棄して戻す / 中止）
 - 対象ファイルに未保存のバッファがあれば何も変更せずに中止します。エージェントの作業中は実行できません（`<C-c>` で停止してから）
+
+### AI が編集したファイルの整形（/format）
+
+ALEFix のように、エージェントが書き込んだファイルを conform.nvim（無ければ LSP）で整形します。
+**既定では自動整形しません**（`format_after_edit = false`）。会社のコードで無関係な差分を出さないよう、
+自動にする場合も「AI が変更した行だけ」を選べます。
+
+| 設定 | 動作 |
+|---|---|
+| `format_after_edit = false`（既定） | 自動整形しない。`/format` / `:CoagentFormat` で手動整形 |
+| `format_after_edit = 'changed'` | `write_file` / `edit_file` の成功後、エージェントが変更した行の範囲だけを整形 |
+| `format_after_edit = 'file'` | 編集のたびにファイル全体を整形 |
+| `format = { timeout_ms = 2000, filetypes = nil }` | 整形のタイムアウト。`filetypes = { 'python' }` で対象の filetype を限定 |
+
+- **手動**: `/format [changed|file]` または `:CoagentFormat [changed|file]` で、このセッションでエージェントが変更した
+  ファイルをまとめて整形します（既定 `changed`）。結果（整形したファイルと行数、整形不要、スキップと理由）をタイムラインに表示。
+  エージェントの作業中は実行できません
+- **整形ツール**: conform.nvim があれば `require('conform').format({ lsp_format = 'fallback', range = ... })`
+  （`formatters_by_ft` の設定がそのまま使われます。lazy.nvim の遅延読み込みでも `require` 時に読み込まれます）。
+  無ければ整形に対応した LSP クライアント（`vim.lsp.buf.format`）。どちらも無ければ何もしません（エラーにしない）
+- **`changed` の範囲**: エージェント作業前の内容（ベースライン）との diff から変更行を求め、範囲ごとに整形します。
+  conform は範囲非対応の整形ツール（`ruff_fix` など）でもファイル全体を整形した結果のうち**範囲に重なる hunk だけ**を適用します。
+  範囲整形に対応していない LSP しか無い場合は、注記を出してスキップします（ファイル全体には広げません）
+- **安全性**: 未保存の変更があるバッファのファイル、保護ファイル（`auto.protected_globs`）、ワークスペース外、
+  エージェントの最後の書込み以降にエージェント外で変更されたファイルは整形しません。開いている未変更バッファは
+  そのまま使い（整形後は保存済みの状態）、開いていなければ非表示のバッファに読み込んで整形後に閉じます
+- **巻き戻し**: 整形結果はエージェントの変更として記録されるので、diff・`/review`・`:CoagentRevert`・`/rewind` に含まれます。
+  ベースラインは作業前の内容のままなので、巻き戻すと整形も含めて元に戻ります
+- **モデルへの通知**: 自動整形した場合はツール結果に
+  `Note: the file was auto-formatted (N lines changed); re-read before further edits.` を付けます
+  （古い内容で `edit_file` が失敗しないように読み直しを促す）
+- **承認**: 整形に追加の承認は求めません。編集自体はユーザーが承認済みで、整形はローカルで決定的な処理（自分の整形設定）だからです
+
+conform.nvim + ruff の例（保存時の自動整形はせず、手動の `<leader>cf` / `:Format` だけ使う設定と併用できます）:
+
+```lua
+-- conform.nvim（:MasonInstall ruff で ruff を入れる。pyproject.toml の設定が使われる）
+require('conform').setup({
+  formatters_by_ft = {
+    python = { 'ruff_fix', 'ruff_organize_imports', 'ruff_format' },
+    lua = { 'stylua' },
+  },
+  default_format_opts = { lsp_format = 'fallback' },
+  -- format_on_save は設定しない
+})
+
+require('coagent').setup({
+  format_after_edit = false,      -- 既定: 自動整形なし。必要なときに /format
+  -- format_after_edit = 'changed', -- AI が変更した行だけを編集のたびに整形
+  format = { filetypes = { 'python' } },
+})
+```
+
+ruff が未インストールなら conform はその整形ツールを使えないので、整形は行われません（スキップ）。
 
 ### プロンプトテンプレート
 
@@ -308,6 +365,7 @@ require('coagent').setup({
 | `:CoagentChanges` / `:CoagentDiff` | 変更一覧 / セッション全体の diff |
 | `:CoagentRevert [path\|all]` | エージェントの変更を巻き戻し |
 | `:CoagentRewind` | 過去のプロンプトの直前までコード・会話を巻き戻す（`/rewind` と同じ） |
+| `:CoagentFormat [changed\|file]` | AI が変更したファイルを整形（`/format` と同じ。既定 `changed`） |
 | `:CoagentOutput` | 直近のコマンド出力を下部パネルに表示 |
 | `:CoagentProcesses` | エージェントが起動したバックグラウンドプロセスの出力表示・停止 |
 | `:CoagentUsage [billing]` | Copilot の利用量・残量（Premium requests / Chat / Completions とリセット日）、タスク・セッションのリクエスト数とトークン数。`billing` で GitHub の請求ページをブラウザで開く |
@@ -360,6 +418,8 @@ require('coagent').setup({
 - 未保存の変更があるバッファのファイルは編集しません（競合として通知）。承認待ちの間にディスク上で変更された場合も中止します
 - エージェントが変更したファイルは、作業前の内容（既存の未コミット変更を含む）を基準に巻き戻せます。
   エージェントの後にユーザーが編集したファイルは確認なしには巻き戻しません。`/rewind` でプロンプト単位にも戻せます
+- 自動整形（`format_after_edit`）は既定で無効。有効にしても保護ファイル・ワークスペース外・未保存バッファのファイルは整形せず、
+  整形結果も巻き戻せます
 - `AGENTS.md` などリポジトリ内の文書は「低優先度の参考情報」としてモデルに渡し、権限やルールを上書きできないことを明示しています
 - トークンらしき文字列は UI・保存履歴・モデルへのツール結果でマスクします
 - 外部 URL を取得するツールは提供していません（CopilotChat の `url` 関数は使いません）
@@ -396,6 +456,8 @@ require('coagent').setup({
     writable_globs = { 'src/**', 'tests/**' },
   },
   lsp = { attach_timeout_ms = 4000, request_timeout_ms = 10000, max_results = 100 },
+  format_after_edit = false, -- false（既定）| 'changed' | 'file'（「AI が編集したファイルの整形」参照）
+  format = { timeout_ms = 2000, filetypes = nil },
   background = { max_processes = 3, max_output_bytes = 1024 * 1024, max_lifetime_ms = 2 * 60 * 60 * 1000 },
   session = { persist = true, save_tool_output = true },
   ui = { layout = 'vertical', width = 0.42, icons = 'unicode', show_reasoning = false },

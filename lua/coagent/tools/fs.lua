@@ -6,6 +6,7 @@ local async = require('coagent.core.async')
 local util = require('coagent.core.util')
 local diff = require('coagent.core.diff')
 local process = require('coagent.tools.process')
+local formatter = require('coagent.tools.format')
 
 local M = {}
 
@@ -547,7 +548,9 @@ M.write_file = {
     local verb = prepared.op == 'create' and 'Created' or 'Wrote'
     return {
       ok = true,
-      output = string.format('%s %s (+%d -%d)', verb, prepared.path.rel, prepared.added, prepared.removed) .. partial_note(prepared, content),
+      output = string.format('%s %s (+%d -%d)', verb, prepared.path.rel, prepared.added, prepared.removed)
+        .. partial_note(prepared, content)
+        .. formatter.after_edit(ctx, prepared.path),
       summary = string.format('+%d -%d', diff.stats(prepared.old, content)),
     }
   end,
@@ -722,7 +725,8 @@ M.edit_file = {
       ok = true,
       output = string.format('Edited %s (+%d -%d)', prepared.path.rel, a, r)
         .. (prepared.normalized and '\nNOTE: old_string contained read_file line prefixes (number/tab); they were ignored. Do not include them.' or '')
-        .. partial_note(prepared, content),
+        .. partial_note(prepared, content)
+        .. formatter.after_edit(ctx, prepared.path),
       summary = string.format('+%d -%d', a, r),
     }
   end,

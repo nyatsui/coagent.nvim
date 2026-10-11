@@ -80,6 +80,7 @@
 | `/new` `/sessions` `/model [role]` `/mode [mode]` `/roles [preset]` | 対応する `:Coagent*` コマンドと同じ |
 | `/usage [billing]` `/changes` `/diff` `/review` `/stop` `/processes` | 同上（`/usage billing` は GitHub の請求ページを開く） |
 | `/rewind` | 過去のプロンプトの直前まで巻き戻す（`:CoagentRewind` と同じ。[4. 変更の確認と巻き戻し](#4-変更の確認と巻き戻し)） |
+| `/format [changed\|file]` | AI が変更したファイルを整形（`:CoagentFormat` と同じ。[4. 変更の確認と巻き戻し](#4-変更の確認と巻き戻し)） |
 | `/clear` | 入力欄をクリア（履歴には残らない） |
 | `/help` | コマンド一覧をタイムラインに表示 |
 
@@ -170,6 +171,36 @@
   `Keep my edits`（そのファイルを飛ばす。既定）/ `Discard my edits`（破棄して戻す）/ `Cancel`
 - 対象ファイルに未保存バッファがあれば何も変更せずに中止します（保存か破棄してから再実行）
 - 作業中（応答待ち・ツール実行中・承認待ち）は拒否されます。一時停止中なら、そのタスクを中止してから巻き戻します
+
+### AI が編集したファイルの整形（`/format` / `:CoagentFormat`）
+
+既定では自動整形しません。整形したいときに `/format`（= `/format changed`）または `/format file` を実行します。
+
+| 実行 | 対象 | 整形する範囲 |
+|---|---|---|
+| `/format` / `:CoagentFormat` | このセッションでエージェントが変更したファイル（`gc` の一覧） | エージェントが変更した行だけ |
+| `/format file` / `:CoagentFormat file` | 同上 | ファイル全体 |
+
+結果はタイムラインに表示されます:
+
+```
+Format (changed): 2 formatted, 1 already formatted, 1 skipped
+  app/models.py (3 lines changed)
+  app/views.py (1 line changed)
+Skipped:
+  app/api.py: unsaved changes in a buffer
+```
+
+- スキップされる場合: 未保存バッファがある / エージェントの後にエージェント外で編集された / 保護ファイル /
+  ワークスペース外 / 削除済み / `format.filetypes` 外 / 整形ツールが無い / LSP が範囲整形に未対応（`changed` のとき）
+- 整形結果はエージェントの変更として記録されます。`gc` の diff に含まれ、`x`（巻き戻し）や `/rewind` で整形ごと元に戻ります
+- 作業中（応答待ち・ツール実行中・承認待ち）は拒否されます
+
+自動で整形したい場合は `format_after_edit = 'changed'`（AI が変更した行だけ）または `'file'` を設定します。
+`write_file` / `edit_file` が成功するたびに整形し、ツール結果に
+「auto-formatted (N lines changed); re-read before further edits」と付けてモデルに読み直しを促します。
+整形に追加の承認は求めません（編集は承認済みで、整形はローカルの決定的な処理のため）。
+conform.nvim と ruff の設定例は README の「AI が編集したファイルの整形」を参照してください。
 
 ## 5. 停止・一時停止・再開
 

@@ -112,6 +112,15 @@ M.COMMANDS = {
     end,
   },
   {
+    name = 'format',
+    args = '[changed|file]',
+    desc = 'Format files the agent changed (changed: only its lines, default)',
+    complete = { 'changed', 'file' },
+    run = function(arg)
+      app().format(arg)
+    end,
+  },
+  {
     name = 'rewind',
     desc = 'Rewind code and/or conversation to before a past prompt',
     run = function()

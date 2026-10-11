@@ -688,6 +688,39 @@ function M.revert(path)
   end
 end
 
+--- `/format`, `:CoagentFormat`: format the files the agent changed in this
+--- session. mode: 'changed' (default, only the agent's lines) | 'file'.
+---@param mode string?
+---@return boolean ok
+function M.format(mode)
+  local c = M.controller()
+  mode = (mode == nil or mode == '') and 'changed' or mode
+  local Format = require('coagent.tools.format')
+  if not vim.tbl_contains(Format.MODES, mode) then
+    c:notice('error', 'format: unknown mode "' .. mode .. '" (changed | file)')
+    return false
+  end
+  if c:busy() then
+    c:notice('warn', 'format: the agent is busy; wait for it or stop it first (<C-c>)')
+    notify('format: the agent is busy; stop it first', vim.log.levels.WARN)
+    return false
+  end
+  if #c.session.changes.order == 0 then
+    c:notice('info', 'format: the agent has not changed any files in this session')
+    return true
+  end
+  local results = Format.run_session(c, mode)
+  local text, level = Format.summary(results, mode)
+  c:notice(level, text)
+  notify((text:gsub('\n.*', '')), level == 'warn' and vim.log.levels.WARN or nil)
+  for _, r in ipairs(results) do
+    if r.result.status == 'formatted' then
+      c.events:emit('file_changed', { path = r.abs, rel = r.rel })
+    end
+  end
+  return true
+end
+
 --- Rewind checkpoint `id` with `mode` ('all' | 'conversation' | 'code').
 --- Files edited outside the agent since its last write are a conflict: ask
 --- whether to keep those edits (skip the files) or discard them.
