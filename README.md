@@ -182,6 +182,7 @@ nvim --clean -u scripts/demo.lua
 | `/usage [billing]` / `/changes` / `/diff` / `/review` | 利用量（`billing` で GitHub の請求ページ） / 変更一覧 / diff / hunk レビュー |
 | `/rewind` | 過去のプロンプトの直前まで巻き戻す（コード + 会話 / 会話のみ / コードのみ。下記「巻き戻し」） |
 | `/format [changed\|file]` | このセッションで AI が変更したファイルを整形（既定 `changed` = AI が変更した行だけ。下記「AI が編集したファイルの整形」） |
+| `/resume` | 一時停止したタスクを再開（上限で止まった場合はカウンタをリセットして続行。`:CoagentResume` と同じ） |
 | `/stop` / `/processes` | 停止 / バックグラウンドプロセス |
 | `/queue [clear]` | 作業中に送ったメッセージ（キュー）の一覧 / `clear` で破棄 |
 | `/clear` / `/help` | 入力欄をクリア / コマンド一覧 |
@@ -203,13 +204,36 @@ nvim --clean -u scripts/demo.lua
 - 入力欄で `<C-c>` を押すと、まずキューのメッセージが入力欄に戻ります（エージェントは止まりません）。もう一度 `<C-c>` で停止。
   `/queue` で一覧、`/queue clear` で破棄。`:CoagentStop` で停止した場合もキューは送られずに入力欄へ戻ります
 
+### タスクごとの上限（暴走ループの歯止め）
+
+Copilot はトークン単位で課金され、エージェントは**リクエストのたびに会話履歴全体を送り直す**ため、
+モデルが同じ調査や修正を延々と繰り返すと、気づかないうちにトークン（費用・クォータ）を大量に消費します。
+`limits` はそうした暴走ループを止めるためのブレーキです。
+
+| 上限 | 既定値 | 到達したとき |
+|---|---|---|
+| `max_steps` | 40 | モデルへのリクエスト数。**一時停止**（再開可能） |
+| `max_tool_calls` | 120 | ツール実行回数。**一時停止**（再開可能） |
+| `max_duration_ms` | 30 分 | 実働時間（承認待ちの時間は含まない）。**一時停止**（再開可能） |
+| `max_consecutive_denials` | 3 | 連続で拒否された回数。タスクを**終了**（ユーザーが「やめて」と言っているため） |
+| `max_identical_calls` / `max_identical_failures` | 4 / 3 | 変更なしの同一呼び出し・同一失敗の繰り返し。タスクを**終了**（ループしているため） |
+
+- 回数・時間の上限に達すると、タスクは失敗ではなく **PAUSED（一時停止）** になります。パネルにどの上限か・
+  現在の使用量・続け方が表示され、winbar は `paused (limit)` になります
+- `:CoagentResume` / `/resume` / `R` で**同じタスク・同じ履歴のまま、カウンタ（リクエスト数・ツール回数・経過時間）を
+  リセットして続行**します。中断された呼び出しを再実行することはありません（ステップの切れ目で止まるため、
+  実行中のツールはありません）。続ける必要がなければ `/stop`、別の指示を送れば新しいタスクとして始まります
+- 一時停止はセッションに保存されるので、Neovim を終了しても `:CoagentSessions` で復元して再開できます
+- 上限で一時停止したときは通知（`'limit'`、既定で有効）が届きます（下記「通知」）
+- 大きな作業で頻繁に止まる場合は `limits.max_steps` などを上げてください。逆に費用を抑えたい場合は下げます
+
 ### 通知（承認待ち・完了・失敗）
 
-Neovim（ターミナル）にフォーカスが無いときに、承認待ち・完了・失敗をベルで知らせます（`notify` で設定）。
+Neovim（ターミナル）にフォーカスが無いときに、承認待ち・完了・失敗・上限による一時停止をベルで知らせます（`notify` で設定）。
 
 ```lua
 notify = {
-  on = { 'approval', 'done', 'failed' }, -- 'paused' も指定可
+  on = { 'approval', 'done', 'failed', 'limit' }, -- 'paused' も指定可（'limit' = 上限で一時停止）
   bell = true,                -- 端末へ BEL を送る（tmux ではウィンドウにベルフラグが立つ）
   desktop = false,            -- true: デスクトップ通知（Linux: notify-send / macOS: osascript）
   only_when_unfocused = true, -- フォーカス中は通知しない
@@ -359,7 +383,7 @@ require('coagent').setup({
 | `:CoagentPrompt [name] [text]` | プロンプトテンプレートを実行（範囲指定で選択範囲。名前なしなら一覧から選択） |
 | `:CoagentToggle` / `Open` / `Close` | パネル開閉 |
 | `:CoagentStop` | 即時停止（リクエスト中断・実行中プロセスグループ kill・承認待ち破棄） |
-| `:CoagentPause` / `:CoagentResume` | ステップ境界で一時停止 / 再開（中断・復元セッションの再開も） |
+| `:CoagentPause` / `:CoagentResume` | ステップ境界で一時停止 / 再開（中断・復元セッション、上限による一時停止の再開も） |
 | `:CoagentApprove[!]` | 承認（`!` = このセッション中は同じ操作を常に許可） |
 | `:CoagentDeny[!] [理由]` | 拒否（理由はモデルに伝わる。`!` = 拒否して停止） |
 | `:CoagentReview` | 承認待ちの編集を hunk 単位でレビュー |
@@ -443,10 +467,10 @@ require('coagent').setup({
     rates = nil,        -- クレジットの概算用（下記「利用量とクレジット」）
   },
   mode = 'supervised',
-  limits = {
-    max_steps = 40,               -- 1 タスクあたりのモデル要求数
-    max_tool_calls = 120,
-    max_duration_ms = 30 * 60 * 1000, -- 承認待ち時間は含まない
+  limits = { -- 暴走ループの歯止め（「タスクごとの上限」参照）
+    max_steps = 40,               -- 1 タスクあたりのモデル要求数（到達で一時停止、/resume で続行）
+    max_tool_calls = 120,         -- 同上（ツール実行回数）
+    max_duration_ms = 30 * 60 * 1000, -- 同上（実働時間。承認待ち時間は含まない）
     max_identical_failures = 3,   -- 同一ツール呼び出しの連続失敗で停止
     max_identical_calls = 4,      -- 変更なしで同一呼び出しを繰り返したら停止
     max_consecutive_denials = 3,
@@ -466,7 +490,7 @@ require('coagent').setup({
   ui = { layout = 'vertical', width = 0.42, icons = 'unicode', show_reasoning = false },
   prompts = {}, -- 独自のプロンプトテンプレート（「プロンプトテンプレート」参照）
   references = { url = true, url_max_bytes = 32 * 1024, clipboard_max_bytes = 32 * 1024 },
-  notify = { on = { 'approval', 'done', 'failed' }, bell = true, desktop = false, only_when_unfocused = true },
+  notify = { on = { 'approval', 'done', 'failed', 'limit' }, bell = true, desktop = false, only_when_unfocused = true },
 })
 ```
 

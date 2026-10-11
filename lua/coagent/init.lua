@@ -503,7 +503,11 @@ function M.load_session(id)
   c = set_controller(build(s))
   M.open()
   if c:state() == 'PAUSED' then
-    c:notice('info', 'This session was interrupted. :CoagentResume continues it (unfinished tool calls are NOT re-run).')
+    if c.session.pause_reason == 'limit' then
+      c:notice('info', 'This task was paused at a per-task limit. :CoagentResume or /resume continues it with fresh counters; /stop ends it.')
+    else
+      c:notice('info', 'This session was interrupted. :CoagentResume continues it (unfinished tool calls are NOT re-run).')
+    end
   end
 end
 

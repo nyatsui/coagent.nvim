@@ -1,6 +1,6 @@
 --- Attention notifications: terminal bell and (opt-in) desktop notifications
 --- when the agent needs the user (approval requested, task done/failed,
---- paused).
+--- paused, a per-task limit reached).
 ---
 --- Messages are generic status text only ("coagent: approval needed
 --- (run_command)"): never prompt, model or code content. Desktop
@@ -11,7 +11,7 @@
 --- with focus reporting enabled (tmux: `set -g focus-events on`).
 local M = {}
 
-M.KINDS = { 'approval', 'done', 'failed', 'paused' }
+M.KINDS = { 'approval', 'done', 'failed', 'paused', 'limit' }
 
 -- true until the terminal reports FocusLost
 M.focused = true
@@ -75,6 +75,7 @@ local LABEL = {
   done = 'task completed',
   failed = 'task failed',
   paused = 'paused',
+  limit = 'limit reached, paused',
 }
 
 --- Generic message for a notification kind. `detail` must be a tool name or
@@ -92,7 +93,7 @@ end
 
 --- Notify about `kind` according to `cfg` (config.notify).
 ---@param cfg table?
----@param kind 'approval'|'done'|'failed'|'paused'
+---@param kind 'approval'|'done'|'failed'|'paused'|'limit'
 ---@param detail string?
 ---@return boolean notified
 function M.signal(cfg, kind, detail)
@@ -133,7 +134,13 @@ function M.attach(c, get_cfg)
     end),
     c.events:on('state', function(e)
       if e.state == 'PAUSED' and e.prev ~= 'PAUSED' then
-        M.signal(get_cfg(), 'paused')
+        local info = e.info or {}
+        if info.reason == 'limit' then
+          -- a step/tool-call/time budget ran out; detail: steps | tool_calls | duration
+          M.signal(get_cfg(), 'limit', info.limit)
+        else
+          M.signal(get_cfg(), 'paused')
+        end
       end
     end),
   }

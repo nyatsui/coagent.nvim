@@ -269,6 +269,9 @@ function View:bar()
   local st = c:state()
   local state_group = 'CoagentBarState'
   local label = STATE_LABEL[st] or st
+  if st == 'PAUSED' and c.session and c.session.pause_reason == 'limit' then
+    label = 'paused (limit)'
+  end
   if State.is_busy(st) then
     state_group = st == 'WAITING_APPROVAL' and 'CoagentBarAlert' or 'CoagentBarBusy'
     if st ~= 'WAITING_APPROVAL' then

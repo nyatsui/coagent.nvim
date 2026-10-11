@@ -21,6 +21,7 @@ local M = {}
 ---@field items table[]
 ---@field changes Coagent.Changes
 ---@field status string last agent state
+---@field pause_reason string? why it is PAUSED ('limit', 'user', 'interrupted')
 ---@field next_item integer
 ---@field usage_totals Coagent.UsageAcc? requests/tokens over the session's lifetime
 ---@field checkpoints Coagent.Checkpoint[] one per user prompt (/rewind)
@@ -226,6 +227,7 @@ function Session:serialize(opts)
     model = self.model,
     mode = self.mode,
     status = self.status,
+    pause_reason = self.pause_reason,
     next_item = self.next_item,
     compact_watermark = self.compact_watermark,
     compact_summary = self.compact_summary and vim.tbl_extend('force', self.compact_summary, { content = clean(self.compact_summary.content) }) or nil,
@@ -253,6 +255,7 @@ function M.deserialize(data)
   s.messages = data.messages or {}
   s.items = data.items or {}
   s.status = data.status or 'IDLE'
+  s.pause_reason = data.pause_reason
   s.next_item = data.next_item or #s.items
   s.compact_watermark = data.compact_watermark
   s.compact_summary = data.compact_summary

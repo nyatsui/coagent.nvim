@@ -68,6 +68,8 @@ function Controller.new(opts)
   end)
   self.machine = State.new(function(to, from, info)
     self.session.status = to
+    -- why the task is paused (survives save/restore: 'limit', 'user', ...)
+    self.session.pause_reason = to == S.PAUSED and info and info.reason or nil
     self.events:emit('state', { state = to, prev = from, info = info })
   end)
   if self.backend.subscribe then
@@ -796,8 +798,10 @@ function Controller:_start(body)
   self.gen = self.gen + 1
   local gen = self.gen
   self.pause_requested = false
+  local now = util.now()
   self.task = {
-    started = util.now(),
+    begun = now, -- task start; `started` restarts when a limit pause is resumed
+    started = now,
     waiting_ms = 0,
     steps = 0,
     tool_calls = 0,
@@ -827,24 +831,83 @@ function Controller:_start(body)
   return true
 end
 
+-- Size/time budgets: hitting one pauses the task (resumable with fresh
+-- counters) instead of failing it. The other limits stop the task because the
+-- user said no or the agent is looping.
+local RESUMABLE_LIMITS = { steps = true, tool_calls = true, duration = true }
+
+---@return string? message, string? kind 'abort'|'steps'|'tool_calls'|'duration'|'denials'
 function Controller:_check_limits()
   local l = self.config.limits
   local t = self.task
   if t.abort then
-    return t.abort
+    return t.abort, 'abort'
   end
   if t.steps >= l.max_steps then
-    return string.format('Reached the step limit (%d model requests).', l.max_steps)
+    return string.format('Reached the step limit (%d model requests).', l.max_steps), 'steps'
   end
   if t.tool_calls >= l.max_tool_calls then
-    return string.format('Reached the tool call limit (%d).', l.max_tool_calls)
+    return string.format('Reached the tool call limit (%d).', l.max_tool_calls), 'tool_calls'
   end
   if util.now() - t.started - t.waiting_ms > l.max_duration_ms then
-    return 'Reached the time limit (' .. util.format_duration(l.max_duration_ms) .. ').'
+    return 'Reached the time limit (' .. util.format_duration(l.max_duration_ms) .. ').', 'duration'
   end
   if t.denials >= l.max_consecutive_denials then
-    return string.format('The user denied %d actions in a row.', t.denials)
+    return string.format('The user denied %d actions in a row.', t.denials), 'denials'
   end
+end
+
+--- Wait in PAUSED until resume (true) or stop / a new prompt (false).
+---@param gen integer
+---@param info table state info (reason, ...)
+---@return boolean resumed
+function Controller:_wait_resume(gen, info)
+  self.machine:to(S.PAUSED, info)
+  self:save()
+  self.resume_future = async.future()
+  local paused_at = util.now()
+  local r = self.resume_future.wait()
+  async.main()
+  self.task.waiting_ms = self.task.waiting_ms + (util.now() - paused_at)
+  if self.gen ~= gen or r ~= 'resume' then
+    return false
+  end
+  self.machine:to(S.THINKING)
+  return true
+end
+
+--- A step, tool call or time budget ran out: pause at this step boundary
+--- (every tool call has its result, nothing is in flight). Resuming starts
+--- fresh counters for the same task and history.
+---@return boolean resumed
+function Controller:_pause_for_limit(gen, kind, message)
+  local l = self.config.limits
+  local t = self.task
+  local active = util.now() - t.started - t.waiting_ms
+  local usage = string.format(
+    'Usage so far: %d/%d model requests, %d/%d tool calls, %s/%s active time.',
+    t.steps, l.max_steps, t.tool_calls, l.max_tool_calls,
+    util.format_duration(active), util.format_duration(l.max_duration_ms)
+  )
+  self:notice('warn', table.concat({
+    'Paused: ' .. message,
+    usage,
+    'These limits stop runaway loops (every request resends the whole history and costs tokens).',
+    ':CoagentResume or /resume continues this task with fresh counters; /stop ends it; a new message starts a new task.',
+  }, '\n'))
+  local resumed = self:_wait_resume(gen, { reason = 'limit', limit = kind, message = message })
+  if not resumed then
+    return false
+  end
+  -- fresh budget; the summary still reports the whole task
+  t.prior_steps = (t.prior_steps or 0) + t.steps
+  t.prior_tool_calls = (t.prior_tool_calls or 0) + t.tool_calls
+  t.steps = 0
+  t.tool_calls = 0
+  t.started = util.now()
+  t.waiting_ms = 0
+  self:notice('info', 'Resuming with fresh limits')
+  return true
 end
 
 function Controller:_loop(gen)
@@ -856,17 +919,9 @@ function Controller:_loop(gen)
 
     if self.pause_requested then
       self.pause_requested = false
-      self.machine:to(S.PAUSED, { reason = 'user' })
-      self:save()
-      self.resume_future = async.future()
-      local paused_at = util.now()
-      local r = self.resume_future.wait()
-      async.main()
-      self.task.waiting_ms = self.task.waiting_ms + (util.now() - paused_at)
-      if self.gen ~= gen or r ~= 'resume' then
+      if not self:_wait_resume(gen, { reason = 'user' }) then
         return
       end
-      self.machine:to(S.THINKING)
     end
 
     -- step boundary: follow-ups typed while the agent worked
@@ -877,9 +932,14 @@ function Controller:_loop(gen)
       end
     end
 
-    local limit = self:_check_limits()
+    local limit, kind = self:_check_limits()
     if limit then
-      return self:_finish(gen, S.FAILED, { reason = 'limit', message = limit })
+      if not RESUMABLE_LIMITS[kind] then
+        return self:_finish(gen, S.FAILED, { reason = 'limit', message = limit })
+      end
+      if not self:_pause_for_limit(gen, kind, limit) then
+        return
+      end
     end
 
     if self.machine.current ~= S.THINKING then
@@ -1559,9 +1619,9 @@ function Controller:_finish_now(state, info)
     state = state,
     reason = info.reason,
     message = info.message,
-    steps = t.steps,
-    tool_calls = t.tool_calls,
-    duration_ms = util.now() - t.started,
+    steps = t.steps + (t.prior_steps or 0),
+    tool_calls = t.tool_calls + (t.prior_tool_calls or 0),
+    duration_ms = util.now() - (t.begun or t.started),
     verification = self:_verification(),
     changes = changes,
   }

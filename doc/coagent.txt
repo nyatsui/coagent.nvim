@@ -11,6 +11,7 @@ CONTENTS                                              *coagent-contents*
      Formatting .............................. |coagent-format|
      Queue ................................... |coagent-queue|
      Notifications ........................... |coagent-notify|
+     Limits .................................. |coagent-limits|
   5. Modes ................................... |coagent-modes|
   6. Lua API ................................. |coagent-api|
 
@@ -39,7 +40,9 @@ Check the setup with |:checkhealth| coagent.
 :CoagentStop             Stop now (abort request, kill command, drop
                               pending approval).
 :CoagentPause            Pause after the current step.
-:CoagentResume           Resume a paused/interrupted/restored task.
+:CoagentResume           Resume a paused/interrupted/restored task. After a
+                              limit pause the counters start fresh
+                              (|coagent-limits|).
 :CoagentApprove[!]       Approve the pending action (! = always).
 :CoagentDeny[!] [reason] Deny (! = deny and stop).
 :CoagentReview           Review the pending edit hunk by hunk.
@@ -189,6 +192,7 @@ Commands go into the input history like prompts.
                       Same as :CoagentEffort (|coagent-effort|).
   /rewind             Same as :CoagentRewind (|coagent-rewind|).
   /format [mode]      Same as :CoagentFormat (|coagent-format|).
+  /resume             Same as :CoagentResume (|coagent-limits|).
   /queue [clear]      List the messages queued while the agent works;
                       "clear" discards them (|coagent-queue|).
   /clear              Clear the input.
@@ -323,7 +327,7 @@ commands are never queued; they run at once.
 When Neovim does not have focus, coagent rings the terminal bell on the
 events in `notify.on`: >lua
     notify = {
-      on = { 'approval', 'done', 'failed' }, -- also: 'paused'
+      on = { 'approval', 'done', 'failed', 'limit' }, -- also: 'paused'
       bell = true,                -- BEL to the terminal (tmux: bell flag)
       desktop = false,            -- notify-send (Linux) / osascript (macOS)
       only_when_unfocused = true,
@@ -336,7 +340,34 @@ sent over the network. Focus is tracked with |FocusLost| and
 |FocusGained|. Inside tmux this needs `set -g focus-events on`; without
 focus events Neovim always counts as focused, so set
 `only_when_unfocused = false` instead. No "done" notification is sent when
-a queued message immediately starts the next task.
+a queued message immediately starts the next task. 'limit' is sent when a
+per-task limit pauses the task (|coagent-limits|); 'paused' covers the
+other pauses (:CoagentPause, interruptions).
+
+                                                        *coagent-limits*
+Per-task limits are brakes against runaway loops: every request resends
+the whole history, and Copilot bills by tokens. >lua
+    limits = {
+      max_steps = 40,                    -- model requests  } pause the
+      max_tool_calls = 120,              -- tool executions } task
+      max_duration_ms = 30 * 60 * 1000,  -- active time     } (resumable)
+      max_consecutive_denials = 3,       -- end the task
+      max_identical_calls = 4,           -- end the task
+      max_identical_failures = 3,        -- end the task
+    }
+<
+Reaching the step, tool call or time limit PAUSES the task (state PAUSED,
+reason "limit") at a step boundary, when every tool call already has its
+result. The panel says which limit, the usage so far and how to continue;
+the status bar shows "paused (limit)". :CoagentResume, /resume or `R`
+continues the same task and history with fresh counters; nothing is
+re-run. /stop ends it; a new message starts a new task instead. Time spent
+waiting for approval does not count. The pause is saved with the session
+and can be resumed after restoring it (:CoagentSessions).
+
+Denying `max_consecutive_denials` actions in a row, or the model repeating
+the same call or the same failure, still ends the task: the user said no,
+or the agent is looping.
 
 ==============================================================================
 5. MODES                                                 *coagent-modes*

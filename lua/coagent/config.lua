@@ -44,12 +44,12 @@ local defaults = {
   },
 
   -- Get the user's attention when the agent needs it. on: 'approval' | 'done'
-  -- | 'failed' | 'paused'. bell: BEL to the terminal (tmux flags the window).
+  -- | 'failed' | 'paused' | 'limit' (a step/tool-call/time limit paused the task). bell: BEL to the terminal (tmux flags the window).
   -- desktop: notify-send (Linux) / osascript (macOS); generic text only, never
   -- prompt or code. only_when_unfocused: needs terminal focus reporting
   -- (tmux: `set -g focus-events on`), otherwise Neovim always counts as focused.
   notify = {
-    on = { 'approval', 'done', 'failed' },
+    on = { 'approval', 'done', 'failed', 'limit' },
     bell = true,
     desktop = false,
     only_when_unfocused = true,
@@ -65,9 +65,12 @@ local defaults = {
   root = nil,
 
   limits = {
+    -- Brakes against runaway loops (every request resends the history and
+    -- costs tokens). Reaching one of these three PAUSES the task;
+    -- :CoagentResume / /resume continues it with fresh counters.
     max_steps = 40, -- LLM requests per task
     max_tool_calls = 120, -- tool executions per task
-    max_duration_ms = 30 * 60 * 1000, -- wall clock per task
+    max_duration_ms = 30 * 60 * 1000, -- active wall clock per task (approval waits excluded)
     max_identical_failures = 3, -- same tool+args failing repeatedly -> stop
     max_identical_calls = 4, -- same tool+args repeated without progress -> stop
     max_consecutive_denials = 3, -- user rejected N actions in a row -> stop

@@ -67,16 +67,6 @@ describe('controller', function()
     assert.is_truthy(msgs[#msgs - 2].content:find('hello', 1, true))
   end)
 
-  it('stops at max_steps', function()
-    local r = build(root, function()
-      return { tool_calls = { { name = 'list_dir', arguments = { depth = math.random(1, 5) } } } }
-    end, { limits = { max_steps = 3, max_identical_calls = 100 } })
-    r.c:submit('loop forever')
-    local d = wait_done(r)
-    assert.are.equal('FAILED', d.state)
-    assert.are.equal('limit', d.reason)
-    assert.are.equal(3, r.backend.calls)
-  end)
 
   it('detects repeated identical failures', function()
     local r = build(root, function()

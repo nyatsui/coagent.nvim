@@ -79,6 +79,7 @@
 | `/compact summary` | 古いやり取りを現在のモデルで 1 回要約し、1 メッセージに置換（1 リクエスト。`<C-c>` で中止可） |
 | `/new` `/sessions` `/model [role]` `/mode [mode]` `/roles [preset]` | 対応する `:Coagent*` コマンドと同じ |
 | `/usage [billing]` `/changes` `/diff` `/review` `/stop` `/processes` | 同上（`/usage billing` は GitHub の請求ページを開く） |
+| `/resume` | 一時停止したタスクを再開（`:CoagentResume` と同じ。上限による一時停止ならカウンタをリセット） |
 | `/effort <level\|off\|default> [role]` | 推論の強さをこのセッションだけ変更（`:CoagentEffort` と同じ。[6. モードとモデル](#6-モードとモデル)） |
 | `/rewind` | 過去のプロンプトの直前まで巻き戻す（`:CoagentRewind` と同じ。[4. 変更の確認と巻き戻し](#4-変更の確認と巻き戻し)） |
 | `/format [changed\|file]` | AI が変更したファイルを整形（`:CoagentFormat` と同じ。[4. 変更の確認と巻き戻し](#4-変更の確認と巻き戻し)） |
@@ -210,11 +211,26 @@ conform.nvim と ruff の設定例は README の「AI が編集したファイ�
 | `<C-c>`（パネル/入力欄） | キューがあればまずそれを入力欄に戻す（停止しない）。キューが空なら `:CoagentStop` と同じ |
 | `:CoagentStop` / `/stop` | 即時停止（キューは入力欄へ戻す）。HTTP ストリーム中断、実行中コマンドのプロセスグループを kill、承認待ちを破棄。表示済みの部分応答は残る |
 | `p` / `:CoagentPause` | 現在のステップ完了後に一時停止 |
-| `R` / `:CoagentResume` | 一時停止・外部割り込み・復元したセッションを再開 |
+| `R` / `:CoagentResume` / `/resume` | 一時停止・外部割り込み・上限による一時停止・復元したセッションを再開 |
+
+### タスクごとの上限
+
+エージェントはリクエストのたびに履歴全体を送り直すため、ループが暴走するとトークン（費用・クォータ）を消費し続けます。
+`limits` はその歯止めです。
+
+- `max_steps`（既定 40 リクエスト）、`max_tool_calls`（120 回）、`max_duration_ms`（30 分。承認待ちは含まない）に達すると、
+  タスクは**一時停止（PAUSED、reason `limit`）**します。パネルにどの上限か・使用量・続け方が表示され、winbar は `paused (limit)`
+- `R` / `:CoagentResume` / `/resume` で、同じタスク・同じ履歴のままカウンタをリセットして続行。止まるのはステップの切れ目
+  （直前のツール結果はすべて記録済み）なので、再実行される呼び出しはありません。完了時のサマリーは全区間の合計を表示します
+- `/stop` で終了、新しいメッセージを送ると一時停止中のタスクを破棄して新しいタスクを開始
+- 一時停止はセッションに保存され、復元後も同じように再開できます
+- `max_consecutive_denials`（連続拒否 3 回）と `max_identical_calls` / `max_identical_failures`（同一呼び出し・同一失敗の
+  繰り返し）は従来どおりタスクを終了します（ユーザーが拒否している / ループしているため、続けても意味がない）
 
 ### 通知
 
-Neovim にフォーカスが無いとき、承認待ち・完了・失敗（`notify.on` に `'paused'` を足すと一時停止も）を知らせます。
+Neovim にフォーカスが無いとき、承認待ち・完了・失敗・上限による一時停止（`'limit'`）を知らせます
+（`notify.on` に `'paused'` を足すと手動の一時停止・割り込みも）。
 
 - 既定は端末ベル（BEL）のみ。tmux ではそのウィンドウにベルフラグが立ちます
 - `notify.desktop = true` でデスクトップ通知（Linux: `notify-send`、macOS: `osascript`）。`:checkhealth coagent` で検出結果を確認できます
@@ -242,7 +258,7 @@ Neovim にフォーカスが無いとき、承認待ち・完了・失敗（`not
 
 - `gn` / `:CoagentNew` — 新しいセッション
 - `gs` / `:CoagentSessions` — このプロジェクトの保存済みセッションを選んで復元
-- 中断されたセッション（Neovim 終了時に実行中だった等）は PAUSED で復元され、未実行の操作は再実行されません
+- 中断されたセッション（Neovim 終了時に実行中だった等）や上限で一時停止したセッションは PAUSED で復元され、未実行の操作は再実行されません
 
 ## 8. コマンド出力
 
@@ -259,5 +275,6 @@ Neovim にフォーカスが無いとき、承認待ち・完了・失敗（`not
 | `interrupted` で止まった | CopilotChat の通常チャットで送信した等。`R` で再開 |
 | `CONFLICT: ... unsaved changes` | 該当バッファを保存または破棄してから続行を指示 |
 | 同じ操作を繰り返して停止した | `max_identical_calls` / `max_identical_failures` の安全装置。指示を具体化して再実行 |
+| `paused (limit)` で止まった | `max_steps` / `max_tool_calls` / `max_duration_ms` に到達。`R` / `/resume` で続行、`/stop` で終了。頻繁なら `limits` を上げる |
 | モデルがツールを使わない | `:CoagentModel` で tool calling 対応モデルを選択 |
 | 通知（ベル）が来ない | tmux なら `set -g focus-events on`（フォーカス判定）と `monitor-bell on`。または `notify.only_when_unfocused = false` |

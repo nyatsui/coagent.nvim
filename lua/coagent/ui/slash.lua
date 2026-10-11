@@ -151,6 +151,13 @@ M.COMMANDS = {
     end,
   },
   {
+    name = 'resume',
+    desc = 'Continue a paused task (after a limit: with fresh counters)',
+    run = function()
+      app().resume()
+    end,
+  },
+  {
     name = 'stop',
     desc = 'Stop the running task (and background processes)',
     run = function()

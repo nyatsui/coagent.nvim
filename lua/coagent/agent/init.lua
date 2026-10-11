@@ -52,6 +52,9 @@ function M.build(opts)
     else
       c.machine:reset('IDLE')
     end
+    if c.machine.current ~= 'PAUSED' then
+      session.pause_reason = nil
+    end
   end
   return c
 end
