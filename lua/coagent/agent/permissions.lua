@@ -129,6 +129,14 @@ function Permissions:decide(tool, args, prepared)
   local mode = self:effective_mode()
   prepared = prepared or {}
 
+  -- tools that always need the user (delegate: content leaves for another chat)
+  if tool.always_ask then
+    if mode == 'readonly' then
+      return decision('deny', 'read-only mode: ' .. tool.name .. ' is disabled')
+    end
+    return decision('ask', tool.ask_reason or (tool.name .. ' always needs approval'), { warnings = prepared.warnings or {} })
+  end
+
   if tool.kind == 'read' then
     local p = prepared.path
     -- files of the user's own (enabled) skills: readable outside the workspace,

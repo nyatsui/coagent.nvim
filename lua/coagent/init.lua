@@ -1025,6 +1025,264 @@ M.ledger = setmetatable({
   end,
 })
 
+------------------------------------------------------------------------------
+-- External subtasks (/delegate, /receive)
+------------------------------------------------------------------------------
+
+M.DELEGATE_USAGE = '/delegate <kind> [all] [instruction, @files] | list | open <id> | cancel <id> | detach'
+M.RECEIVE_USAGE = '/receive [id] [paste|clipboard|files]'
+
+--- Subcommands and kinds (completion).
+---@return string[]
+function M.delegate_args()
+  local Delegate = require('coagent.agent.delegate')
+  local out = { 'list', 'open', 'cancel', 'detach' }
+  vim.list_extend(out, Delegate.kind_names(config.options.delegate or {}))
+  return out
+end
+
+--- `/delegate ...` (see M.DELEGATE_USAGE). Writes a bundle for another chat;
+--- nothing is sent anywhere by coagent.
+---@param arg string?
+---@return boolean? ok, any result
+function M.delegate(arg)
+  local c = M.controller()
+  local Delegate = require('coagent.agent.delegate')
+  local ui = require('coagent.ui.delegate')
+  local store = c:delegations()
+  arg = vim.trim(arg or '')
+  local verb, rest = arg:match('^(%S+)%s*(.-)$')
+  if arg == '' or verb == 'list' then
+    c:notice('info', ui.list_text(store:list(), c.session.waiting))
+    return true, store:list()
+  elseif verb == 'help' then
+    c:notice('info', 'Usage: ' .. M.DELEGATE_USAGE .. '\nKinds: ' .. table.concat(Delegate.kind_names(config.options.delegate or {}), ', '))
+    return true
+  elseif verb == 'open' then
+    local sub, err = store:get(rest ~= '' and rest or (c.session.waiting and c.session.waiting.id) or (store:latest_open() or {}).id)
+    if not sub then
+      c:notice('error', '/delegate open: ' .. tostring(err or 'no subtask'))
+      return false
+    end
+    Delegate.sys.open(sub.dir)
+    local clip = Delegate.to_clipboard(Delegate.prompt_of(sub))
+    c:notice('info', string.format('Subtask #%d (%s, %s): %s\n00_prompt.md copied to the %s register again.', sub.id, sub.kind, sub.state, vim.fn.fnamemodify(sub.dir, ':~'), clip and '+' or 'unnamed'))
+    return true, sub
+  elseif verb == 'cancel' then
+    local ok, err = c:cancel_subtask(rest ~= '' and rest or (c.session.waiting and c.session.waiting.id) or nil)
+    if not ok then
+      c:notice('error', '/delegate cancel: ' .. tostring(err))
+    end
+    return ok
+  elseif verb == 'detach' then
+    local ok, err = c:detach()
+    if not ok then
+      c:notice('warn', '/delegate detach: ' .. tostring(err))
+    end
+    return ok
+  end
+  local kinds = Delegate.kinds(config.options.delegate or {})
+  if not kinds[verb] then
+    c:notice('error', string.format('/delegate: unknown kind or command "%s". Usage: %s\nKinds: %s', verb, M.DELEGATE_USAGE, table.concat(Delegate.kind_names(config.options.delegate or {}), ', ')))
+    return false
+  end
+  local all = false
+  local first, after = rest:match('^(%S+)%s*(.-)$')
+  if first == 'all' then
+    all, rest = true, after
+  elseif first == '--' then
+    rest = after
+  end
+  -- @mentions: source files (sent in full) or data files (attached as-is)
+  local files, attachments, shown = {}, {}, {}
+  local mentions = require('coagent.agent.context').mentions(rest, c.ws)
+  for _, m in ipairs(mentions) do
+    if m.info then
+      local data = Delegate.DATA_EXT[(m.info.rel:match('%.([%w]+)$') or ''):lower()]
+      if not m.info.inside or (data and not m.info.is_dir) then
+        table.insert(attachments, m.info.real)
+      else
+        table.insert(files, m.info.rel)
+      end
+      shown[m.s] = { len = #m.path + 1, text = '`' .. (m.info.inside and m.info.rel or vim.fs.basename(m.info.real)) .. '`' }
+    end
+  end
+  -- "@path" -> "`path`" in the instruction (the bundle has no @ syntax)
+  local parts, pos = {}, 1
+  for _, m in ipairs(mentions) do
+    local r = shown[m.s]
+    if r then
+      table.insert(parts, rest:sub(pos, m.s - 1))
+      table.insert(parts, r.text)
+      pos = m.s + r.len
+    end
+  end
+  table.insert(parts, rest:sub(pos))
+  local instruction = table.concat(parts)
+  local ok, res = c:delegate({ kind = verb, instruction = instruction, files = files, attachments = attachments, all = all, outside_attachments = true })
+  if not ok then
+    c:notice('error', '/delegate: ' .. tostring(res))
+    return false
+  end
+  return true, res
+end
+
+--- `/receive [id] [paste|clipboard|files]`: import the result of a delegated
+--- subtask. Text comes from a paste buffer (default, prefilled with the +
+--- register), the + register (clipboard) or opts.text; files from the
+--- download folder (newer than the bundle) and from the pasted text.
+---@param arg string?
+---@param opts {text:string?, choose:table?, drift:table?, followup:(boolean|fun(list:table))?}? (API / tests)
+---@return boolean ok
+function M.receive(arg, opts)
+  opts = opts or {}
+  local c = M.controller()
+  local Delegate = require('coagent.agent.delegate')
+  local ui = require('coagent.ui.delegate')
+  local id, mode
+  for w in vim.trim(arg or ''):gmatch('%S+') do
+    if w:match('^#?%d+$') then
+      id = w
+    elseif w == 'paste' or w == 'clipboard' or w == 'files' then
+      mode = w
+    else
+      c:notice('error', '/receive: unknown argument "' .. w .. '". Usage: ' .. M.RECEIVE_USAGE)
+      return false
+    end
+  end
+  local store = c:delegations()
+  local sub, err
+  if id then
+    sub, err = store:get(id)
+  else
+    local w = c.session.waiting
+    sub = w and store:get(w.id) or store:latest_open()
+    err = 'no subtask is waiting for a result (/delegate list)'
+  end
+  if not sub then
+    c:notice('error', '/receive: ' .. tostring(err))
+    return false
+  end
+  -- an agent subtask whose task waits in another (saved) session
+  if sub.state == 'waiting' and sub.session and sub.session ~= c.session.id then
+    if c:busy() then
+      c:notice('warn', '/receive: the agent is busy; stop it first')
+      return false
+    end
+    local s = M.store():load(c.session.root, sub.session)
+    if s and s.waiting and s.waiting.id == sub.id then
+      c = set_controller(build(s))
+      c:notice('info', string.format('Loaded the session "%s", whose task waits for subtask #%d.', s.title, sub.id))
+    end
+  end
+  if c.session.waiting and c.session.waiting.id ~= sub.id then
+    c:notice('warn', '/receive: ' .. c:_waiting_error())
+    return false
+  end
+  if c:busy() then
+    c:notice('warn', '/receive: the agent is busy; wait for it or stop it first (<C-c>)')
+    return false
+  end
+  if sub.state == 'cancelled' or sub.state == 'received' then
+    c:notice('warn', string.format('Subtask #%d is %s; importing anyway.', sub.id, sub.state))
+  end
+  local resuming = c.session.waiting ~= nil
+  local cfg = config.options.delegate or {}
+
+  local function followup(info)
+    if resuming or opts.followup == false then
+      return
+    end
+    local list = Delegate.followups(sub, info.R)
+    if #list == 0 then
+      return
+    end
+    if type(opts.followup) == 'function' then
+      return opts.followup(list)
+    end
+    ui.followups(list, function(choice)
+      local ok, ferr = c:submit(choice.prompt, { input = choice.prompt })
+      if not ok then
+        c:notice('warn', 'Follow-up not started: ' .. tostring(ferr))
+      end
+    end)
+  end
+
+  local function apply(R)
+    local drifted = vim.tbl_filter(function(f)
+      return f.drift ~= nil
+    end, R.files)
+    for _, f in ipairs(drifted) do
+      if f.drift.local_diff and f.drift.local_diff ~= '' then
+        c:notice('warn', string.format('%s changed locally since subtask #%d was sent (base drift). Local changes:\n%s', f.rel, sub.id, util.truncate_middle(f.drift.local_diff, 4000)))
+      elseif f.drift.unseen then
+        c:notice('warn', string.format('%s exists locally but was not in the bundle of subtask #%d.', f.rel, sub.id))
+      end
+    end
+    ui.ask_drift(drifted, opts.drift, function(drift)
+      local ok, rerr = c:receive(sub, R, { drift = drift, on_done = followup })
+      if not ok then
+        c:notice('error', '/receive: ' .. tostring(rerr))
+      end
+    end)
+  end
+
+  local function import(text)
+    text = text or ''
+    local parsed = Delegate.parse_reply(text)
+    local function finish(mapped, notes)
+      local R = Delegate.assemble(sub, c.ws, { text = text, mapped = mapped, notes = notes })
+      if #R.files == 0 and #R.deletes == 0 and #R.snippets == 0 and vim.trim(text) == '' then
+        c:notice('warn', string.format('/receive %d: nothing to import: no reply text, and no new files in %s since %s.', sub.id, vim.fn.fnamemodify(Delegate.download_dir(cfg), ':~'), os.date('%H:%M', sub.created)))
+        return
+      end
+      if sub.output == 'files' and #R.files == 0 and #R.deletes == 0 and #R.snippets == 0 then
+        c:notice('warn', string.format('/receive %d: no files found (downloads or full-file blocks); the reply is imported as a report.', sub.id))
+      end
+      apply(R)
+    end
+    if sub.output ~= 'files' and mode ~= 'files' then
+      return finish({}, {})
+    end
+    local dir = Delegate.download_dir(cfg)
+    local downloads = Delegate.scan_downloads(dir, sub.created)
+    local ctx = {
+      reply = vim.tbl_map(function(m)
+        return m.path
+      end, parsed.manifest),
+      sent = vim.tbl_map(function(s)
+        return s.path
+      end, sub.sources),
+      workspace = require('coagent.agent.ledger').list_files(c.ws.root),
+      choose = opts.choose,
+    }
+    local mapped, unknown, notes = Delegate.map_downloads(downloads, ctx)
+    if #unknown == 0 then
+      return finish(mapped, notes)
+    end
+    ui.ask_unknown(unknown, function(choose)
+      ctx.choose = vim.tbl_extend('force', opts.choose or {}, choose)
+      local m2, _, n2 = Delegate.map_downloads(downloads, ctx)
+      finish(m2, n2)
+    end)
+  end
+
+  if opts.text ~= nil then
+    import(opts.text)
+  elseif mode == 'clipboard' then
+    import(vim.fn.getreg('+'))
+  elseif mode == 'files' then
+    import('')
+  else
+    local initial = vim.fn.getreg('+')
+    if initial == Delegate.prompt_of(sub) then
+      initial = ''
+    end
+    ui.paste(sub, initial, import)
+  end
+  return true
+end
+
 function M.new_session()
   local c = state.controller
   if c and c:busy() then
@@ -1048,7 +1306,10 @@ function M.load_session(id)
   end
   c = set_controller(build(s))
   M.open()
-  if c:plan_phase() == 'ready' then
+  if c.session.waiting then
+    local w = c.session.waiting
+    c:notice('info', string.format('This task waits for delegated subtask #%d (%s): /receive %d imports its result; /delegate detach keeps it for later.', w.id, w.kind or '?', w.id))
+  elseif c:plan_phase() == 'ready' then
     c:notice('info', 'A plan is waiting for approval: /plan approve, /plan discard, or type feedback to revise it.')
   elseif c:state() == 'PAUSED' then
     if c.session.pause_reason == 'limit' then

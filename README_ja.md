@@ -35,7 +35,7 @@ I'll find the `add` implementation and its tests.
 - **認証・通信は CopilotChat.nvim をそのまま利用** — Copilot CLI / ACP / 別途の API キー / 独自 OAuth は一切不要
 - **複数ステップの自律ループ** — 調査 → 編集 → 検証 → 再修正を、完了・上限・停止まで繰り返す
   （既存 CopilotChat の自動継続は 1 回のみ。`tests/upstream/existing_loop_spec.lua` で確認済み）
-- **明示的な状態機械** — `IDLE / THINKING / STREAMING / EXECUTING_TOOL / WAITING_APPROVAL / PAUSED / COMPLETED / FAILED / CANCELLED`
+- **明示的な状態機械** — `IDLE / THINKING / STREAMING / EXECUTING_TOOL / WAITING_APPROVAL / WAITING_EXTERNAL / PAUSED / COMPLETED / FAILED / CANCELLED`
 - **「モデルが完了と言った」と「検証で成功した」を区別** — 最後の編集以降に成功したチェックがあるかで `Verified / Not verified / Last check failed` を表示
 - **安全な実行** — 承認モード、ワークスペース外・シンボリックリンク脱出・`.git`・保護ファイルの防御、危険コマンド検出、OS サンドボックス（macOS `sandbox-exec` / Linux `bwrap`）
 - **ユーザーの変更を壊さない** — 未保存バッファとの競合検出、承認待ち中のディスク変更検出、作業開始前の状態を基準にしたロールバック
@@ -56,6 +56,10 @@ I'll find the `add` implementation and its tests.
   coagent がセッションをまたいで保ちます。`/ledger init` で概要を 1 リクエストで作成し、タスク完了・外部結果の取り込み・
   実験のたびに小さな 1 リクエストで更新。ローカルのタスクには要約（digest）を渡し、`ledger.bundle()` で全体像を他の
   チャットへ渡せます。あなたが編集した部分は差分を見せずに上書きしません
+- **サブタスクを別のチャットに任せる** — `/delegate analyze|implement|fix|review` が、手で操作する Web チャット向けの自己完結した
+  バンドル（台帳、ソース全文、環境、git diff、コマンド出力の全文、添付、出力形式）を書き出し、`/receive` がダウンロードしたファイルを
+  対応付けて（改名・ベースのずれに対応）通常のレビューを通して適用します。エージェントも（必ず承認付きで）任せられ、`WAITING_EXTERNAL`
+  で待ちます。coagent が別のチャットを自動操作することはありません
 - **`#url` / `#clipboard`** — 入力した URL のページ本文やクリップボードを添付
 - **インライン編集** — `:'<,'>CoagentInline 指示` で選択範囲だけを 1 リクエスト（ツールなし）で書き換え、
   バッファ内に diff プレビュー（`ga` 適用 / `gr` 破棄 / `gi` 追加指示）。適用した変更は巻き戻し可能
@@ -282,6 +286,8 @@ vim.keymap.set('x', '<leader>ai', ':CoagentInline<CR>', { desc = 'Coagent inline
 | `/skill <name> [task]` | スキルを最初から読み込んだ状態でタスクを実行 |
 | `/exp [show\|diff\|note\|compare\|run ...]` | 実験ログ: 表・詳細・差分・メモ・Markdown の比較・実行の記録（下記「実験ログ」。ローカルのみ、リクエストなし） |
 | `/ledger [init\|refresh[!]\|note\|decision\|update\|review\|log\|open\|bundle\|info ...]` | プロジェクト台帳: ファイルを開く・概要の生成と更新・メモと決定の追記・編集した節への更新の確認（下記「プロジェクト台帳」。リクエストを送るのは init / refresh / update だけ） |
+| `/delegate <種類> [指示]\|list\|open\|cancel\|detach` | 手で操作する別のチャット向けにサブタスクのバンドルを作る（「サブタスクを別のチャットに任せる」参照。ローカル、リクエストなし） |
+| `/receive [id] [paste\|clipboard\|files]` | 結果を取り込む: 貼り付けたテキストやダウンロードしたファイル。変更はすべてレビュー付き |
 | `/new` / `/sessions` | 新規セッション / 保存済みセッション一覧 |
 | `/model [role]` | モデル選択（`builder` / `explorer` / `advisor`） |
 | `/mode [mode]` / `/roles [preset]` | 承認モード / 役割分担の切替 |
@@ -336,11 +342,11 @@ Copilot はトークン単位で課金され、エージェントは**リクエ�
 
 ### 通知（承認待ち・完了・失敗）
 
-Neovim（ターミナル）にフォーカスが無いときに、承認待ち・完了・失敗・上限による一時停止をベルで知らせます（`notify` で設定）。
+Neovim（ターミナル）にフォーカスが無いときに、承認待ち・完了・失敗・上限による一時停止・任せたサブタスクの結果待ちをベルで知らせます（`notify` で設定）。
 
 ```lua
 notify = {
-  on = { 'approval', 'done', 'failed', 'limit' }, -- 'paused' も指定可（'limit' = 上限で一時停止）
+  on = { 'approval', 'done', 'failed', 'limit', 'waiting' }, -- 'paused' も指定可（'limit' = 上限で一時停止、'waiting' = WAITING_EXTERNAL）
   bell = true,                -- 端末へ BEL を送る（tmux ではウィンドウにベルフラグが立つ）
   desktop = false,            -- true: デスクトップ通知（Linux: notify-send / macOS: osascript）
   only_when_unfocused = true, -- フォーカス中は通知しない
@@ -681,6 +687,110 @@ coagent がセッションをまたいで保つので、新しいタスクも（
 変えられません。モデルの文は節や記録を追加できず（`#` で始まる行は太字にします）、秘密情報はマスクし、要約は自分の
 ブロックを途中で閉じられません。
 
+### サブタスクを別のチャットに任せる（/delegate, /receive）
+
+coagent は司令塔のままです。重いサブタスク（結果の分析と計画、大きめの実装、難しい修正、レビュー）を、**あなたが手で操作する別のチャット**
+（任意の Web チャット。たとえば社内の Microsoft 365 Copilot の強いモデル）に任せ、結果を受け取ってローカルで続けます。
+実行、引数を変えての再実行、小さな修正は coagent が行います。**coagent が別のチャットに接続したり、ログインしたり、操作を自動化したりすることは
+ありません**。coagent はフォルダを書き出すだけで、貼り付け・添付・回答の持ち帰りはあなたが行います。新しいトークンや認証は不要です。
+
+各サブタスクは**自己完結**です（長い外部チャットは劣化するので、毎回新しく始めます）。全体像はプロジェクト台帳を通じてバンドルに入り、
+結果は後で台帳に記録されます。
+
+> **データの取り扱い.** バンドルを貼り付けると、ソースコード・ログ・結果がエディタの外に出ます。外部ツールに貼り付けてよい内容
+> （と利用してよいツール）は、所属組織のルールに従ってください。保護ファイル（`auto.protected_globs`。`.env` や鍵など）は決して含めません。
+> トークンらしき文字列を含むファイルは、送る前に警告します。
+
+**種類と出力形式.** 種類ごとに、別のチャットに返してほしい形を厳密に指定します（`delegate.language = 'ja'` でプロンプトと出力形式が日本語に
+なります。固定の見出しやファイル名は指定どおり）。
+
+| 種類 | 用途 | 別のチャットが返すもの |
+|---|---|---|
+| `analyze` | 結果 → 次に何をするか | `## Findings` / `## Hypotheses` / `## Plan` / `## Experiments`（優先度順、期待される効果、全引数付きの正確なコマンド）を持つ Markdown のレポート |
+| `implement` | 目標に向けたコード変更 | `## Manifest`（`\| path \| modified/new/deleted \| summary \|`）、続いて**変更・新規の全ファイルを全文で**、**同じファイル名**のダウンロードファイルとして（`...` による省略なし）、最後に `## Verification` のコマンド |
+| `fix` | エラー・トレースバック → 最小限の修正 | `## Cause` のあと `implement` と同じ |
+| `review` | コードレビュー | 重大度別の `## Findings`（`### Critical` / `Major` / `Minor` / `Nit`）、`path:line` 付き |
+| 独自 | `delegate.kinds = { name = { output = 'text'\|'files', description, contract, default_instruction } }` | あなたの指定（`name = false` で種類を削除） |
+
+**バンドル.** `/delegate <種類> [指示]` は `stdpath('state')/coagent/delegate/<project>/<id>/`（または `delegate.dir`）を書き出し、
+`00_prompt.md` を `+` レジスタにコピーし、フォルダを開き、サブタスクを台帳（`subtasks.md`）に pending として登録します。
+
+| ファイル | 内容 |
+|---|---|
+| `00_prompt.md` | 貼り付ける本文: サブタスク ID と種類、指示、各添付ファイルの意味付きの一覧、出力形式、「自己完結したサブタスクであり、台帳が唯一の正」 |
+| `01_ledger.md` | プロジェクト台帳（概要・目標・現状・決定・最近のサブタスク。`ledger.bundle()`）。台帳が無いときはローカルで作る概要（ディレクトリ構成・README・最近の依頼） |
+| `02_sources.md` | 関係するソースファイルの**全文**: 指定したファイル（`@file`、フォルダも可）、このセッションで変更したファイル、台帳の概要にある中核ファイル。`all` で全ソース。上限は大きめ（`max_source_bytes` = 2 MB）で、超えたファイルは**丸ごと**外して一覧に載せます。途中で切ることはありません |
+| `03_context.md` | 環境（OS、Python、PyTorch / CUDA / cuDNN、`nvidia-smi`）、git の HEAD・status・`git diff HEAD`、直近のコマンド出力とトレースバックの**全文**、実験表 |
+| 添付 | CSV・ログ・プロットをそのままコピー（`@results.csv`、`@plots/loss.png`。指定したデータファイルは添付になります） |
+| `manifest_expected.json` | 送ったソースのパスと sha256（取り込み時のベースのずれ検出用） |
+
+あとは別のチャットを開いて `00_prompt.md` を貼り、`01`〜`03` と添付ファイルを添付して送信します。回答が来たらコピーします
+（返されたファイルはダウンロードします）。
+
+**受け取り.** `/receive [id]`（省略時は待機中か最新の未完了のサブタスク）:
+
+- **テキスト**（analyze / review）: `+` レジスタの内容を入れた下書きバッファが開くので、確認して `:w`（または `<C-s>`）で取り込みます
+  （`/receive <id> clipboard` はレジスタを直接使います）。回答はバンドルに `result.md` として保存されます
+- **ファイル**（implement / fix）: ダウンロードフォルダ（`delegate.download_dir`。既定は `$XDG_DOWNLOAD_DIR`、`xdg-user-dir DOWNLOAD`、
+  `~/Downloads` の順）でバンドルより新しいファイルを探し、ワークスペースのパスに対応付けます: 回答の Manifest 表、送ったソース
+  （`manifest_expected.json`）、同名のファイルがワークスペースに 1 つだけある場合、の順です。ブラウザによる `train (1).py` のような改名に対応し、
+  最新のダウンロードを使います。不明・曖昧な名前は確認します（パスを選ぶ、新規ファイル、スキップ）。貼り付けた回答も読みます:
+  `### path` の下や `` ```python title="path" `` の全文ブロック、unified diff（すべての hunk が一致するときに適用）
+- 決定的に配置できない**断片**（`# ... existing code ...`、元のファイルよりかなり短い、パスの無いブロック、当たらない diff）は、
+  **1 回の**ローカルのエージェントの手順（「正確に適用し、先に対象を読む」）に渡します。使えるのは読み取りと `edit_file` / `write_file` だけで、
+  承認はいつもどおりです
+- **ベースのずれ**: バンドル作成後にローカルで内容が変わった対象（sha が不一致）は、ローカルの差分を表示して選んでもらいます:
+  エージェントでマージ（既定。送った版からの外部の変更を diff として渡します）、全体の diff を確認して上書き、スキップ。黙って上書きはしません
+- **すべてのファイル変更は通常のレビュー付き編集の流れを通ります**: `write_file` / `delete_file` の diff、hunk ごとのレビュー、承認
+  （auto モードでも。`delegate.review_imports`）、保護パスと未保存バッファの確認、変更の追跡、`:CoagentRevert`、`/rewind`（取り込みは
+  チェックポイントになります）、`format_after_edit`、新しい診断
+- そのあと、結果の要約とファイルを台帳に記録し（`ledger.auto_update` なら小さなリクエスト 1 回、そうでなければ素のエントリ）、ローカルの
+  続きのタスクを提案します: 検証コマンドの実行、分析にある実験の実行（`python train.py --lr 0.01 ...`）、計画の実行、レビュー指摘の修正
+
+**エージェントが任せる場合.** builder は重い作業のために `delegate(kind, instruction, files?, attachments?)` ツールを持っています。
+**必ず**承認を求め（auto モードでも。read-only モードでは提供しません）、承認画面にはバンドルの概要（ソース、添付、サイズ、警告）が出ます。
+承認すると、タスクは **`WAITING_EXTERNAL`** 状態になります: winbar に `waiting: analyze #3` と出て、通知され（`notify.on` の `'waiting'`）、
+待機はセッションと一緒に保存されます（再起動後も残り、別のセッションから `/receive 3` するとそのセッションを読み込みます）。
+待機中は新しいメッセージを受け付けません: `/receive 3` で取り込んだ結果を `delegate` ツールの結果としてタスクが再開し（履歴は追記のみ）、
+`/delegate detach` で待機を終えて coagent を別の作業に使えます（あとで `/receive 3` すると手動の結果として取り込みます）。
+`/delegate cancel 3` か `/stop` でタスクを終了します。
+
+| コマンド | 動作 |
+|---|---|
+| `/delegate <種類> [all] [指示, @files]` | バンドルを書き出す（`all` = 全ソース、`@data.csv` でデータを添付） |
+| `/delegate list` | このプロジェクトのサブタスクと状態（pending / waiting / received / cancelled） |
+| `/delegate open <id>` | バンドルのフォルダを開き、`00_prompt.md` をもう一度コピー |
+| `/delegate cancel <id>` / `detach` | サブタスクを取り消す / 待機をやめる |
+| `/receive [id] [paste\|clipboard\|files]` | 結果を取り込む（既定は下書きバッファ。`files` はダウンロードのみ） |
+
+**ML のワークフロー例.**
+
+```text
+/exp                                   val_acc が 0.71 で頭打ち（実行 #12〜#15）
+/delegate analyze val_acc が頭打ちになる理由は? @runs/metrics.csv @plots/loss.png
+    -> 00_prompt.md を別のチャットに貼り、01_ledger.md 02_sources.md 03_context.md metrics.csv loss.png を添付
+/receive 4                             レポートを貼る。台帳に分析と計画が記録される
+    -> 続き「Run experiment: python train.py --lr 3e-4 --warmup 500」（ローカル、承認あり）
+/delegate implement #4 の計画どおり warmup 付き cosine LR スケジュールを追加 @train.py @configs/base.yaml
+    -> 別のチャットが train.py と configs/base.yaml をダウンロードファイルで返す
+/receive 5                             ~/Downloads から対応付け、hunk ごとにレビューして適用
+    -> 続き「Run the verification commands」。引数を変えて再実行、小さな修正はローカルで
+```
+
+```lua
+delegate = {
+  language = 'ja',            -- 'ja': 日本語のプロンプトと出力形式
+  download_dir = nil,         -- nil = $XDG_DOWNLOAD_DIR / xdg-user-dir / ~/Downloads
+  dir = nil,                  -- nil = stdpath('state')/coagent/delegate
+  clipboard = true, open_folder = true,
+  review_imports = true,      -- 取り込むファイルは auto モードでも必ず承認
+  sources = { changed = true, core = true },
+  max_source_bytes = 2 * 1024 * 1024, recent_commands = 3,
+  kinds = { profile = { output = 'text', description = 'ボトルネックを探す', contract = '## Hotspots ...' } },
+  env_commands = { { label = 'Python', cmd = { '{python}', '--version' } } }, -- {python} = .venv / python / python3
+},
+```
+
 ### エージェントが使うツール
 
 | 種類 | ツール | 承認（supervised） |
@@ -688,6 +798,7 @@ coagent がセッションをまたいで保つので、新しいタスクも（
 | 調査 | `list_dir`, `glob`, `search`, `read_file`, `git_status`, `git_diff`, `diagnostics` | 不要 |
 | スキル | `use_skill`（スキルの手順を読み込む。スキルがあるときだけ提供） | 不要 |
 | 実験 | `experiments`（ローカルの実験ログ: 表・詳細・比較） | 不要 |
+| 委任 | `delegate`（重いサブタスクを別のチャット向けにバンドル。タスクは `/receive` まで待つ） | **常に必要**（auto モードでも） |
 | 言語サーバー | `lsp_definition`（定義）, `lsp_references`（参照）, `lsp_symbols`（アウトライン / シンボル検索）, `lsp_hover`（型・ドキュメント） | 不要 |
 | 編集 | `edit_file`, `write_file`, `delete_file` | 必要（diff 表示） |
 | コマンド | `run_command`（終了するコマンド） | 必要 |
@@ -709,6 +820,7 @@ coagent がセッションをまたいで保つので、新しいタスクも（
 | `:CoagentSkills [enable\|disable <name>\|reload]` | Agent Skills の一覧 / このセッションだけ有効・無効を切替（`/skills` と同じ） |
 | `:CoagentExp [show\|diff\|note\|compare\|run ...]` | 実験ログ（`/exp` と同じ） |
 | `:CoagentLedger [init\|refresh[!]\|note\|decision\|update\|review\|log\|open\|bundle\|info ...]` | プロジェクト台帳（`/ledger` と同じ） |
+| `:CoagentDelegate <種類> [指示]\|list\|open\|cancel\|detach` / `:CoagentReceive [id]` | サブタスクを任せる / 結果を取り込む（`/delegate`、`/receive` と同じ） |
 | `:CoagentPrompt [name] [text]` | プロンプトテンプレートを実行（範囲指定で選択範囲。名前なしなら一覧から選択） |
 | `:CoagentToggle` / `Open` / `Close` | パネル開閉 |
 | `:CoagentStop` | 即時停止（リクエスト中断・実行中プロセスグループ kill・承認待ち破棄） |
@@ -848,7 +960,9 @@ require('coagent').setup({
   },
   references = { url = true, url_max_bytes = 32 * 1024, clipboard_max_bytes = 32 * 1024 },
   inline = { context_lines = 40, keymaps = { accept = 'ga', reject = 'gr', retry = 'gi', diff = 'gd' } },
-  notify = { on = { 'approval', 'done', 'failed', 'limit' }, bell = true, desktop = false, only_when_unfocused = true },
+  -- サブタスクを別のチャットに任せる（「サブタスクを別のチャットに任せる」参照）
+  delegate = { language = 'en', download_dir = nil, review_imports = true, max_source_bytes = 2 * 1024 * 1024, kinds = {} },
+  notify = { on = { 'approval', 'done', 'failed', 'limit', 'waiting' }, bell = true, desktop = false, only_when_unfocused = true },
 })
 ```
 

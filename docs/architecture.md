@@ -33,6 +33,7 @@ lua/coagent/
     advisor.lua                  アドバイザー（追記のみの専用履歴、PLAN / REPEATED_FAILURE / BEFORE_DONE）
     changes.lua                  変更追跡・巻き戻し
     ledger.lua                   プロジェクト台帳（Markdown 5 ファイル・節ハッシュによる編集保護・digest・bundle・init/refresh/更新リクエスト）
+    delegate.lua                 外部サブタスク（種類と出力形式・バンドル・サブタスクの保存・回答の解析・ダウンロードの対応付け・delegate ツール）
   tools/
     init.lua                     ツールレジストリ
     workspace.lua                ワークスペース境界（realpath・symlink 脱出検出）
@@ -52,6 +53,7 @@ lua/coagent/
     diffview.lua                 unified / side-by-side / hunk レビュー
     changes.lua                  変更ファイル一覧
     ledger.lua                   台帳ファイルの分割表示・上限つきログ表示・保留中の更新のレビュー
+    delegate.lua                 /receive の下書きバッファ、不明なダウンロード・ベースのずれ・続きのタスクの確認
     icons.lua, highlights.lua
 ```
 
@@ -85,15 +87,18 @@ submit(text)
 
 ### 状態遷移
 
-| from \ to | THINKING | STREAMING | EXECUTING_TOOL | WAITING_APPROVAL | PAUSED | COMPLETED | FAILED | CANCELLED | IDLE |
-|---|---|---|---|---|---|---|---|---|---|
-| IDLE | ✓ | | | | | | | | |
-| THINKING | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
-| STREAMING | ✓ | | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
-| EXECUTING_TOOL | ✓ | | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
-| WAITING_APPROVAL | ✓ | | ✓ | ✓ | ✓ | | ✓ | ✓ | |
-| PAUSED | ✓ | | | | | | | ✓ | ✓ |
-| COMPLETED / FAILED / CANCELLED | ✓ | | | | | | | | ✓ |
+| from \ to | THINKING | STREAMING | EXECUTING_TOOL | WAITING_APPROVAL | WAITING_EXTERNAL | PAUSED | COMPLETED | FAILED | CANCELLED | IDLE |
+|---|---|---|---|---|---|---|---|---|---|---|
+| IDLE | ✓ | | | | | | | | | |
+| THINKING | ✓ | ✓ | ✓ | ✓ | | ✓ | ✓ | ✓ | ✓ | |
+| STREAMING | ✓ | | ✓ | ✓ | | ✓ | ✓ | ✓ | ✓ | |
+| EXECUTING_TOOL | ✓ | | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
+| WAITING_APPROVAL | ✓ | | ✓ | ✓ | | ✓ | | ✓ | ✓ | |
+| WAITING_EXTERNAL | ✓ | | | | | | ✓ | | ✓ | ✓ |
+| PAUSED | ✓ | | | | | | | | ✓ | ✓ |
+| COMPLETED / FAILED / CANCELLED | ✓ | | | | | | | | | ✓ |
+
+`WAITING_EXTERNAL` は `delegate` ツールの実行後に入る、別のチャットの結果待ちの状態です（[外部サブタスク](#外部サブタスク委任)）。
 
 不正な遷移は例外になり、テストで検出されます（`tests/unit_spec.lua`）。
 
@@ -172,6 +177,39 @@ ledger.bundle(opts) ──> 全体の Markdown（ログは直近 N 件 + 古い�
   まだ見えていれば（`/compact summary` で置換されたターンや、予算超過で削られたターンでなければ）再注入しない
 - **信頼**: 台帳の文はデータとして扱い、権限・モード・モデルの決定には一切使わない。モデルの文の `#` 行は太字に変え、
   節や記録を偽造できない。digest 内の `</project_ledger` はエスケープ
+
+## 外部サブタスク（委任）
+
+`agent/delegate.lua`（UI 非依存: 種類と出力形式、バンドル作成、サブタスクの保存、回答の解析、ダウンロードの対応付け、
+`delegate` ツール）、`controller.lua`（`WAITING_EXTERNAL`、`receive`・`detach`・`cancel_subtask`）、`ui/delegate.lua`
+（下書きバッファ・確認）。coagent は外部のチャットに一切接続せず、フォルダを書き出して取り込むだけです。
+
+```
+/delegate kind | delegate ツール（承認必須）
+  └─ Delegate.prepare（副作用なし: ソース全文・添付・台帳 or 概要・環境/git/コマンド出力/実験）
+  └─ Delegate.write: <dir>/<project>/<id>/{00_prompt,01_ledger,02_sources,03_context}.md, 添付, manifest_expected.json,
+                     .coagent/{subtask.json, base/<path>}  → + レジスタ, フォルダを開く, 台帳に pending を追記
+  └─ ツールの場合: 同じステップの tool 結果を session.waiting に保留 → WAITING_EXTERNAL（保存・通知）
+/receive id
+  └─ 回答テキスト（下書きバッファ / + レジスタ）+ ダウンロード（バンドルより新しい、テキストのみ）
+  └─ map_downloads: 回答の Manifest 表 → manifest_expected.json → ワークスペースで一意の同名 → 確認（`name (1).py` は最新）
+  └─ assemble: 全文ブロック・diff（全 hunk 一致時）→ ファイル、省略・短すぎ・パス無し → 断片、sha 不一致 → ベースのずれ
+  └─ controller:receive: checkpoint → write_file / delete_file を _execute で実行（通常の承認・保護・変更追跡・整形・診断）
+       → result.md / received/ を保存 → 台帳に記録（ledger.record）
+       → 待機中のタスク: 保留していた tool 結果 + delegate の結果を追記して _loop 再開
+       → 手動: 断片・マージがあれば 1 回のエージェント手順（edit/write のみ）、なければ完了して続きのタスクを提案
+```
+
+- **状態**: `EXECUTING_TOOL → WAITING_EXTERNAL`。`WAITING_EXTERNAL` は busy ではない（何も動いていない）が、
+  `submit` / `resume` / `rewind` / `compact` は拒否。`→ THINKING`（受け取り）、`→ COMPLETED`（detach）、`→ CANCELLED`（cancel / stop）
+- **追記のみ**: 待機中は assistant の tool_calls に対する tool 結果を `session.waiting.results` に保留し、終了時に一度に追記。
+  `Session:repair` は保留中の呼び出しに結果を補わない。`session.waiting` はセッションと一緒に保存され、読込時に
+  `WAITING_EXTERNAL` に戻る。別のセッションから `/receive` するとそのセッションを読み込む
+- **安全性**: 取り込むファイルは合成した `write_file` / `delete_file` の呼び出しとして既存のパイプラインを通るので、承認
+  （`review_imports` で auto モードでも ask）・hunk レビュー・保護パス・未保存バッファ・承認待ち中のディスク変更・変更追跡・
+  `/rewind` がそのまま効く。`delegate` ツールは `always_ask`（read-only では拒否）。保護ファイルはバンドルに入れない
+- **ベースのずれ**: `manifest_expected.json` の sha256 と現在の内容を比べ、違えば `.coagent/base/<path>`（送った版）からの
+  ローカル差分を表示。マージはエージェントに「送った版 → 外部の版」の diff を渡して現在のファイルへ適用させる
 
 ## セッション保存
 

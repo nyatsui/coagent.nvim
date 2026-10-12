@@ -111,6 +111,7 @@
 | `/skill <name> [task]` | スキルを最初から読み込んでタスクを実行 |
 | `/exp [show\|diff\|note\|compare\|run ...]` | 実験ログ（[実験ログ](#実験ログexp)。ローカルのみ、リクエストなし） |
 | `/ledger [init\|refresh[!]\|note\|decision\|update\|review\|log\|open\|bundle\|info ...]` | プロジェクト台帳（[プロジェクト台帳](#プロジェクト台帳ledger)。リクエストを送るのは init / refresh / update だけ） |
+| `/delegate <種類> [指示]\|list\|open\|cancel\|detach` / `/receive [id]` | 別のチャットに任せる / 結果を取り込む（[サブタスクを別のチャットに任せる](#サブタスクを別のチャットに任せるdelegate--receive)。ローカルのみ） |
 | `/new` `/sessions` `/model [role]` `/mode [mode]` `/roles [preset]` | 対応する `:Coagent*` コマンドと同じ |
 | `/usage [billing]` `/changes` `/diff` `/review` `/stop` `/processes` | 同上（`/usage billing` は GitHub の請求ページを開く） |
 | `/resume` | 一時停止したタスクを再開（`:CoagentResume` と同じ。上限による一時停止ならカウンタをリセット） |
@@ -217,6 +218,38 @@ coagent がセッションをまたいで保ちます。長いチャットで前
   `(+ project ledger digest)` と表示。`ledger.inject = false` で無効
 - 台帳はモデルが書いた文を含む「データ」です。権限・モード・モデルは変えられません
 - `:CoagentLedger …` も同じ
+
+### サブタスクを別のチャットに任せる（`/delegate` / `/receive`）
+
+重いサブタスク（結果の分析と計画・大きめの実装・難しい修正・レビュー）を、**あなたが手で操作する別のチャット**（任意の
+Web チャット。社内の Microsoft 365 Copilot など）に任せ、結果を取り込んでローカルで続けます。coagent はフォルダを書き出すだけで、
+別のチャットに接続・ログイン・自動操作はしません。**貼り付けてよい内容は所属組織のルールに従ってください**（保護ファイルは含めず、
+トークンらしき文字列を含むファイルは送る前に警告します）。
+
+1. `/delegate <種類> [指示]` — 種類は `analyze`（結果 → Findings / Hypotheses / Plan / Experiments）、`implement`（Manifest 表 +
+   変更・新規ファイルを**同じファイル名で全文**ダウンロード + Verification）、`fix`（Cause + implement と同じ）、`review`
+   （重大度別の Findings、`path:line`）、設定した独自の種類（`delegate.kinds`）。`@file` でソース（フォルダ可）、`@results.csv` や
+   `@loss.png` などのデータは添付。`/delegate implement all ...` で全ソース。`delegate.language = 'ja'` で日本語
+2. バンドルのフォルダ（`stdpath('state')/coagent/delegate/<project>/<id>/`）が開き、`00_prompt.md` が `+` レジスタに入ります。
+   別のチャットに貼り、`01_ledger.md`（台帳。無ければローカルの概要）・`02_sources.md`（ソース全文。上限超過は丸ごと外して一覧）・
+   `03_context.md`（環境・git・直近のコマンド出力の全文・実験表）と添付を添付して送信
+3. `/receive [id]` — 下書きバッファ（`+` レジスタの内容入り）で回答を確認して `:w`。ファイルを返す種類は、ダウンロードフォルダ
+   （`delegate.download_dir`）のバンドルより新しいファイルを Manifest 表・送ったソース・ワークスペースの同名ファイル（1 つだけのとき）
+   の順に対応付けます。`train (1).py` は最新が優先。不明な名前は確認。貼り付けた `### path` の全文ブロックや diff も取り込みます
+4. 変更はすべて通常の承認付き編集（diff・hunk レビュー・保護/未保存チェック・変更追跡・`/rewind`・整形・診断）。auto モードでも
+   承認を求めます（`delegate.review_imports`）。ローカルで変わったファイル（ベースのずれ）は差分を表示して「エージェントでマージ /
+   上書き（diff 確認）/ スキップ」を選択。置き場所が決まらない断片は 1 回のエージェントの手順（編集ツールのみ）で適用
+5. 結果は台帳に記録され、検証コマンドの実行・分析にある実験の実行などの続きのタスクを提案します
+
+エージェント自身も `delegate` ツールで任せられます（**常に承認が必要**。承認画面にバンドルの概要）。承認後のタスクは
+`WAITING_EXTERNAL`（winbar `waiting: analyze #3`、通知、セッションに保存）になり、新しいメッセージは受け付けません。
+`/receive 3` で結果を `delegate` の結果として再開、`/delegate detach` で待機をやめて別の作業へ（あとで `/receive 3`）、
+`/delegate cancel 3` / `/stop` で終了。`/delegate list`・`/delegate open <id>` で一覧とフォルダ。`:CoagentDelegate`・`:CoagentReceive` も同じ。
+
+ML の流れの例: `/exp` で頭打ちを確認 → `/delegate analyze 頭打ちの理由は? @runs/metrics.csv @plots/loss.png` → 回答を
+`/receive` → 提案された実験 `python train.py --lr 3e-4 --warmup 500` をローカルで実行 → `/delegate implement 計画どおり
+warmup 付き cosine LR を追加 @train.py @configs/base.yaml` → ダウンロードしたファイルを `/receive` でレビューして適用 →
+検証コマンドを実行し、引数を変えて再実行。
 
 ### インライン編集（`:CoagentInline`）
 
@@ -364,6 +397,7 @@ app/models.py:42:12 [Pyright] "user_id" is not defined
 | `:CoagentStop` / `/stop` | 即時停止（キューは入力欄へ戻す）。HTTP ストリーム中断、実行中コマンドのプロセスグループを kill、承認待ちを破棄。表示済みの部分応答は残る |
 | `p` / `:CoagentPause` | 現在のステップ完了後に一時停止 |
 | `R` / `:CoagentResume` / `/resume` | 一時停止・外部割り込み・上限による一時停止・復元したセッションを再開 |
+| `/receive [id]` / `/delegate detach` | 別のチャットの結果待ち（`WAITING_EXTERNAL`）を、結果を取り込んで再開 / 待たずに終了 |
 
 ### タスクごとの上限
 
@@ -381,7 +415,7 @@ app/models.py:42:12 [Pyright] "user_id" is not defined
 
 ### 通知
 
-Neovim にフォーカスが無いとき、承認待ち・完了・失敗・上限による一時停止（`'limit'`）を知らせます
+Neovim にフォーカスが無いとき、承認待ち・完了・失敗・上限による一時停止（`'limit'`）・別のチャットの結果待ち（`'waiting'`）を知らせます
 （`notify.on` に `'paused'` を足すと手動の一時停止・割り込みも）。
 
 - 既定は端末ベル（BEL）のみ。tmux ではそのウィンドウにベルフラグが立ちます

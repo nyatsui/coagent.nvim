@@ -27,6 +27,7 @@ local M = {}
 ---@field checkpoints Coagent.Checkpoint[] one per user prompt (/rewind)
 ---@field plan table? plan phase: {phase='planning'|'ready', start, item, reviewed, advice}
 ---@field skills_disabled table<string,true> skills disabled for this session (/skills)
+---@field waiting table? the task waits for a delegated subtask: {id, kind, call_id, results = {{call_id, content}}, since}
 ---@class Coagent.Checkpoint
 ---@field id integer
 ---@field text string the prompt as typed (put back into the input on rewind)
@@ -152,6 +153,11 @@ function Session:repair(note)
       answered[m.tool_call_id] = true
     end
   end
+  -- the calls of a task waiting for a delegated subtask get their results
+  -- when the result is imported (or the wait ends)
+  for _, r in ipairs(self.waiting and self.waiting.results or {}) do
+    answered[r.call_id] = true
+  end
   local repaired = 0
   local out = {}
   local i = 1
@@ -229,7 +235,7 @@ function Session:serialize(opts)
       c.output = opts.save_tool_output == false and nil or clean(c.output, 64 * 1024)
     end
     c.prepared = nil
-    c.preview = c.preview and { diff = clean(c.preview.diff, 64 * 1024), added = c.preview.added, removed = c.preview.removed, path = c.preview.path } or nil
+    c.preview = c.preview and { diff = clean(c.preview.diff, 64 * 1024), added = c.preview.added, removed = c.preview.removed, path = c.preview.path, text = clean(c.preview.text, 16 * 1024) } or nil
     table.insert(items, c)
   end
   return {
@@ -251,6 +257,11 @@ function Session:serialize(opts)
     usage_totals = self.usage_totals,
     rewind_note = self.rewind_note,
     plan = self.plan and vim.tbl_extend('force', self.plan, { advice = clean(self.plan.advice) }) or nil,
+    waiting = self.waiting and vim.tbl_extend('force', self.waiting, {
+      results = vim.tbl_map(function(r)
+        return { call_id = r.call_id, content = clean(r.content, 32 * 1024) }
+      end, self.waiting.results or {}),
+    }) or nil,
     skills_disabled = next(self.skills_disabled or {}) and vim.tbl_keys(self.skills_disabled) or nil,
     checkpoints = vim.tbl_map(function(c)
       return vim.tbl_extend('force', c, { text = clean(c.text) })
@@ -282,6 +293,7 @@ function M.deserialize(data)
   s.checkpoints = data.checkpoints or {}
   s.rewind_note = data.rewind_note
   s.plan = data.plan
+  s.waiting = data.waiting
   for _, name in ipairs(data.skills_disabled or {}) do
     s.skills_disabled[name] = true
   end

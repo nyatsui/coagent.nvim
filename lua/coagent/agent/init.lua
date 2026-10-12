@@ -57,7 +57,10 @@ function M.build(opts)
         item.summary = item.meta.bg_id .. ' not running (session restored)'
       end
     end
-    if session:can_continue() then
+    if session.waiting then
+      -- the task waits for a delegated subtask (/receive, /delegate detach)
+      c.machine:reset('WAITING_EXTERNAL')
+    elseif session:can_continue() then
       c.machine:reset('PAUSED')
     elseif session.status == 'COMPLETED' or session.status == 'FAILED' or session.status == 'CANCELLED' then
       c.machine:reset(session.status)

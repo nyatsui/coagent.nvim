@@ -261,6 +261,7 @@ local STATE_LABEL = {
   STREAMING = 'responding',
   EXECUTING_TOOL = 'running tool',
   WAITING_APPROVAL = 'APPROVAL NEEDED',
+  WAITING_EXTERNAL = 'waiting',
   PAUSED = 'paused',
   COMPLETED = 'done',
   FAILED = 'failed',
@@ -280,6 +281,11 @@ function View:bar()
   local label = STATE_LABEL[st] or st
   if st == 'PAUSED' and c.session and c.session.pause_reason == 'limit' then
     label = 'paused (limit)'
+  end
+  if st == 'WAITING_EXTERNAL' then
+    local w = c.session and c.session.waiting
+    label = string.format('waiting: %s #%s', w and w.kind or '?', w and w.id or '?')
+    state_group = 'CoagentBarAlert'
   end
   if State.is_busy(st) then
     state_group = st == 'WAITING_APPROVAL' and 'CoagentBarAlert' or 'CoagentBarBusy'

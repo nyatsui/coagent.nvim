@@ -11,7 +11,7 @@
 --- with focus reporting enabled (tmux: `set -g focus-events on`).
 local M = {}
 
-M.KINDS = { 'approval', 'done', 'failed', 'paused', 'limit' }
+M.KINDS = { 'approval', 'done', 'failed', 'paused', 'limit', 'waiting' }
 
 -- true until the terminal reports FocusLost
 M.focused = true
@@ -76,6 +76,7 @@ local LABEL = {
   failed = 'task failed',
   paused = 'paused',
   limit = 'limit reached, paused',
+  waiting = 'waiting for an external result',
 }
 
 --- Generic message for a notification kind. `detail` must be a tool name or
@@ -93,7 +94,7 @@ end
 
 --- Notify about `kind` according to `cfg` (config.notify).
 ---@param cfg table?
----@param kind 'approval'|'done'|'failed'|'paused'|'limit'
+---@param kind 'approval'|'done'|'failed'|'paused'|'limit'|'waiting'
 ---@param detail string?
 ---@return boolean notified
 function M.signal(cfg, kind, detail)
@@ -138,6 +139,10 @@ function M.attach(c, get_cfg)
       end
     end),
     c.events:on('state', function(e)
+      if e.state == 'WAITING_EXTERNAL' and e.prev ~= 'WAITING_EXTERNAL' then
+        -- detail: the subtask kind (analyze, implement, ...)
+        M.signal(get_cfg(), 'waiting', e.info and e.info.kind)
+      end
       if e.state == 'PAUSED' and e.prev ~= 'PAUSED' then
         local info = e.info or {}
         if info.reason == 'limit' then

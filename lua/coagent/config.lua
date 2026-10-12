@@ -53,12 +53,13 @@ local defaults = {
   },
 
   -- Get the user's attention when the agent needs it. on: 'approval' | 'done'
-  -- | 'failed' | 'paused' | 'limit' (a step/tool-call/time limit paused the task). bell: BEL to the terminal (tmux flags the window).
+  -- | 'failed' | 'paused' | 'limit' (a step/tool-call/time limit paused the task)
+  -- | 'waiting' (the task delegated a subtask to another chat and waits for its result). bell: BEL to the terminal (tmux flags the window).
   -- desktop: notify-send (Linux) / osascript (macOS); generic text only, never
   -- prompt or code. only_when_unfocused: needs terminal focus reporting
   -- (tmux: `set -g focus-events on`), otherwise Neovim always counts as focused.
   notify = {
-    on = { 'approval', 'done', 'failed', 'limit' },
+    on = { 'approval', 'done', 'failed', 'limit', 'waiting' },
     bell = true,
     desktop = false,
     only_when_unfocused = true,
@@ -281,6 +282,54 @@ local defaults = {
     tree_max_entries = 300, -- lines of the directory tree
   },
 
+  -- External subtasks: hand heavy work (result analysis and planning, larger
+  -- implementations, hard fixes, reviews) to ANOTHER chat that you operate by
+  -- hand (any web chat). coagent never contacts or automates it: /delegate
+  -- <kind> [instruction] (or the agent's `delegate` tool, always with your
+  -- approval) writes a self-contained bundle folder - 00_prompt.md (copied to
+  -- the + register), 01_ledger.md (the project ledger), 02_sources.md (FULL
+  -- source files), 03_context.md (environment, git, command outputs,
+  -- experiments), attachments, manifest_expected.json - and /receive [id]
+  -- imports the reply: pasted text and/or downloaded files, every change
+  -- through the normal review (diff, hunks, approval, checks, /rewind).
+  -- Follow your organization's rules for what may be pasted into external tools.
+  delegate = {
+    enabled = true,
+    dir = nil, -- nil = stdpath('state')/coagent/delegate (one folder per project)
+    -- where the browser saves downloads; nil = $XDG_DOWNLOAD_DIR,
+    -- `xdg-user-dir DOWNLOAD`, then ~/Downloads
+    download_dir = nil,
+    language = 'en', -- 'en' | 'ja': 00_prompt.md, output contracts, reply language
+    clipboard = true, -- copy 00_prompt.md to the + register
+    open_folder = true, -- open the bundle folder (vim.ui.open)
+    review_imports = true, -- imported files always ask for approval, even in auto mode
+    -- Kinds: built-ins analyze | implement | fix | review. Add your own or
+    -- override parts of one; name = false removes a kind:
+    --   kinds = { profile = { output = 'text', description = 'find the bottleneck',
+    --             contract = { en = '...', ja = '...' }, default_instruction = '...' } }
+    -- output = 'text' (a Markdown report) | 'files' (changed files in full).
+    kinds = {},
+    -- which source files 02_sources.md contains besides the files you name
+    -- (@file, the tool's `files`) - always in full; `all` sends every file
+    sources = { changed = true, core = true },
+    max_source_bytes = 2 * 1024 * 1024, -- files beyond it are left out WHOLE and listed (never cut)
+    max_diff_bytes = 512 * 1024, -- git diff HEAD in 03_context.md (above it: --stat only, with a warning)
+    recent_commands = 3, -- last command outputs in 03_context.md (full)
+    experiments = 20, -- rows of the experiment table in 03_context.md
+    ledger_full = false, -- true: every decision / subtask entry instead of the recent ones
+    max_result_bytes = 64 * 1024, -- reply text handed back to a waiting task
+    -- environment lines of 03_context.md ({python} = the project's python:
+    -- .venv / venv, python, python3); missing programs are skipped
+    env_commands = {
+      { label = 'Python', cmd = { '{python}', '--version' } },
+      {
+        label = 'PyTorch / CUDA',
+        cmd = { '{python}', '-c', 'import torch; print("torch", torch.__version__, "| cuda", torch.version.cuda, "| cudnn", torch.backends.cudnn.version(), "| gpu available", torch.cuda.is_available())' },
+      },
+      { label = 'nvidia-smi', cmd = { 'nvidia-smi', '--query-gpu=name,driver_version,memory.total,memory.used,utilization.gpu', '--format=csv' } },
+    },
+  },
+
   -- Inline edit (:'<,'>CoagentInline [instruction]): one request with the
   -- builder model/effort, no tools; the reply is previewed in the buffer.
   inline = {
@@ -400,6 +449,9 @@ function M.setup(opts)
   end
   if opts and opts.auto and opts.auto.protected_globs then
     M.options.auto.protected_globs = opts.auto.protected_globs
+  end
+  if opts and opts.delegate and opts.delegate.env_commands then
+    M.options.delegate.env_commands = opts.delegate.env_commands
   end
   for _, k in ipairs({ 'commands', 'exclude', 'metrics', 'metric_prefixes', 'patterns', 'log_files', 'lower_is_better', 'neutral', 'columns' }) do
     if opts and opts.experiments and opts.experiments[k] then

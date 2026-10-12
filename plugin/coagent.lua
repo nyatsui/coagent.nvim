@@ -85,6 +85,21 @@ end, {
     return require('coagent').LEDGER_ARGS
   end,
 })
+cmd('CoagentDelegate', function(a)
+  agent().delegate(a.args)
+end, {
+  nargs = '*',
+  desc = 'Bundle a subtask for another chat: <kind> [all] [instruction], list, open <id>, cancel <id>, detach',
+  complete = function(_, line)
+    if line:match('^%S+%s+%S+%s') then
+      return {}
+    end
+    return require('coagent').delegate_args()
+  end,
+})
+cmd('CoagentReceive', function(a)
+  agent().receive(a.args)
+end, { nargs = '*', desc = 'Import the result of a delegated subtask: [id] [paste|clipboard|files]' })
 cmd('CoagentInline', function(a)
   agent().inline(a.args, { range = a.range > 0 and { a.line1, a.line2 } or nil })
 end, { nargs = '*', range = true, desc = 'Inline edit of the selected lines (one request, previewed in place)' })

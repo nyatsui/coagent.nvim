@@ -18,6 +18,7 @@ local Roles = require('coagent.agent.roles')
 local subagent = require('coagent.agent.subagent')
 local Advisor = require('coagent.agent.advisor')
 local Usage = require('coagent.agent.usage')
+local Delegate = require('coagent.agent.delegate')
 
 local S = State
 
@@ -259,6 +260,9 @@ function Controller:submit(text, opts)
   text = vim.trim(text or '')
   if text == '' then
     return false, 'empty prompt'
+  end
+  if self.session.waiting and not self:busy() then
+    return false, self:_waiting_error()
   end
   local skill_text, skill
   if opts.skill then
@@ -585,6 +589,9 @@ function Controller:resume()
   if self:busy() then
     return false, 'already running'
   end
+  if self.session.waiting then
+    return false, self:_waiting_error()
+  end
   self.session:repair()
   if not self.session:can_continue() then
     return false, 'nothing to resume; send a new message instead'
@@ -613,6 +620,17 @@ end
 ---@return boolean
 function Controller:stop(reason)
   local cur = self.machine.current
+  if cur == S.WAITING_EXTERNAL then
+    self.processes:kill_all()
+    if reason == 'dispose' then
+      -- switching sessions: the wait is saved with the session
+      return false
+    end
+    self:clear_queue({ restore = true })
+    local w = self:_end_wait(Controller.WAIT_STOPPED)
+    self:_finish_now(S.CANCELLED, { reason = 'user', message = string.format('Stopped while waiting for subtask #%d; /receive %d can still import its result', w.id, w.id) })
+    return true
+  end
   -- "stop" means everything the agent started, including background processes
   -- that outlived their task (dev servers).
   local bg = self.processes:running_count()
@@ -662,6 +680,10 @@ function Controller:stop(reason)
       item.status = 'interrupted'
       self:_update(item)
     end
+  end
+  if self.session.waiting and reason ~= 'dispose' then
+    -- stopped while importing the result of a waiting delegation
+    self:_end_wait(Controller.WAIT_STOPPED)
   end
   self.session:repair('CANCELLED: the user stopped the task before this tool call completed. Do not assume it ran.')
   if pending then
@@ -826,6 +848,9 @@ function Controller:rewind(id, mode, opts)
   if self:busy() then
     return false, 'the agent is busy; stop it first (<C-c>)'
   end
+  if self.session.waiting then
+    return false, self:_waiting_error()
+  end
   if mode ~= 'all' and mode ~= 'conversation' and mode ~= 'code' then
     return false, 'unknown rewind mode: ' .. tostring(mode)
   end
@@ -985,6 +1010,9 @@ function Controller:compact(opts)
   end
   if #self.session.messages == 0 then
     return false, 'nothing to compact yet'
+  end
+  if self.session.waiting then
+    return false, self:_waiting_error()
   end
   if opts.summary then
     return self:_compact_summary()
@@ -1313,6 +1341,14 @@ function Controller:_loop(gen)
           results[i] = out.content
           if out.stop then
             stop_reason = out.stop
+          end
+          if out.wait then
+            -- delegated to another chat: the rest of this step waits too
+            for k = i + 1, #tool_calls do
+              results[k] = string.format('NOT EXECUTED: the task waited for delegated subtask #%d. Request this call again if it is still needed.', out.wait.id)
+            end
+            out.wait.index = i
+            return self:_wait_external(tool_calls, results, out.wait)
           end
           i = i + 1
         end
@@ -1703,6 +1739,15 @@ function Controller:_tool_ctx(item, gen)
     on_file_changed = function(info)
       self.events:emit('file_changed', { path = info.real, rel = info.rel })
     end,
+    -- the delegate tool: bundle environment and creation
+    delegate = {
+      env = function()
+        return self:_delegate_env()
+      end,
+      create = function(plan)
+        return self:_delegate_create(plan, { call_id = item.call_id })
+      end,
+    },
     -- a background experiment run finished (its metrics are in the log)
     on_experiment = function(e)
       local Exp = require('coagent.agent.experiments')
@@ -1734,7 +1779,7 @@ function Controller:_execute(gen, tc)
     item.output = msg
     item.summary = item.summary or util.clip((msg:gsub('\n.*', '')), 80)
     self:_update(item)
-    return { content = msg }
+    return { content = msg, item = item }
   end
 
   local args, jerr = util.json_decode(tc.arguments)
@@ -1754,8 +1799,8 @@ function Controller:_execute(gen, tc)
   if narrow and tool.kind ~= 'read' and not narrow[tool.name] then
     local allowed = vim.tbl_keys(narrow)
     table.sort(allowed)
-    return fail('denied', string.format('DENIED: the skill %s limits file changes and commands in this task to: %s.',
-      table.concat(self.task.skill_names or {}, ', '), #allowed > 0 and table.concat(allowed, ', ') or '(none)'))
+    return fail('denied', string.format('DENIED: %s limits file changes and commands in this task to: %s.',
+      self.task.narrow_label or ('the skill ' .. table.concat(self.task.skill_names or {}, ', ')), #allowed > 0 and table.concat(allowed, ', ') or '(none)'))
   end
 
   local ctx = self:_tool_ctx(item, gen)
@@ -1778,7 +1823,9 @@ function Controller:_execute(gen, tc)
     self:_count_failure(tc.name, args)
     return fail('failed', msg)
   end
-  if tool.kind == 'write' then
+  if prepared.preview_text then
+    item.preview = { text = prepared.preview_text }
+  elseif tool.kind == 'write' then
     item.preview = { diff = prepared.diff, added = prepared.added, removed = prepared.removed, path = prepared.path.rel, abs = prepared.path.real, op = prepared.op, hunks = prepared.hunks }
   elseif tool.kind == 'exec' then
     item.preview = { command = prepared.command, cwd = prepared.cwd_rel, timeout_ms = prepared.timeout_ms }
@@ -1804,6 +1851,10 @@ function Controller:_execute(gen, tc)
   end
 
   local decision = self.permissions:decide(tool, args, prepared)
+  if self.task.review_writes and tool.kind == 'write' and decision.action == 'allow' then
+    -- imported results of a delegated subtask are always reviewed (delegate.review_imports)
+    decision = vim.tbl_extend('force', decision, { action = 'ask', reason = 'imported from another chat', can_always = false })
+  end
   item.decision = { action = decision.action, reason = decision.reason, warnings = decision.warnings, can_always = decision.can_always, sandbox = decision.sandbox }
 
   if decision.action == 'deny' then
@@ -1915,7 +1966,7 @@ function Controller:_execute(gen, tc)
       end
     end
   end
-  return { content = content ~= '' and content or '(no output)' }
+  return { content = content ~= '' and content or '(no output)', item = item, wait = res.ok and res.wait_external or nil }
 end
 
 --- A loaded skill's allowed-tools narrow the write/command tools for the
@@ -2031,6 +2082,13 @@ function Controller:_finish_now(state, info)
     self.events:emit('state', { state = state, info = info })
   end
   self.events:emit('done', summary)
+  if t.on_done then
+    local cb = t.on_done
+    t.on_done = nil
+    vim.schedule(function()
+      cb(summary)
+    end)
+  end
   self:_ledger_after_task(state, summary, t)
   self:save()
   if self.store and self.config.session.persist then
@@ -2040,6 +2098,360 @@ function Controller:_finish_now(state, info)
     vim.schedule(function()
       self:_drain_queue()
     end)
+  end
+end
+
+------------------------------------------------------------------------------
+-- External subtasks (delegate tool, /delegate, /receive)
+------------------------------------------------------------------------------
+-- The delegate tool writes a bundle for another chat that the user operates
+-- by hand. Its task then waits in WAITING_EXTERNAL (session.waiting, saved
+-- with the session): the tool results of that step are kept aside until
+-- /receive imports the result, which becomes the delegate call's result
+-- (append-only history), or /delegate detach / cancel / stop end the wait.
+
+Controller.WAIT_DETACHED = 'Delegated as subtask #%d (bundle written). The user detached this task to keep working on other things: '
+  .. 'the result may arrive later as a separate message. Do not wait for it.'
+Controller.WAIT_STOPPED = 'CANCELLED: the user stopped the task while it waited for delegated subtask #%d. The result may still be imported later.'
+Controller.WAIT_CANCELLED = 'CANCELLED: the user cancelled delegated subtask #%d; no result will come. Continue without it or ask the user.'
+
+function Controller:_waiting_error()
+  local w = self.session.waiting
+  return string.format('waiting for delegated subtask #%d (%s): /receive %d imports its result; /delegate detach keeps it for later so you can work on other things; /delegate cancel %d drops it', w.id, w.kind or '?', w.id, w.id)
+end
+
+--- The delegation this session's task waits for (nil when none).
+---@return table?
+function Controller:waiting_external()
+  return self.session.waiting
+end
+
+---@return Coagent.DelegateStore
+function Controller:delegations()
+  if not self.delegate_store then
+    self.delegate_store = Delegate.store(self.config.delegate or {}, self.ws)
+  end
+  return self.delegate_store
+end
+
+---@return Coagent.DelegateEnv
+function Controller:_delegate_env()
+  return { ws = self.ws, config = self.config, session = self.session, ledger = self.ledger, experiments = self.experiments }
+end
+
+--- Write the bundle of `plan`, register the subtask (store, ledger), copy
+--- 00_prompt.md to the + register and open the folder.
+---@param plan Coagent.DelegatePlan
+---@param meta {call_id:string?}?
+---@return Coagent.Subtask
+function Controller:_delegate_create(plan, meta)
+  local store = self:delegations()
+  local sub, prompt_md = Delegate.write(store, plan, { session = self.session.id, call_id = meta and meta.call_id })
+  local l = self.ledger
+  if l and l:enabled() then
+    local ok, id = pcall(function()
+      l:ensure()
+      return l:add_subtask({
+        kind = 'delegated',
+        title = string.format('subtask #%d (%s) sent: %s', sub.id, sub.kind, sub.instruction),
+        request = sub.instruction,
+        outcome = 'pending: sent to an external chat (bundle ' .. vim.fn.fnamemodify(sub.dir, ':~') .. ')',
+      })
+    end)
+    if ok then
+      sub.ledger_entry = id
+      store:save(sub)
+    end
+  end
+  local cfg = self.config.delegate or {}
+  local clip = cfg.clipboard ~= false and Delegate.to_clipboard(prompt_md)
+  if cfg.open_folder ~= false then
+    Delegate.sys.open(sub.dir)
+  end
+  local names = { Delegate.FILES.ledger, Delegate.FILES.sources, Delegate.FILES.context }
+  for _, a in ipairs(sub.attachments) do
+    table.insert(names, a.name)
+  end
+  local lines = Delegate.summary_lines(plan, sub.id)
+  table.insert(lines, 'Bundle: ' .. vim.fn.fnamemodify(sub.dir, ':~'))
+  table.insert(lines, string.format('Paste %s (%s) into the other chat and attach %s.', Delegate.FILES.prompt, clip and 'in the + register' or 'open it from the folder', table.concat(names, ', ')))
+  table.insert(lines, string.format('Then /receive %d imports the reply%s.', sub.id, sub.output == 'files' and ' (downloaded files and/or pasted text)' or ' (pasted text)'))
+  self:notice('info', table.concat(lines, '\n'))
+  return sub
+end
+
+--- `/delegate <kind> [instruction]`: write a bundle (no waiting; nothing in
+--- the conversation changes).
+---@param spec {kind:string, instruction:string?, files:string[]?, attachments:table?, all:boolean?}
+---@return boolean ok, string|Coagent.Subtask err_or_sub
+function Controller:delegate(spec)
+  local plan, err = Delegate.prepare(self:_delegate_env(), vim.tbl_extend('force', spec, { agent = false }))
+  if not plan then
+    return false, err
+  end
+  return true, self:_delegate_create(plan)
+end
+
+--- The delegate tool ran: park the task until the result is imported.
+function Controller:_wait_external(tool_calls, results, w)
+  local pending = {}
+  for k, tc in ipairs(tool_calls) do
+    table.insert(pending, { call_id = tc.id, content = results[k] })
+  end
+  self.session.waiting = { id = w.id, kind = w.kind, call_id = tool_calls[w.index].id, results = pending, since = os.time() }
+  self.machine:to(S.WAITING_EXTERNAL, { id = w.id, kind = w.kind })
+  self:notice('warn', string.format('Waiting for the result of subtask #%d (%s) from the other chat. /receive %d imports it and the task continues; /delegate detach keeps it for later; /delegate cancel %d drops it.', w.id, w.kind, w.id, w.id))
+  vim.notify(string.format('[coagent] waiting: %s #%d (paste 00_prompt.md into the other chat, then /receive %d)', w.kind, w.id, w.id), vim.log.levels.INFO)
+  self:save()
+end
+
+--- End the wait: append the held tool results (the delegate call's result is
+--- `fmt` with the subtask id, or the given text). Returns the old wait.
+---@param fmt string
+---@param content string?
+---@return table
+function Controller:_end_wait(fmt, content)
+  local w = self.session.waiting
+  self.session.waiting = nil
+  for _, item in ipairs(self.session.items) do
+    if item.type == 'tool' and item.call_id == w.call_id then
+      item.summary = content and string.format('result imported (#%d)', w.id)
+        or (fmt == Controller.WAIT_DETACHED and string.format('detached (#%d)', w.id))
+        or (fmt == Controller.WAIT_CANCELLED and string.format('cancelled (#%d)', w.id))
+        or string.format('stopped waiting (#%d)', w.id)
+      self:_update(item)
+    end
+  end
+  for _, r in ipairs(w.results or {}) do
+    local text = r.call_id == w.call_id and (content or string.format(fmt, w.id)) or r.content
+    table.insert(self.session.messages, { role = 'tool', tool_call_id = r.call_id, content = text or 'NOT EXECUTED.' })
+  end
+  if not content then
+    -- the result can still be imported, as a manual one
+    local store = self:delegations()
+    local sub = store:get(w.id)
+    if sub and sub.state == 'waiting' then
+      sub.state = 'pending'
+      sub.detached = true
+      store:save(sub)
+    end
+  end
+  return w
+end
+
+--- `/delegate detach`: stop waiting; the task ends and coagent is free for
+--- other work. /receive <id> imports the result later as a manual one.
+---@return boolean ok, string? err
+function Controller:detach()
+  local w = self.session.waiting
+  if not w or self.machine.current ~= S.WAITING_EXTERNAL then
+    return false, 'no task is waiting for a delegated subtask'
+  end
+  self:_end_wait(Controller.WAIT_DETACHED)
+  self:_finish_now(S.COMPLETED, { reason = 'detached', message = string.format('Detached from subtask #%d; /receive %d imports its result later', w.id, w.id) })
+  return true
+end
+
+--- `/delegate cancel <id>`.
+---@return boolean ok, string? err
+function Controller:cancel_subtask(id)
+  local store = self:delegations()
+  local sub, err = store:get(id)
+  if not sub then
+    return false, err
+  end
+  if sub.state == 'received' or sub.state == 'cancelled' then
+    return false, string.format('subtask #%d is already %s', sub.id, sub.state)
+  end
+  local w = self.session.waiting
+  if w and w.id == sub.id and self:busy() then
+    return false, 'the agent is busy; stop it first (<C-c>)'
+  end
+  sub.state = 'cancelled'
+  store:save(sub)
+  local l = self.ledger
+  if l and l:enabled() and l:exists() then
+    pcall(l.add_subtask, l, { kind = 'delegated', title = string.format('subtask #%d (%s) cancelled', sub.id, sub.kind), request = sub.instruction, outcome = 'cancelled by the user; no result' })
+  end
+  if w and w.id == sub.id then
+    self:_end_wait(Controller.WAIT_CANCELLED)
+    self:_finish_now(S.CANCELLED, { reason = 'user', message = 'Subtask #' .. sub.id .. ' cancelled' })
+  else
+    self:notice('info', string.format('Subtask #%d cancelled.', sub.id))
+  end
+  return true
+end
+
+--- Import the result of subtask `sub` (assembled by Delegate.assemble):
+--- every file goes through write_file / delete_file with the usual diff,
+--- per-hunk review, approval, protected / unsaved checks, change tracking,
+--- formatting and diagnostics; a checkpoint makes it /rewind-able. Then the
+--- ledger is updated, and a waiting task resumes with the result as the
+--- delegate call's result. Parts that cannot be placed deterministically
+--- (snippets, merges after base drift) go to ONE local agent step.
+---@param sub Coagent.Subtask
+---@param R Coagent.Received
+---@param opts {drift:table<string,string>?, input:string?, on_done:fun(info:table)?}?
+---@return boolean ok, string? err
+function Controller:receive(sub, R, opts)
+  opts = opts or {}
+  if self:busy() then
+    return false, 'the agent is busy; wait for it or stop it first (<C-c>)'
+  end
+  local w = self.session.waiting
+  local resume = w ~= nil and w.id == sub.id
+  if w and not resume then
+    return false, self:_waiting_error()
+  end
+  if self.machine.current == S.PAUSED then
+    -- like a new message: the paused task's pending steps are abandoned
+    self.session:repair()
+    if self.resume_future then
+      local f = self.resume_future
+      self.resume_future = nil
+      self.gen = self.gen + 1
+      f.resolve('cancel')
+    end
+  end
+  local cfg = self.config.delegate or {}
+  local store = self:delegations()
+  local has_changes = #R.files > 0 or #R.deletes > 0 or #R.snippets > 0
+  self.session:checkpoint(opts.input or ('/receive ' .. sub.id))
+  self:_add({ type = 'user', text = string.format('/receive %d: result of subtask #%d (%s)', sub.id, sub.id, sub.kind), receive = sub.id })
+  for _, n in ipairs(R.notes or {}) do
+    self:notice('info', n)
+  end
+  local function finalize(applied, merges)
+    local summary = Delegate.result_summary(sub, R, applied, merges)
+    Delegate.save_received(sub, R, summary)
+    sub.state = 'received'
+    sub.received = os.time()
+    sub.result_summary = summary.line
+    store:save(sub)
+    self:_delegate_ledger(sub, R, applied, summary)
+    return summary
+  end
+  if not resume and not has_changes then
+    -- a report: shown and recorded, no task
+    local summary = finalize({}, {})
+    self:_add({ type = 'assistant', text = string.format('**Result of subtask #%d (%s)**\n\n', sub.id, sub.kind) .. (vim.trim(R.text) ~= '' and R.text or '(empty reply)'), external = sub.id })
+    self:notice('info', summary.line .. '\nSaved in ' .. vim.fn.fnamemodify(sub.dir, ':~') .. '/' .. Delegate.FILES.result)
+    self:save(true)
+    if opts.on_done then
+      vim.schedule(function()
+        opts.on_done({ sub = sub, R = R, summary = summary })
+      end)
+    end
+    return true
+  end
+  local review = cfg.review_imports ~= false
+  return self:_start(function(gen)
+    local applied, merges = {}, {}
+    local stopped = false
+    local n = 0
+    local function run(name, args, entry)
+      n = n + 1
+      local out = self:_execute(gen, { id = string.format('receive_%d_%d', sub.id, n), name = name, arguments = util.json_encode(args) })
+      if out == nil or self.gen ~= gen then
+        return false
+      end
+      local item = out.item or {}
+      local status = item.status == 'done' and ((item.approval and item.approval.partial) and 'partially applied' or 'applied')
+        or (item.status == 'denied' and 'denied' or 'failed')
+      table.insert(applied, { rel = entry.rel, op = entry.op, status = status, output = item.output })
+      if out.stop then
+        stopped = true
+      end
+      return true
+    end
+    for _, f in ipairs(R.files) do
+      local choice = f.drift and ((opts.drift or {})[f.rel] or 'merge') or 'overwrite'
+      if stopped then
+        table.insert(applied, { rel = f.rel, op = f.op, status = 'not applied (stopped)' })
+      elseif choice == 'skip' then
+        table.insert(applied, { rel = f.rel, op = f.op, status = 'skipped (changed locally)' })
+      elseif choice == 'merge' then
+        table.insert(merges, f)
+      elseif not run('write_file', { path = f.rel, content = f.content }, f) then
+        return
+      end
+    end
+    for _, rel in ipairs(R.deletes) do
+      if stopped then
+        table.insert(applied, { rel = rel, op = 'deleted', status = 'not applied (stopped)' })
+      elseif not run('delete_file', { path = rel }, { rel = rel, op = 'deleted' }) then
+        return
+      end
+    end
+    async.main()
+    if self.gen ~= gen then
+      return
+    end
+    local summary = finalize(applied, merges)
+    local request = Delegate.apply_request(sub, R.snippets, merges)
+    if resume then
+      local content = Delegate.tool_result(sub, R, summary, request, cfg.max_result_bytes)
+      self:_end_wait('', content)
+      if stopped then
+        self:save()
+        return self:_finish(gen, S.CANCELLED, { reason = 'denied', message = 'The user denied an imported change and stopped the task.' })
+      end
+      self:notice('info', summary.line .. '\nThe waiting task continues with this result.')
+      -- denials of imported files do not count against the resumed task,
+      -- and its own later edits follow the normal policy again
+      self.task.denials = 0
+      self.task.review_writes = nil
+      self:save()
+      return self:_loop(gen)
+    end
+    if request and not stopped then
+      -- ONE local agent step places what could not be placed deterministically
+      self.task.receive = sub.id
+      self.task.skill_tools = { edit_file = true, write_file = true }
+      self.task.forced_tools = { edit_file = true, write_file = true }
+      self.task.narrow_label = '/receive'
+      self:notice('info', string.format('%s\nOne agent step now applies %d part%s that could not be placed deterministically (edits need your approval).', summary.line, #R.snippets + #merges, #R.snippets + #merges == 1 and '' or 's'))
+      table.insert(self.session.messages, { role = 'user', content = request })
+      return self:_loop(gen)
+    end
+    self:notice('info', summary.line)
+    self.task.receive = sub.id
+    return self:_finish(gen, stopped and S.CANCELLED or S.COMPLETED, { reason = 'received', message = summary.line })
+  end, {
+    plan_reviewed = true, -- the advisor does not gate imported files
+    review_writes = review,
+    receive = (not resume) and sub.id or nil,
+    on_done = opts.on_done and function(s)
+      opts.on_done({ sub = sub, R = R, summary = s })
+    end or nil,
+  })
+end
+
+--- Record an imported result in the project ledger (ONE small request with
+--- ledger.auto_update; a plain entry otherwise).
+function Controller:_delegate_ledger(sub, R, applied, summary)
+  local l = self.ledger
+  if not (l and l:enabled() and l:exists()) then
+    return
+  end
+  local files = {}
+  for _, a in ipairs(applied) do
+    if a.status == 'applied' or a.status == 'partially applied' then
+      table.insert(files, a.rel .. (a.op and a.op ~= 'modified' and a.op ~= 'modify' and (' (' .. a.op .. ')') or ''))
+    end
+  end
+  local ev = {
+    kind = 'delegated',
+    title = string.format('subtask #%d (%s) result: %s', sub.id, sub.kind, sub.instruction),
+    request = sub.instruction,
+    result = util.redact(summary.ledger_result or ''),
+    files = files,
+    outcome = summary.line,
+  }
+  self.last_ledger_event = ev
+  local ok, queued = pcall(l.record, l, ev)
+  if not (ok and queued) then
+    pcall(l.add_subtask, l, ev)
   end
 end
 
@@ -2089,7 +2501,7 @@ end
 --- Ledger event of the task that just ended (nil: nothing worth recording).
 ---@return Coagent.LedgerEvent?
 function Controller:_ledger_task_event(state, summary, t)
-  if not (state == S.COMPLETED or state == S.FAILED) or summary.plan or (t.steps or 0) + (t.prior_steps or 0) == 0 then
+  if not (state == S.COMPLETED or state == S.FAILED) or summary.plan or summary.reason == 'detached' or t.receive or (t.steps or 0) + (t.prior_steps or 0) == 0 then
     return nil
   end
   local request = self:_task_brief()

@@ -36,7 +36,7 @@ I'll find the `add` implementation and its tests.
 - **Authentication and transport come from CopilotChat.nvim as-is** — no Copilot CLI, no ACP, no extra API keys, no custom OAuth
 - **Multi-step autonomous loop** — investigate → edit → verify → fix again, until done, a limit, or you stop it
   (CopilotChat's own auto-continuation runs only once; confirmed by `tests/upstream/existing_loop_spec.lua`)
-- **Explicit state machine** — `IDLE / THINKING / STREAMING / EXECUTING_TOOL / WAITING_APPROVAL / PAUSED / COMPLETED / FAILED / CANCELLED`
+- **Explicit state machine** — `IDLE / THINKING / STREAMING / EXECUTING_TOOL / WAITING_APPROVAL / WAITING_EXTERNAL / PAUSED / COMPLETED / FAILED / CANCELLED`
 - **"The model said it's done" is not "verification passed"** — shows `Verified / Not verified / Last check failed`
   depending on whether a check succeeded after the last edit
 - **Safe execution** — approval modes; protection against writes outside the workspace, symlink escapes, `.git` and protected
@@ -63,6 +63,11 @@ I'll find the `add` implementation and its tests.
   across sessions: `/ledger init` writes the overview with one request, each finished task / imported result /
   experiment updates it with one small request, local tasks get a compact digest, and `ledger.bundle()` hands the whole
   picture to another chat. Your edits are never overwritten without a diff
+- **Delegating subtasks to another chat** — `/delegate analyze|implement|fix|review` writes a self-contained bundle
+  (ledger, full sources, environment, git diff, full command outputs, attachments, output contract) for a web chat you
+  operate by hand; `/receive` maps the downloaded files back (renames, base drift) and applies them through the normal
+  review. The agent can delegate too (always with approval) and waits in `WAITING_EXTERNAL`. coagent never automates
+  the other chat
 - **`#url` / `#clipboard`** — attach the text of a web page you typed, or the clipboard
 - **Inline edit** — `:'<,'>CoagentInline <instruction>` rewrites just the selection with one request (no tools) and previews
   the diff in the buffer (`ga` apply / `gr` discard / `gi` follow-up). Applied edits can be rewound
@@ -292,6 +297,8 @@ input history (`<C-p>`/`<C-n>`) like normal prompts.
 | `/skill <name> [task]` | Run a task with a skill loaded up front |
 | `/exp [show\|diff\|note\|compare\|run ...]` | Experiment log: table, details, diff, notes, Markdown comparison, record a run (see "Experiment log"; local, no request) |
 | `/ledger [init\|refresh[!]\|note\|decision\|update\|review\|log\|open\|bundle\|info ...]` | Project ledger: open the files, generate / refresh the overview, notes and decisions, review updates of sections you edited (see "Project ledger"; only init / refresh / update send a request) |
+| `/delegate <kind> [instruction]\|list\|open\|cancel\|detach` | Bundle a subtask for another chat you operate (see "Delegating subtasks"; local, no request) |
+| `/receive [id] [paste\|clipboard\|files]` | Import its result: pasted text and/or downloaded files, every change reviewed |
 | `/new` / `/sessions` | New session / saved sessions |
 | `/model [role]` | Pick a model (`builder` / `explorer` / `advisor`) |
 | `/mode [mode]` / `/roles [preset]` | Switch approval mode / model roles |
@@ -348,11 +355,11 @@ repeating the same investigation or fix can burn a lot of tokens (money / quota)
 ### Notifications (approval, done, failed)
 
 When Neovim (the terminal) is not focused, coagent rings the bell on approval needed / done / failed / paused at a limit
-(configured with `notify`).
+/ waiting for a delegated subtask (configured with `notify`).
 
 ```lua
 notify = {
-  on = { 'approval', 'done', 'failed', 'limit' }, -- 'paused' is also available ('limit' = paused at a limit)
+  on = { 'approval', 'done', 'failed', 'limit', 'waiting' }, -- 'paused' is also available ('limit' = paused at a limit, 'waiting' = WAITING_EXTERNAL)
   bell = true,                -- send BEL to the terminal (tmux flags the window)
   desktop = false,            -- true: desktop notification (Linux: notify-send / macOS: osascript)
   only_when_unfocused = true, -- no notification while focused
@@ -698,6 +705,117 @@ values and the last runs).
 permissions, the mode or the model. Model text cannot add sections or fake entries (`#` lines become bold text),
 secrets are masked, and the digest cannot close its own block.
 
+### Delegating subtasks to another chat (/delegate, /receive)
+
+coagent stays the orchestrator. Heavy subtasks (analyzing results and planning, a larger implementation, a hard fix, a
+review) can go to **another chat that you operate by hand**: any web chat, for example your company's Microsoft 365
+Copilot with a strong model. coagent then takes the result back and carries on locally: it runs, re-runs with other
+arguments and makes the small fixes. **coagent never contacts, logs in to or automates the other chat**: it writes a
+folder, you paste and attach, you bring the reply back. No new tokens, no new authentication.
+
+Each subtask is **self-contained** (long external chats degrade, so every subtask starts fresh): the bundle carries the
+whole picture through the project ledger, and the ledger records the result afterwards.
+
+> **Data policy.** Pasting a bundle sends source code, logs and results outside your editor. Follow your
+> organization's rules for what may be pasted into external tools (and which tools are approved). Protected files
+> (`auto.protected_globs`, e.g. `.env`, keys) are never included; files with token-like text are flagged before you
+> send anything.
+
+**Kinds and output contracts.** Each kind tells the other chat exactly what to return (`delegate.language = 'ja'`
+writes the prompt and contract in Japanese; fixed headers and file names stay as specified).
+
+| Kind | For | The other chat returns |
+|---|---|---|
+| `analyze` | results → what to do next | a Markdown report with `## Findings` / `## Hypotheses` / `## Plan` / `## Experiments` (prioritized, expected effect, exact commands with all arguments) |
+| `implement` | code changes for a described goal | `## Manifest` (`\| path \| modified/new/deleted \| summary \|`), then **every changed or new file in full** as a downloadable file with the **same file name** (no `...` omissions), then `## Verification` commands |
+| `fix` | an error / traceback → the minimal fix | `## Cause`, then the same as `implement` |
+| `review` | code review | `## Findings` by severity (`### Critical` / `Major` / `Minor` / `Nit`) with `path:line` |
+| your own | `delegate.kinds = { name = { output = 'text'\|'files', description, contract, default_instruction } }` | your contract (`name = false` removes a kind) |
+
+**The bundle.** `/delegate <kind> [instruction]` writes
+`stdpath('state')/coagent/delegate/<project>/<id>/` (or `delegate.dir`), copies `00_prompt.md` to the `+` register,
+opens the folder and registers the subtask as pending in the ledger (`subtasks.md`):
+
+| File | Content |
+|---|---|
+| `00_prompt.md` | to paste: subtask id and kind, the instruction, the list of attachments with what each one is, the output contract, and "this is a self-contained subtask; the ledger is the source of truth" |
+| `01_ledger.md` | the project ledger (overview, goals, status, decisions, recent subtasks; `ledger.bundle()`). Without a ledger: a local overview (directory tree, README, recent requests) |
+| `02_sources.md` | the **full** contents of the relevant source files: the files you name (`@file`, folders too), the files changed in this session and the core files of the ledger overview; `all` sends every source file. Generous cap (`max_source_bytes`, 2 MB): files beyond it are left out **whole** and listed, never cut |
+| `03_context.md` | environment (OS, Python, PyTorch / CUDA / cuDNN, `nvidia-smi`), git HEAD / status / `git diff HEAD`, the last command outputs and tracebacks **in full**, the experiment table |
+| attachments | copies of CSV / logs / plots as-is (`@results.csv`, `@plots/loss.png`; data files you mention become attachments) |
+| `manifest_expected.json` | paths and sha256 of the sources sent (for base-drift detection on import) |
+
+Then: open the other chat, paste `00_prompt.md`, attach `01`–`03` and the attachments, and send. When the answer is
+there, copy it (or download the files it returns).
+
+**Receiving.** `/receive [id]` (the waiting or newest open subtask by default):
+
+- **Text** (analyze / review): a scratch buffer opens, pre-filled from the `+` register; check it and `:w` (or `<C-s>`)
+  imports it (`/receive <id> clipboard` takes the register directly). The reply is stored as `result.md` in the bundle
+- **Files** (implement / fix): coagent scans the download folder (`delegate.download_dir`; default `$XDG_DOWNLOAD_DIR`,
+  `xdg-user-dir DOWNLOAD`, then `~/Downloads`) for files newer than the bundle and maps each one to a workspace path:
+  the reply's manifest table, then the sources that were sent (`manifest_expected.json`), then a unique workspace file
+  of that name. Browser renames such as `train (1).py` are handled and the newest download wins. Unknown or ambiguous
+  names are asked about (pick a path, a new file, or skip). The pasted reply is read too: full-file blocks under
+  `### path`, `` ```python title="path" `` and unified diffs (applied when every hunk matches)
+- **Snippets** that cannot be placed deterministically (`# ... existing code ...`, much shorter than the file, a block
+  without a path, a diff that does not apply) are handed to **one** local agent step ("apply exactly, read the targets
+  first") limited to `read`/`edit_file`/`write_file`, with approvals as usual
+- **Base drift**: a target whose content changed locally since the bundle (sha mismatch) is shown with its local diff,
+  and you choose: merge with the agent (default; it gets the external change as a diff against the version that was
+  sent), overwrite after reviewing the full diff, or skip. Nothing is overwritten blindly
+- **Every file change goes through the normal reviewed-edit pipeline**: `write_file` / `delete_file` with the diff,
+  per-hunk review, approval (also in auto mode: `delegate.review_imports`), protected-path and unsaved-buffer checks,
+  change tracking, `:CoagentRevert`, `/rewind` (the import is a checkpoint), `format_after_edit` and new diagnostics
+- Then the result summary and the files are recorded in the ledger (one small request with `ledger.auto_update`, a
+  plain entry otherwise), and coagent offers a local follow-up: run the verification commands, run an experiment
+  from the analysis (`python train.py --lr 0.01 ...`), carry out the plan, or fix the review findings
+
+**When the agent delegates.** The builder has a `delegate(kind, instruction, files?, attachments?)` tool for heavy work.
+It **always** asks for approval (also in auto mode; not offered in read-only mode) and the approval shows the bundle
+summary: sources, attachments, size, warnings. After you approve, the task enters the state **`WAITING_EXTERNAL`**:
+the winbar shows `waiting: analyze #3`, you are notified (`notify.on` `'waiting'`), and the wait is saved with the
+session (it survives restarts; `/receive 3` from another session loads it). While it waits, new messages are refused:
+`/receive 3` resumes the task with the imported result as the `delegate` tool's result (the history stays
+append-only), `/delegate detach` ends the wait so you can use coagent for other things (`/receive 3` later imports it
+as a manual result), `/delegate cancel 3` or `/stop` end the task.
+
+| Command | What it does |
+|---|---|
+| `/delegate <kind> [all] [instruction, @files]` | Write a bundle (`all` = every source file; `@data.csv` attaches data) |
+| `/delegate list` | Subtasks of this project with their state (pending / waiting / received / cancelled) |
+| `/delegate open <id>` | Open the bundle folder and copy `00_prompt.md` again |
+| `/delegate cancel <id>` / `detach` | Drop a subtask / stop waiting for it |
+| `/receive [id] [paste\|clipboard\|files]` | Import a result (paste buffer by default; `files` = downloads only) |
+
+**ML workflow example.**
+
+```text
+/exp                                   training plateaus at val_acc 0.71 (runs #12-#15)
+/delegate analyze why does val_acc plateau? @runs/metrics.csv @plots/loss.png
+    -> paste 00_prompt.md into the other chat, attach 01_ledger.md 02_sources.md 03_context.md metrics.csv loss.png
+/receive 4                             paste the report; the ledger records findings and plan
+    -> follow-up "Run experiment: python train.py --lr 3e-4 --warmup 500"   (local, with approval)
+/delegate implement add cosine LR schedule with warmup as in the plan of #4 @train.py @configs/base.yaml
+    -> the other chat returns train.py and configs/base.yaml as downloads
+/receive 5                             files mapped from ~/Downloads, reviewed hunk by hunk, applied
+    -> follow-up "Run the verification commands"; re-run with other arguments; small fixes locally
+```
+
+```lua
+delegate = {
+  language = 'en',            -- 'ja': Japanese prompts and contracts
+  download_dir = nil,         -- nil = $XDG_DOWNLOAD_DIR / xdg-user-dir / ~/Downloads
+  dir = nil,                  -- nil = stdpath('state')/coagent/delegate
+  clipboard = true, open_folder = true,
+  review_imports = true,      -- imported files always ask, even in auto mode
+  sources = { changed = true, core = true },
+  max_source_bytes = 2 * 1024 * 1024, recent_commands = 3,
+  kinds = { profile = { output = 'text', description = 'find the bottleneck', contract = '## Hotspots ...' } },
+  env_commands = { { label = 'Python', cmd = { '{python}', '--version' } } }, -- {python} = .venv / python / python3
+},
+```
+
 ### Tools the agent uses
 
 | Kind | Tools | Approval (supervised) |
@@ -705,6 +823,7 @@ secrets are masked, and the digest cannot close its own block.
 | Investigation | `list_dir`, `glob`, `search`, `read_file`, `git_status`, `git_diff`, `diagnostics` | No |
 | Skills | `use_skill` (loads a skill's instructions; offered only when skills exist) | No |
 | Experiments | `experiments` (the local experiment log: table, details, comparison) | No |
+| Delegation | `delegate` (bundle a heavy subtask for another chat; the task waits for `/receive`) | **Always**, also in auto mode |
 | Language server | `lsp_definition`, `lsp_references`, `lsp_symbols` (outline / symbol search), `lsp_hover` (types / docs) | No |
 | Editing | `edit_file`, `write_file`, `delete_file` | Yes (with diff) |
 | Commands | `run_command` (commands that exit) | Yes |
@@ -726,6 +845,7 @@ secrets are masked, and the digest cannot close its own block.
 | `:CoagentSkills [enable\|disable <name>\|reload]` | List Agent Skills / enable or disable one for this session (same as `/skills`) |
 | `:CoagentExp [show\|diff\|note\|compare\|run ...]` | Experiment log (same as `/exp`) |
 | `:CoagentLedger [init\|refresh[!]\|note\|decision\|update\|review\|log\|open\|bundle\|info ...]` | Project ledger (same as `/ledger`) |
+| `:CoagentDelegate <kind> [instruction]\|list\|open\|cancel\|detach` / `:CoagentReceive [id]` | Delegate a subtask / import its result (same as `/delegate`, `/receive`) |
 | `:CoagentPrompt [name] [text]` | Run a prompt template (a range attaches the selection; no name = pick from a list) |
 | `:CoagentToggle` / `Open` / `Close` | Toggle / open / close the panel |
 | `:CoagentStop` | Stop now (abort the request, kill running process groups, drop pending approvals) |
@@ -869,7 +989,9 @@ require('coagent').setup({
   },
   references = { url = true, url_max_bytes = 32 * 1024, clipboard_max_bytes = 32 * 1024 },
   inline = { context_lines = 40, keymaps = { accept = 'ga', reject = 'gr', retry = 'gi', diff = 'gd' } },
-  notify = { on = { 'approval', 'done', 'failed', 'limit' }, bell = true, desktop = false, only_when_unfocused = true },
+  -- delegating subtasks to another chat (see "Delegating subtasks")
+  delegate = { language = 'en', download_dir = nil, review_imports = true, max_source_bytes = 2 * 1024 * 1024, kinds = {} },
+  notify = { on = { 'approval', 'done', 'failed', 'limit', 'waiting' }, bell = true, desktop = false, only_when_unfocused = true },
 })
 ```
 

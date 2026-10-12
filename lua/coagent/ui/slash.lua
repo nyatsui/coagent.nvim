@@ -111,6 +111,28 @@ M.COMMANDS = {
     end,
   },
   {
+    name = 'delegate',
+    args = '<kind> [all] [instruction] | list | open | cancel | detach',
+    desc = 'Bundle a subtask for another chat you operate (analyze / implement / fix / review)',
+    complete = function()
+      return require('coagent').delegate_args()
+    end,
+    run = function(arg)
+      local ok = app().delegate(arg)
+      return ok
+    end,
+  },
+  {
+    name = 'receive',
+    args = '[id] [paste|clipboard|files]',
+    desc = 'Import the result of a delegated subtask (pasted text, downloaded files)',
+    complete = { 'paste', 'clipboard', 'files' },
+    run = function(arg)
+      local ok = app().receive(arg)
+      return ok
+    end,
+  },
+  {
     name = 'new',
     desc = 'Start a new session',
     run = function()

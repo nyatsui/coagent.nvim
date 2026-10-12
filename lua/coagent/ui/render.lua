@@ -209,7 +209,15 @@ local function tool(b, item, o)
   end
 
   if expanded then
-    if item.kind == 'exec' and item.preview then
+    if item.preview and item.preview.text then
+      -- delegate: the bundle summary
+      for _, l in ipairs(vim.split(item.preview.text, '\n', { plain = true })) do
+        b.line(p .. l, l:match('^Warning') and 'CoagentWarn' or 'CoagentDim')
+      end
+      if item.output and item.status ~= 'awaiting_approval' and item.status ~= 'pending' then
+        b.line(p .. item.output:gsub('\n.*', ''), item.status == 'done' and 'CoagentDim' or 'CoagentError')
+      end
+    elseif item.kind == 'exec' and item.preview then
       b.line(p .. '$ ' .. item.preview.command, 'CoagentKey')
       local meta = { 'cwd: ' .. tostring(item.preview.cwd or '.') }
       if item.preview.timeout_ms then

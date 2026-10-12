@@ -14,6 +14,7 @@ CONTENTS                                              *coagent-contents*
      Skills .................................. |coagent-skills|
      Experiment log .......................... |coagent-experiments|
      Project ledger .......................... |coagent-ledger|
+     Delegating subtasks ..................... |coagent-delegate|
      Queue ................................... |coagent-queue|
      Notifications ........................... |coagent-notify|
      Limits .................................. |coagent-limits|
@@ -53,6 +54,11 @@ Check the setup with |:checkhealth| coagent.
 :CoagentLedger [init|refresh[!]|note|decision|update|review|log|open|bundle|info]
                          The project ledger (same as /ledger;
                               |coagent-ledger|).
+:CoagentDelegate <kind> [instruction] | list | open | cancel | detach
+                         Bundle a subtask for another chat (same as
+                              /delegate; |coagent-delegate|).
+:CoagentReceive [id] [paste|clipboard|files]
+                         Import its result (same as /receive).
 :CoagentPrompt [name] [text]
                          Run a prompt template (|coagent-templates|).
                               With a range the selection is attached;
@@ -245,6 +251,10 @@ Commands go into the input history like prompts.
   /ledger [init|refresh[!]|note|decision|update|review|log|open|bundle|info]
                       The project ledger (|coagent-ledger|; only init,
                       refresh and update send a request).
+  /delegate <kind> [instruction] | list | open | cancel | detach
+  /receive [id] [paste|clipboard|files]
+                      Delegate a subtask to another chat you operate and
+                      import its result (|coagent-delegate|; local).
   /new  /sessions  /model [role]  /mode [mode]  /roles [preset]
   /usage [billing]  /changes  /diff  /review  /stop  /processes
                       Same as the matching :Coagent* command.
@@ -707,6 +717,77 @@ are masked, and the digest cannot close its own block.
   require('coagent').ledger(arg)
       Same as "/ledger arg".
 
+                                                      *coagent-delegate*
+coagent stays the orchestrator and hands heavy subtasks (result analysis
+and planning, larger implementations, hard fixes, reviews) to ANOTHER chat
+that you operate by hand (any web chat, e.g. Microsoft 365 Copilot). It
+writes a self-contained bundle folder; you paste and attach it, and bring
+the reply back with /receive. coagent never contacts, logs in to or
+automates the other chat. Follow your organization's rules for what may be
+pasted into external tools; protected files (auto.protected_globs) are
+never included and files with token-like text are flagged first.
+
+Kinds and output contracts (delegate.language = 'ja' for Japanese):
+  analyze     Markdown with ## Findings / ## Hypotheses / ## Plan /
+              ## Experiments (expected effect, exact commands).
+  implement   ## Manifest table (path | modified/new/deleted | summary),
+              EVERY changed or new file IN FULL as a download with the
+              SAME file name (no "..." omissions), ## Verification.
+  fix         ## Cause, then the same as implement.
+  review      ## Findings by severity (### Critical / Major / Minor /
+              Nit) with path:line.
+  your own    delegate.kinds = { name = { output = 'text'|'files',
+              description, contract, default_instruction } }
+              (name = false removes a kind).
+
+  /delegate <kind> [all] [instruction with @files]
+      Writes stdpath('state')/coagent/delegate/<project>/<id>/:
+        00_prompt.md     to paste: id, kind, instruction, the attachments
+                         and their meaning, the output contract
+        01_ledger.md     the project ledger (|coagent-ledger-bundle|), or a
+                         local overview when there is none
+        02_sources.md    FULL source files: @files (folders too), files
+                         changed in the session, core files of the ledger
+                         overview; "all" = every file. Files beyond
+                         max_source_bytes are left out WHOLE and listed.
+        03_context.md    OS, Python, PyTorch/CUDA, nvidia-smi, git status
+                         and diff, the last command outputs in full, the
+                         experiment table
+        attachments      copies of @data files (CSV, logs, plots) as-is
+        manifest_expected.json   paths + sha256 of the sources sent
+      copies 00_prompt.md to the + register, opens the folder and adds a
+      pending entry to the ledger.
+  /delegate list | open <id> | cancel <id> | detach
+  /receive [id] [paste|clipboard|files]
+      Imports the reply. Text: a paste buffer pre-filled from the +
+      register (:w imports it). Files: downloads newer than the bundle in
+      delegate.download_dir ($XDG_DOWNLOAD_DIR, xdg-user-dir, ~/Downloads)
+      mapped by the reply's manifest, manifest_expected.json, then a unique
+      workspace file of that name ("name (1).py": the newest wins; unknown
+      names are asked about). Pasted "### path" full-file blocks and
+      unified diffs are applied too. Every change goes through write_file /
+      delete_file: diff, per-hunk review, approval (also in auto mode:
+      delegate.review_imports), protected / unsaved checks, change
+      tracking, |coagent-rewind|, |coagent-format|, new diagnostics.
+      A file changed locally since the bundle (base drift) is shown and you
+      choose: merge with the agent, overwrite after review, or skip.
+      Snippets that cannot be placed deterministically go to ONE agent step
+      (read + edit_file/write_file only). The result is recorded in the
+      ledger and local follow-ups are offered (verification commands,
+      experiments from the analysis).
+
+The agent can delegate with the `delegate` tool; it ALWAYS asks for
+approval (also in auto mode) and shows the bundle summary. The task then
+waits in WAITING_EXTERNAL (winbar "waiting: analyze #3", notify 'waiting',
+saved with the session). New messages are refused until /receive 3 (the
+result becomes the tool's result), /delegate detach (keep it for later),
+/delegate cancel 3 or :CoagentStop.
+
+Example (ML): /delegate analyze why does val_acc plateau? @metrics.csv
+@loss.png -> paste, /receive 4 -> run the suggested experiment locally ->
+/delegate implement add a cosine schedule as planned in #4 @train.py ->
+/receive 5 maps train.py from ~/Downloads and applies it after review.
+
                                                          *coagent-queue*
 Messages sent while the agent is busy (responding, running a tool or waiting
 for approval) are queued and shown at the bottom of the panel as
@@ -729,7 +810,7 @@ commands are never queued; they run at once.
 When Neovim does not have focus, coagent rings the terminal bell on the
 events in `notify.on`: >lua
     notify = {
-      on = { 'approval', 'done', 'failed', 'limit' }, -- also: 'paused'
+      on = { 'approval', 'done', 'failed', 'limit', 'waiting' }, -- also: 'paused'
       bell = true,                -- BEL to the terminal (tmux: bell flag)
       desktop = false,            -- notify-send (Linux) / osascript (macOS)
       only_when_unfocused = true,
@@ -746,7 +827,8 @@ a queued message immediately starts the next task. 'limit' is sent when a
 per-task limit pauses the task (|coagent-limits|); 'paused' covers the
 other pauses (:CoagentPause, interruptions). A plan ready for approval
 (|coagent-plan|) is sent as 'approval' ("approval needed (plan)"), not
-'done'.
+'done'. 'waiting' is sent when a task starts waiting for a delegated
+subtask (|coagent-delegate|).
 
                                                         *coagent-limits*
 Per-task limits are brakes against runaway loops: every request resends
@@ -796,5 +878,8 @@ auto        Only for workspaces in `auto.workspaces` or explicitly enabled.
   require('coagent').controller()   -- events: controller.events:on(...)
   require('coagent').register_tool(tool)
   require('coagent').ledger.bundle(opts)  -- |coagent-ledger-bundle|
+  require('coagent').delegate(arg)        -- "/delegate arg"
+  require('coagent').receive(arg, opts)   -- "/receive arg"; opts.text
+  require('coagent').controller():delegations():list()
 
  vim:tw=78:ts=8:ft=help:norl:
