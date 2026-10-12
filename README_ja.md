@@ -157,6 +157,9 @@ nvim --clean -u scripts/demo.lua
 3. 読み込み・検索は自動、編集とコマンドは承認を求められる（`a` 承認 / `d` 拒否 / `D` 拒否して停止 / `r` hunk レビュー）
 4. 完了すると検証結果と変更ファイル一覧が表示される。`gc` で変更一覧、`gd` で diff、`x` で巻き戻し
 
+機械学習（PyTorch）のプロジェクトでの具体的な手順（既存リポジトリへの適用、データからの新規実装、別のチャットとの分担）は
+[docs/ml-workflow.md](docs/ml-workflow.md) を参照してください。
+
 `:'<,'>Coagent 説明して` のように範囲付きで実行すると選択範囲が添付されます。
 入力では次のコンテキスト参照が使えます:
 
@@ -1146,6 +1149,7 @@ nvim -l scripts/screenshot.lua 80 24
 
 - [docs/architecture.md](docs/architecture.md) — 構成・イベント・状態機械・安全性モデル
 - [docs/manual.md](docs/manual.md) — 操作マニュアル
+- [docs/ml-workflow.md](docs/ml-workflow.md) — 機械学習プロジェクトでの使い方（既存リポジトリへの適用 / データからの新規実装）
 - [docs/compatibility.md](docs/compatibility.md) — CopilotChat.nvim との互換性
 - [docs/adr/0001-architecture.md](docs/adr/0001-architecture.md) — 方式選定 ADR
 - [docs/research/phase1-copilotchat-investigation.md](docs/research/phase1-copilotchat-investigation.md) — 技術調査

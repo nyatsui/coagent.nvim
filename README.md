@@ -168,6 +168,9 @@ Press `<CR>` in the input box to start. Try approve `a`, deny `d`, hunk review `
 3. Reading and searching run automatically; edits and commands ask for approval (`a` approve / `d` deny / `D` deny and stop / `r` hunk review)
 4. When done, the verification result and changed files are shown. `gc` lists changes, `gd` shows the diff, `x` reverts
 
+For a step-by-step guide to ML (PyTorch) projects — applying coagent to an existing repository, building from data
+only, and splitting work with another chat — see [docs/ml-workflow.md](docs/ml-workflow.md) (Japanese).
+
 Running with a range, e.g. `:'<,'>Coagent explain this`, attaches the selection.
 The input understands these context references:
 
@@ -1190,6 +1193,7 @@ Design documents (in Japanese):
 
 - [docs/architecture.md](docs/architecture.md) — structure, events, state machine, safety model
 - [docs/manual.md](docs/manual.md) — user manual
+- [docs/ml-workflow.md](docs/ml-workflow.md) — step-by-step guide for ML projects (existing repository / from data only)
 - [docs/compatibility.md](docs/compatibility.md) — compatibility with CopilotChat.nvim
 - [docs/adr/0001-architecture.md](docs/adr/0001-architecture.md) — architecture decision record
 - [docs/research/phase1-copilotchat-investigation.md](docs/research/phase1-copilotchat-investigation.md) — technical investigation
