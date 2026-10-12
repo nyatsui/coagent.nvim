@@ -925,7 +925,8 @@ delegate = {
 - LSP tools use the language servers configured in your Neovim (files not yet loaded are loaded invisibly and the server is
   awaited). Files without a server return an error and the model falls back to `search`
 - Background processes keep running after the task ends (winbar: `N bg`). They stop with `<C-c>`, a new session, or when
-  Neovim exits. At most 3 at a time and 2 hours each (`background` settings)
+  Neovim exits. At most 3 at a time; non-experiment processes live at most 2 hours (`background` settings). Monitored
+  experiment runs have no lifetime cap: the agent decides from the training log when to stop them (see "Experiment log")
 
 ### Commands
 
