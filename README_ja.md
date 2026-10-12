@@ -51,6 +51,8 @@ I'll find the `add` implementation and its tests.
 - **作業中の追加指示** — 作業中に送ったメッセージはキューに入り、次のステップ境界で届く（ツールや承認は中断しない）
 - **AI が編集したファイルの整形** — conform.nvim / LSP で整形（ALEFix 相当）。既定は自動整形なし（`/format` で手動）。
   `format_after_edit = 'changed'` で AI が変更した行だけを編集のたびに整形。整形結果も巻き戻し可能
+- **編集後の新しい診断** — `write_file` / `edit_file` の後に言語サーバー（pyright など）の結果を少し待ち、その編集で
+  **新たに出たエラーだけ**をツール結果に付ける。テストを実行しなくても型エラーや未定義名に気づける。新しいものが無ければ何も付けない（トークン消費なし）
 - **通知** — 承認待ち・完了・失敗をベル（tmux 対応）や任意のデスクトップ通知で知らせる（文面は定型文のみ）
 - **セッション** — プロジェクト単位で保存/復元、中断タスクの再開（未実行の tool call は再実行しない）
 
@@ -414,6 +416,44 @@ require('coagent').setup({
 
 ruff が未インストールなら conform はその整形ツールを使えないので、整形は行われません（スキップ）。
 
+### 編集後の新しい診断
+
+`write_file` / `edit_file` が成功すると（自動整形が有効ならその後に）、言語サーバーの診断を少し待ち、
+**その編集で新たに出た診断だけ**をツール結果に付けます:
+
+```text
+Edited app/models.py (+3 -1)
+Diagnostics after this edit (new):
+app/models.py:42:12 [Pyright] "user_id" is not defined
+```
+
+タイムラインのツール行にも件数を表示します（`Edit app/models.py  +3 -1  1 new error`）。
+
+| 設定 | 動作 |
+|---|---|
+| `enabled = true` | 既定で有効。`false`（または `diagnostics_after_edit = false`）で無効 |
+| `min_severity = 'error'` | `'warn'` で警告も報告（`warning:` を付けて表示） |
+| `timeout_ms = 1500` | 新しい内容に対するサーバーの報告を待つ時間。間に合わなければ何も付けない（起動直後のサーバーではそのファイルの最初の編集を取りこぼすことがあります） |
+| `max_items = 10`、`max_bytes = 2000` | 付ける量の上限（超えた分は `[N more not shown]`） |
+
+- **新しいものだけ**: 書込み前にファイルが Neovim で開かれていれば、その時点の診断を控えておき、メッセージ + source + code で
+  比較します（行番号は編集でずれるので無視）。開かれていなかった場合（比較対象なし）は、エージェントが変更した行の診断だけを
+  報告します（新規ファイルなら全部）。以前からあるエラーを繰り返し送ることはありません
+- **問題が無ければコストゼロ**: 新しい診断が無い、言語サーバーが無い、`timeout_ms` 内に報告が無い、のいずれでも何も付けません。
+  全体の一覧が必要ならモデルは従来どおり `diagnostics` ツールを呼べます
+- **仕組み**: 必要ならファイルを一覧に出ない非表示バッファに読み込み（LSP ツールと同じ方法）、普段の自動起動でサーバーを
+  接続させます。開いている未変更バッファは読み直してサーバーに新しい内容を渡します。待機は `DiagnosticChanged` で起こされ、
+  タスクのコルーチンを中断するだけなので UI は止まりません。filetype の無いファイルは対象外で、サーバーが接続しなかった
+  非表示バッファは閉じます
+- **安全性**: バッファは一切変更しません。未保存の変更があるファイルへの書込みは従来どおり書込み前に拒否します。
+  追加のリクエストやトークンは付けた行の分だけです
+
+```lua
+require('coagent').setup({
+  diagnostics_after_edit = { min_severity = 'warn', timeout_ms = 2500 }, -- 遅いサーバー / 警告も含める
+})
+```
+
 ### プロンプトテンプレート
 
 よく使う依頼は `/名前 [追加の指示]` で送れます（CopilotChat の `/Explain` などに相当）。テンプレートの文面が入力の前に付き、
@@ -585,6 +625,8 @@ require('coagent').setup({
   lsp = { attach_timeout_ms = 4000, request_timeout_ms = 10000, max_results = 100 },
   format_after_edit = false, -- false（既定）| 'changed' | 'file'（「AI が編集したファイルの整形」参照）
   format = { timeout_ms = 2000, filetypes = nil },
+  -- 書込み/編集の結果に付ける新しい LSP 診断（「編集後の新しい診断」参照）
+  diagnostics_after_edit = { enabled = true, min_severity = 'error', timeout_ms = 1500, max_items = 10 },
   background = { max_processes = 3, max_output_bytes = 1024 * 1024, max_lifetime_ms = 2 * 60 * 60 * 1000 },
   session = { persist = true, save_tool_output = true },
   ui = { layout = 'vertical', width = 0.42, icons = 'unicode', show_reasoning = false },

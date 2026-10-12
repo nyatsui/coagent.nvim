@@ -398,6 +398,39 @@ Example with conform.nvim and ruff (manual formatting only): >lua
   })
   require('coagent').setup({ format_after_edit = 'changed' }) -- or false
 <
+                                              *coagent-diagnostics-after-edit*
+After a successful write_file/edit_file (and auto-format), coagent waits
+briefly for the language servers and appends only the diagnostics the edit
+introduced to the tool result: >text
+  Edited app/models.py (+3 -1)
+  Diagnostics after this edit (new):
+  app/models.py:42:12 [Pyright] "user_id" is not defined
+<
+The timeline shows the count on the tool line ("1 new error").
+
+  diagnostics_after_edit = {
+    enabled = true,          false (or diagnostics_after_edit = false): off
+    min_severity = 'error',  'warn' also reports warnings ("warning: ...")
+    timeout_ms = 1500,       wait for a report on the new content
+    max_items = 10,          cap on reported diagnostics
+    max_bytes = 2000,        cap on appended bytes ("[N more not shown]")
+  }
+
+"New" means: when the file was loaded before the write, compared with a
+snapshot of its diagnostics by message+source+code, ignoring lines; when it
+was not loaded, only diagnostics on the lines the agent changed (a created
+file: all). Nothing is appended (no tokens) when nothing is new, no server
+is attached, or the server does not report within timeout_ms (a server
+that is still starting may miss the first edit of a file).
+
+The file is loaded into an unlisted hidden buffer when needed (as the LSP
+tools do) so your autostart attaches the server, and stays loaded; an open
+unmodified buffer is reloaded so the server sees the new content. Files
+without a filetype are skipped, and a hidden buffer no server attached to
+is closed. The wait is woken by |DiagnosticChanged| and yields the task
+coroutine, so the UI never blocks. Buffers are never modified; files with
+unsaved buffer edits are refused before the write, as always.
+
                                                      *coagent-templates*
 Prompt templates run as /name [text] (or :CoagentPrompt name [text]). The
 template text is put before yours, and #selection (started from visual

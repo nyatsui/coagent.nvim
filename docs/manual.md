@@ -264,6 +264,26 @@ Skipped:
 整形に追加の承認は求めません（編集は承認済みで、整形はローカルの決定的な処理のため）。
 conform.nvim と ruff の設定例は README_ja.md の「AI が編集したファイルの整形」を参照してください。
 
+### 編集後の新しい診断
+
+`write_file` / `edit_file` が成功すると（自動整形が有効ならその後に）、言語サーバー（pyright など）の診断を
+最大 `diagnostics_after_edit.timeout_ms`（既定 1500ms）待ち、**その編集で新たに出たエラーだけ**をツール結果に付けます。
+モデルはテストを実行しなくても型エラーや未定義名に気づいて直せます。
+
+```
+Edited app/models.py (+3 -1)
+Diagnostics after this edit (new):
+app/models.py:42:12 [Pyright] "user_id" is not defined
+```
+
+- タイムラインのツール行に件数が出ます（`Edit app/models.py  +3 -1  1 new error`。エラーは赤、警告は黄）
+- 書込み前に開いていたファイルは、その時点の診断と比較します（メッセージ + source + code、行番号は無視）。
+  開いていなかったファイルは、エージェントが変更した行の診断だけを報告します。以前からあるエラーは付けません
+- 新しい診断が無い・言語サーバーが無い・時間内に報告が無い場合は何も付けません（トークンを使わない）
+- 既定はエラーのみ。`min_severity = 'warn'` で警告も含めます。件数は `max_items`（既定 10）、量は `max_bytes`（既定 2000）まで
+- 無効にするには `diagnostics_after_edit = { enabled = false }`
+- バッファは変更しません。未保存の変更があるファイルは従来どおり書込み自体を拒否します
+
 ## 5. 停止・一時停止・再開
 
 | 操作 | 効果 |
@@ -338,5 +358,6 @@ Neovim にフォーカスが無いとき、承認待ち・完了・失敗・上�
 | `CONFLICT: ... unsaved changes` | 該当バッファを保存または破棄してから続行を指示 |
 | 同じ操作を繰り返して停止した | `max_identical_calls` / `max_identical_failures` の安全装置。指示を具体化して再実行 |
 | `paused (limit)` で止まった | `max_steps` / `max_tool_calls` / `max_duration_ms` に到達。`R` / `/resume` で続行、`/stop` で終了。頻繁なら `limits` を上げる |
+| 編集後の診断が付かない | 言語サーバーがそのファイルに接続しているか `:checkhealth vim.lsp` で確認。起動直後や大きなプロジェクトでは報告が `timeout_ms` に間に合わないことがあるので `diagnostics_after_edit.timeout_ms` を上げる |
 | モデルがツールを使わない | `:CoagentModel` で tool calling 対応モデルを選択 |
 | 通知（ベル）が来ない | tmux なら `set -g focus-events on`（フォーカス判定）と `monitor-bell on`。または `notify.only_when_unfocused = false` |

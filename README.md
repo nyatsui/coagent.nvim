@@ -59,6 +59,9 @@ I'll find the `add` implementation and its tests.
   boundary (tools and approvals are never interrupted)
 - **Formatting AI-edited files** — format with conform.nvim / LSP (like ALEFix). No automatic formatting by default (`/format`
   by hand); `format_after_edit = 'changed'` formats only the lines the AI changed, after every edit. Formatting is revertible
+- **New diagnostics after edits** — after `write_file` / `edit_file` the language server (e.g. pyright) is given a moment
+  and only errors the edit introduced are appended to the tool result, so type errors and undefined names are caught without
+  running tests. Nothing is added (no tokens) when there is nothing new
 - **Notifications** — bell (tmux aware) or optional desktop notification on approval needed / done / failed (generic text only)
 - **Usage visibility** — per-response token breakdown with prompt-cache hits, per-task totals, optional credit estimate
 - **Sessions** — saved / restored per project; interrupted tasks can be resumed (tool calls that never ran are not re-run)
@@ -428,6 +431,44 @@ require('coagent').setup({
 
 If ruff is not installed, conform cannot use it and formatting is skipped.
 
+### New diagnostics after edits
+
+After a successful `write_file` / `edit_file` (and auto-format, when on), coagent waits briefly for your language servers and
+appends only the diagnostics **the edit introduced** to the tool result:
+
+```text
+Edited app/models.py (+3 -1)
+Diagnostics after this edit (new):
+app/models.py:42:12 [Pyright] "user_id" is not defined
+```
+
+The timeline shows the count next to the tool (`Edit app/models.py  +3 -1  1 new error`).
+
+| Setting | Effect |
+|---|---|
+| `enabled = true` | On by default. `false` (or `diagnostics_after_edit = false`) turns it off |
+| `min_severity = 'error'` | `'warn'` also reports warnings (prefixed `warning:`) |
+| `timeout_ms = 1500` | How long to wait for the server to report on the new content. No report in time = nothing added (a server still starting up may miss the first edit of a file) |
+| `max_items = 10`, `max_bytes = 2000` | Caps on what is appended (`[N more not shown]`) |
+
+- **Only new ones**: when the file was open in Neovim before the write, its diagnostics are snapshotted and compared by
+  message + source + code, ignoring line numbers (they move with the edit). When it was not open (no baseline), only
+  diagnostics on the lines the agent changed are reported (a new file: all of them). Pre-existing errors are never repeated
+- **Zero cost when clean**: no new diagnostics, no language server, or no report within `timeout_ms` adds nothing to the
+  result. The model can still call the `diagnostics` tool for the full list
+- **How**: the file is loaded into an unlisted hidden buffer if needed (as the LSP tools do) so your normal autostart
+  attaches the server; an open, unmodified buffer is reloaded so the server sees the new content. Waiting is woken by
+  `DiagnosticChanged` and yields the task coroutine, so the UI never blocks. Files with no filetype are skipped, and a hidden
+  buffer no server attached to is closed again
+- **Safety**: buffers are never modified; files with unsaved buffer edits are refused before the write as always. No extra
+  requests or tokens other than the appended lines
+
+```lua
+require('coagent').setup({
+  diagnostics_after_edit = { min_severity = 'warn', timeout_ms = 2500 }, -- slower servers / include warnings
+})
+```
+
 ### Prompt templates
 
 Common requests can be sent as `/name [extra instructions]` (like CopilotChat's `/Explain`). The template text is put in
@@ -604,6 +645,8 @@ require('coagent').setup({
   lsp = { attach_timeout_ms = 4000, request_timeout_ms = 10000, max_results = 100 },
   format_after_edit = false, -- false (default) | 'changed' | 'file' (see "Formatting AI-edited files")
   format = { timeout_ms = 2000, filetypes = nil },
+  -- new LSP diagnostics appended to write/edit results (see "New diagnostics after edits")
+  diagnostics_after_edit = { enabled = true, min_severity = 'error', timeout_ms = 1500, max_items = 10 },
   background = { max_processes = 3, max_output_bytes = 1024 * 1024, max_lifetime_ms = 2 * 60 * 60 * 1000 },
   session = { persist = true, save_tool_output = true },
   ui = { layout = 'vertical', width = 0.42, icons = 'unicode', show_reasoning = false },

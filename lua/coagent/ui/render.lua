@@ -156,6 +156,13 @@ local function tool(b, item, o)
   if inline_summary then
     b.hl(row, #icon + 1 + #title, -1, 'CoagentDim')
   end
+  -- new LSP diagnostics after an edit ("2 new errors")
+  local diag = item.meta and item.meta.diagnostics
+  if diag and diag.label then
+    local from = #b.lines[#b.lines]
+    b.lines[#b.lines] = b.lines[#b.lines] .. '  ' .. diag.label
+    b.hl(row, from + 2, -1, (diag.errors or 0) > 0 and 'CoagentError' or 'CoagentWarn')
+  end
   if item.preview and item.preview.added and item.status ~= 'done' and item.status ~= 'failed' then
     local stat = string.format('  +%d -%d', item.preview.added, item.preview.removed)
     b.lines[#b.lines] = b.lines[#b.lines] .. stat

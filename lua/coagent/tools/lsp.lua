@@ -15,7 +15,7 @@ end
 
 --- Load a file into a buffer without displaying it.
 ---@return integer
-local function ensure_buf(abs)
+function M.ensure_buf(abs)
   local buf = vim.fn.bufadd(abs)
   if not vim.api.nvim_buf_is_loaded(buf) then
     vim.fn.bufload(buf)
@@ -27,6 +27,7 @@ local function ensure_buf(abs)
   end
   return buf
 end
+local ensure_buf = M.ensure_buf
 
 --- Wait until a client supporting `method` is attached.
 ---@return vim.lsp.Client[]? clients, string? err

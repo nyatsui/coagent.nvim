@@ -129,6 +129,20 @@ local defaults = {
     filetypes = nil, -- e.g. { 'python', 'lua' }; nil = every filetype
   },
 
+  -- After write_file/edit_file (and auto-format), wait briefly for the
+  -- language server and append only NEW diagnostics to the tool result
+  -- ("Diagnostics after this edit (new): path:line:col [source] message"), so
+  -- the agent sees type errors / undefined names without running tests.
+  -- Nothing is added (no tokens) when nothing new appears, no server is
+  -- attached, or the server does not report within timeout_ms.
+  diagnostics_after_edit = {
+    enabled = true,
+    min_severity = 'error', -- 'error' | 'warn'
+    timeout_ms = 1500,
+    max_items = 10,
+    max_bytes = 2000,
+  },
+
   background = {
     max_processes = 3, -- concurrent background processes (start_process)
     max_output_bytes = 1024 * 1024, -- retained output per process (tail)

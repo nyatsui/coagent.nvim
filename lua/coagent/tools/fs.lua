@@ -7,6 +7,7 @@ local util = require('coagent.core.util')
 local diff = require('coagent.core.diff')
 local process = require('coagent.tools.process')
 local formatter = require('coagent.tools.format')
+local edit_diag = require('coagent.tools.edit_diagnostics')
 
 local M = {}
 
@@ -495,6 +496,20 @@ local function commit(ctx, prepared, content)
   return { ok = true }
 end
 
+--- commit() for write_file/edit_file, with the diagnostics snapshot taken
+--- right before the write (see tools/edit_diagnostics.lua).
+---@return table res, Coagent.EditDiagSnapshot? snap
+local function commit_checked(ctx, prepared, content)
+  async.main()
+  local snap = edit_diag.before(ctx, prepared.path)
+  local res = commit(ctx, prepared, content)
+  if not res.ok then
+    edit_diag.cancel(snap)
+    return res
+  end
+  return res, snap
+end
+
 local function partial_note(prepared, content)
   if content == prepared.new then
     return ''
@@ -541,17 +556,21 @@ M.write_file = {
   end,
   run = function(_, ctx, prepared, approved)
     local content = approved and approved.content or prepared.new
-    local res = commit(ctx, prepared, content)
+    local res, snap = commit_checked(ctx, prepared, content)
     if not res.ok then
       return res
     end
     local verb = prepared.op == 'create' and 'Created' or 'Wrote'
+    local fmt = formatter.after_edit(ctx, prepared.path)
+    local dnote, dmeta = edit_diag.after(ctx, prepared.path, snap, prepared.old)
     return {
       ok = true,
       output = string.format('%s %s (+%d -%d)', verb, prepared.path.rel, prepared.added, prepared.removed)
         .. partial_note(prepared, content)
-        .. formatter.after_edit(ctx, prepared.path),
+        .. fmt
+        .. dnote,
       summary = string.format('+%d -%d', diff.stats(prepared.old, content)),
+      meta = dmeta and { diagnostics = dmeta } or nil,
     }
   end,
 }
@@ -716,18 +735,22 @@ M.edit_file = {
   end,
   run = function(_, ctx, prepared, approved)
     local content = approved and approved.content or prepared.new
-    local res = commit(ctx, prepared, content)
+    local res, snap = commit_checked(ctx, prepared, content)
     if not res.ok then
       return res
     end
     local a, r = diff.stats(prepared.old, content)
+    local fmt = formatter.after_edit(ctx, prepared.path)
+    local dnote, dmeta = edit_diag.after(ctx, prepared.path, snap, prepared.old)
     return {
       ok = true,
       output = string.format('Edited %s (+%d -%d)', prepared.path.rel, a, r)
         .. (prepared.normalized and '\nNOTE: old_string contained read_file line prefixes (number/tab); they were ignored. Do not include them.' or '')
         .. partial_note(prepared, content)
-        .. formatter.after_edit(ctx, prepared.path),
+        .. fmt
+        .. dnote,
       summary = string.format('+%d -%d', a, r),
+      meta = dmeta and { diagnostics = dmeta } or nil,
     }
   end,
 }
