@@ -12,6 +12,7 @@ CONTENTS                                              *coagent-contents*
      Rewind .................................. |coagent-rewind|
      Formatting .............................. |coagent-format|
      Skills .................................. |coagent-skills|
+     Experiment log .......................... |coagent-experiments|
      Queue ................................... |coagent-queue|
      Notifications ........................... |coagent-notify|
      Limits .................................. |coagent-limits|
@@ -45,6 +46,9 @@ Check the setup with |:checkhealth| coagent.
 :CoagentSkills [enable|disable <name>|reload]
                          List the Agent Skills, or enable / disable one
                               for this session (|coagent-skills|).
+:CoagentExp [show|diff|note|compare|run ...]
+                         The experiment log (same as /exp;
+                              |coagent-experiments|).
 :CoagentPrompt [name] [text]
                          Run a prompt template (|coagent-templates|).
                               With a range the selection is attached;
@@ -230,6 +234,10 @@ Commands go into the input history like prompts.
                       this session (|coagent-skills|).
   /skill <name> [task]
                       Run a task with a skill loaded up front.
+  /exp [show|diff|note|compare|run ...]
+                      The experiment log: table, details, diff, notes,
+                      Markdown comparison, record a run
+                      (|coagent-experiments|; local, no request).
   /new  /sessions  /model [role]  /mode [mode]  /roles [preset]
   /usage [billing]  /changes  /diff  /review  /stop  /processes
                       Same as the matching :Coagent* command.
@@ -513,6 +521,77 @@ task message up front; its allowed-tools also shrink that task's tool list.
 >lua
   skills = { enabled = true, paths = { '~/.config/coagent/skills' },
              repo = true, max_listed = 50, max_description = 200 }
+<
+
+                                                    *coagent-experiments*
+The experiment log records ML training / evaluation runs and their metrics
+per project, so runs can be compared and handed to a web chat or to the
+agent without requests. Nothing in it sends a model request.
+
+A run is recorded when a command that matches `experiments.commands` (Lua
+patterns; default: python scripts with train / eval / test in the name,
+torchrun, accelerate launch; `exclude` drops pytest) runs through
+run_command or start_process, and for every "/exp run <command>". Stored:
+id, time, command, cwd, source (agent, agent:bg, user), git HEAD and
+branch, a short hash of `git diff HEAD` (the diff itself up to
+`max_diff_bytes`), changed files, untracked names, duration, exit code,
+the output tail, settings from the command line (--lr 1e-3, --epochs=10,
+LR=0.1, model.lr=0.01) and metrics:
+- `key=value` / `key: value` for the names in `metrics` (loss, val_loss,
+  acc, accuracy, f1, auc, mae, rmse, epoch, lr), also with a prefix from
+  `metric_prefixes` (val_acc, train/loss, test-f1);
+- numeric fields of output lines that are JSON objects (`json_lines`);
+- your `patterns`: "Lua pattern with (key) and (value)" or
+  { pattern = '...(value)...', key = 'name' };
+- files the run wrote, `log_files` globs relative to the run's cwd (only
+  files modified during the run, the newest per pattern): CSV/TSV, JSON
+  (object or array of objects), JSONL.
+The LAST value per key wins. Foreground runs are recorded on exit (the
+result ends with "[experiment #N recorded: ...]"); background runs when the
+process exits, with a notice in the panel.
+
+Storage: stdpath('state')/coagent/experiments/<project>-<hash>.jsonl,
+outside the repository, directory 0700, file 0600, secrets masked.
+Append-only (last record of an id wins), compacted automatically, at most
+`max_entries` runs.
+
+  /exp                Table in a scratch buffer: id, time, status,
+                      duration, command, key metrics as
+                      "value Δprev/Δbest" ("*" = best run), last note.
+                      <CR> details, D diff vs the previous run, c copy
+                      the comparison, R refresh, q close.
+  /exp show <id>      Details (Markdown) with the diff and output tail.
+  /exp diff <a> [b]   Difference between the recorded diffs of two runs
+                      (one id: vs the run before it).
+  /exp note <id> <text>
+                      Add a note to a run.
+  /exp compare [ids]  Compact Markdown comparison into the + register
+                      (unnamed register without a clipboard): metrics
+                      (best in bold), differing settings, common
+                      settings, commands, code summary, notes. Without
+                      ids: the last `compare_runs` runs plus the best.
+  /exp run <command>  Run in the background and record it. The usual
+                      approval of start_process applies (asks in
+                      supervised mode, refused in read-only mode).
+
+"Best" is the highest value, the lowest for names in `lower_is_better`
+(loss, mae, rmse, ...); `neutral` names (epoch, lr, step) only show the
+change vs the previous run. The agent reads the log with the read-only
+`experiments` tool: no query = the compact table, "12" = one run's
+details (no full diff), "compare" or "3 7" = a comparison, other text =
+runs whose command or notes contain it.
+>lua
+  experiments = {
+    enabled = true,
+    commands = { 'python[%d%.]*%s.-train[%w_%-%.]*%.py' },
+    exclude = { 'pytest' },
+    metrics = { 'loss', 'val_loss', 'acc', 'f1', 'epoch', 'lr' },
+    patterns = {}, json_lines = true,
+    log_files = { 'lightning_logs/*/metrics.csv' },
+    columns = nil, max_columns = 5, primary = nil, compare_runs = 5,
+    max_diff_bytes = 100 * 1024, max_output_tail = 8 * 1024,
+    max_entries = 500,
+  }
 <
 
                                                          *coagent-queue*

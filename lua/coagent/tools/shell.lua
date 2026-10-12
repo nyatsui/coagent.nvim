@@ -119,6 +119,8 @@ M.run_command = {
     if ctx.on_output then
       ctx.on_output(string.format('$ %s\n# cwd: %s%s\n', prepared.command, prepared.cwd_rel, sandboxed and ('  [sandbox: ' .. sandboxed .. ']') or ''))
     end
+    -- training / evaluation runs go to the experiment log
+    local exp = ctx.experiments and ctx.experiments:begin(prepared.command, prepared.cwd, { source = 'agent' })
     local res = run_process({
       argv = argv,
       cwd = prepared.cwd,
@@ -139,6 +141,7 @@ M.run_command = {
     end)
     async.main()
 
+    local recorded = exp and exp.finish({ code = res.code, output = res.output, duration_ms = res.duration_ms, timed_out = res.timed_out, killed = res.killed, error = res.error })
     if res.error then
       return { ok = false, output = 'Error: ' .. res.error, summary = 'failed to start', meta = { code = nil } }
     end
@@ -162,6 +165,9 @@ M.run_command = {
       truncated and '(output truncated, showing head and tail)' or '',
       shown == '' and '(no output)' or shown
     )
+    if recorded then
+      output = output .. '\n' .. require('coagent.agent.experiments').brief(ctx.experiments, recorded)
+    end
     return {
       ok = res.code == 0 and not res.timed_out and not res.killed,
       output = output,
@@ -174,6 +180,7 @@ M.run_command = {
         duration_ms = res.duration_ms,
         sandbox = sandboxed,
         truncated = res.truncated or truncated,
+        experiment = recorded and recorded.id or nil,
       },
     }
   end,

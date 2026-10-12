@@ -158,12 +158,19 @@ function Manager:start(spec)
   }, function(res)
     p.status = 'exited'
     p.code = res.code
+    p.killed = res.killed
     if res.error then
       append(p, '\n[failed to start: ' .. res.error .. ']\n', cfg.max_output_bytes)
     elseif res.timed_out then
       append(p, '\n[stopped: reached background.max_lifetime_ms]\n', cfg.max_output_bytes)
     end
     self:_changed(p)
+    if spec.on_exit then
+      -- after the output chunks that are still scheduled
+      vim.schedule(function()
+        pcall(spec.on_exit, p, res)
+      end)
+    end
   end)
   self.procs[p.id] = p
   table.insert(self.order, p.id)
@@ -238,6 +245,14 @@ M.start_process = {
       end
     end
     async.main()
+    local log = ctx.experiments
+    local exp, exited
+    local function record(proc, res)
+      local e = exp.finish({ code = proc.code, output = proc.out, duration_ms = util.now() - proc.started, timed_out = res.timed_out, killed = res.killed, error = res.error })
+      if ctx.on_experiment then
+        ctx.on_experiment(e)
+      end
+    end
     local p, err = ctx.processes:start({
       command = prepared.command,
       argv = argv,
@@ -246,9 +261,23 @@ M.start_process = {
       env = vim.tbl_extend('force', {}, cfg.env or {}, { COAGENT = '1' }),
       item = ctx.item,
       on_output = ctx.on_bg_output,
+      on_exit = function(proc, res)
+        exited = { proc, res }
+        if exp then
+          record(proc, res)
+        end
+      end,
     })
     if not p then
       return { ok = false, output = 'Error: ' .. err }
+    end
+    -- training / evaluation runs go to the experiment log; on_exit records
+    -- the result (or here, when it ran while git was being read)
+    -- (/exp run records any command: ctx.experiment = { source, force })
+    local opts = vim.tbl_extend('force', { source = 'agent:bg' }, ctx.experiment or {})
+    exp = log and log:begin(prepared.command, prepared.cwd, opts) or nil
+    if exp and exited then
+      record(exited[1], exited[2])
     end
     local wait = math.min(tonumber(args.wait_ms) or 5000, 60000)
     local state = wait_ready(p, args.ready_pattern, wait)
@@ -262,11 +291,14 @@ M.start_process = {
     else
       head = string.format('Process %s is running in the background%s.', p.id, state == 'ready' and ' and is ready' or '')
     end
+    if exp then
+      head = head .. string.format('\n[experiment #%d: metrics are recorded when %s exits; see the experiments tool]', exp.entry.id, p.id)
+    end
     return {
       ok = state ~= 'exited' or p.code == 0,
       output = head .. '\nOutput so far:\n' .. (out ~= '' and out or '(none yet)'),
       summary = state == 'exited' and ('exited ' .. tostring(p.code)) or (p.id .. ' running'),
-      meta = { bg_id = p.id, sandbox = sandboxed },
+      meta = { bg_id = p.id, sandbox = sandboxed, experiment = exp and exp.entry.id or nil },
     }
   end,
 }

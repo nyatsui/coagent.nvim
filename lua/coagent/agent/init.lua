@@ -6,6 +6,7 @@ local Workspace = require('coagent.tools.workspace')
 local Emitter = require('coagent.core.events')
 local tools = require('coagent.tools')
 local Skills = require('coagent.agent.skills')
+local Experiments = require('coagent.agent.experiments')
 
 local M = {}
 
@@ -28,6 +29,7 @@ function M.build(opts)
   perms.skills = skills
   local c = Controller.new({
     skills = skills,
+    experiments = Experiments.new(config, ws),
     config = config,
     backend = opts.backend,
     session = session,

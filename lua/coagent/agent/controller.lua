@@ -31,6 +31,7 @@ local S = State
 ---@field events Coagent.Emitter
 ---@field store Coagent.SessionStore?
 ---@field skills Coagent.Skills?
+---@field experiments Coagent.Experiments?
 ---@field machine Coagent.StateMachine
 local Controller = {}
 Controller.__index = Controller
@@ -46,6 +47,7 @@ function Controller.new(opts)
     events = opts.events,
     store = opts.store,
     skills = opts.skills,
+    experiments = opts.experiments,
     gen = 0,
     task = nil,
     pending_approval = nil,
@@ -1653,6 +1655,7 @@ function Controller:_tool_ctx(item, gen)
     ws = self.ws,
     config = self.config,
     skills = self.skills,
+    experiments = self.experiments,
     changes = self.session.changes,
     source = self.source,
     item = item,
@@ -1685,6 +1688,11 @@ function Controller:_tool_ctx(item, gen)
     end or nil,
     on_file_changed = function(info)
       self.events:emit('file_changed', { path = info.real, rel = info.rel })
+    end,
+    -- a background experiment run finished (its metrics are in the log)
+    on_experiment = function(e)
+      local Exp = require('coagent.agent.experiments')
+      self:notice('info', string.format('Experiment #%d finished (%s): %s', e.id, Exp.status_text(e), Exp.metrics_summary(self.experiments, e)))
     end,
   }
 end

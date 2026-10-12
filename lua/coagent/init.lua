@@ -712,6 +712,202 @@ function M.use_skill(arg)
   return ok
 end
 
+------------------------------------------------------------------------------
+-- Experiment log (/exp)
+------------------------------------------------------------------------------
+
+M.EXP_USAGE = '/exp [show <id> | diff <a> [b] | note <id> <text> | compare [ids] | run <command>]'
+
+--- Put text into the + register (the unnamed one too, when no clipboard).
+---@param text string
+---@return boolean clipboard
+local function to_clipboard(text)
+  local ok = pcall(vim.fn.setreg, '+', text)
+  if not ok or vim.fn.getreg('+') ~= text then
+    vim.fn.setreg('"', text)
+    return false
+  end
+  return true
+end
+
+--- `/exp run <command>`: run a command in the background and record it as an
+--- experiment. The normal approval rules of start_process apply (deny /
+--- allow / ask; asking uses vim.ui.select).
+---@param c Coagent.Controller
+---@param command string
+---@return boolean
+local function exp_run(c, command)
+  local tool = c.registry:get('start_process')
+  local args = { command = command, wait_ms = 1000 }
+  local probe = { ws = c.ws, config = c.config, processes = c.processes }
+  local prepared, err = tool.prepare(args, probe)
+  if not prepared then
+    c:notice('error', '/exp run: ' .. tostring(err))
+    return false
+  end
+  local decision = c.permissions:decide(tool, args, prepared)
+  if decision.action == 'deny' then
+    c:notice('error', '/exp run: denied by policy: ' .. tostring(decision.reason))
+    return false
+  end
+  local function go(sandboxed)
+    local item = c:_add({
+      type = 'tool',
+      tool = 'start_process',
+      kind = 'exec',
+      title = 'exp run: ' .. command,
+      status = 'running',
+      preview = { command = prepared.command, cwd = prepared.cwd_rel },
+      meta = {},
+    })
+    local ctx = c:_tool_ctx(item, c.gen)
+    ctx.sandbox = sandboxed
+    ctx.experiment = { source = 'user', force = true }
+    require('coagent.core.async').run(function()
+      local ok, res = pcall(tool.run, args, ctx, prepared)
+      require('coagent.core.async').main()
+      if not ok then
+        res = { ok = false, output = 'Error: ' .. tostring(res) }
+      end
+      item.status = res.ok and 'done' or 'failed'
+      item.summary = res.summary
+      item.output = util.redact(res.output or '')
+      item.meta = vim.tbl_extend('force', item.meta or {}, res.meta or {})
+      if item.meta.bg_id then
+        local p = c.processes:get(item.meta.bg_id)
+        item.meta.bg_running = p ~= nil and p.status == 'running'
+      end
+      c:_update(item)
+    end)
+  end
+  if decision.action == 'allow' then
+    go(decision.sandbox)
+    return true
+  end
+  local choices = { 'Run' }
+  if decision.can_always then
+    table.insert(choices, 'Run, and always allow this command')
+  end
+  table.insert(choices, 'Cancel')
+  local why = tostring(decision.reason) .. (#(decision.warnings or {}) > 0 and ('; ' .. table.concat(decision.warnings, '; ')) or '')
+  vim.ui.select(choices, { prompt = string.format('Run experiment `%s`? (%s)', command, why) }, function(choice)
+    if choice == 'Run' then
+      go(decision.sandbox)
+    elseif choice and choice:match('^Run, and always') then
+      c.permissions:grant(decision.grant_key)
+      go(decision.sandbox)
+    else
+      c:notice('info', '/exp run: cancelled.')
+    end
+  end)
+  return true
+end
+
+--- `/exp ...`: the experiment log of this project (local file, no model request).
+---@param arg string?
+---@return boolean? ok, any result buffer number or comparison text
+function M.exp(arg)
+  local c = M.controller()
+  local log = c.experiments
+  if not log or not log:enabled() then
+    c:notice('warn', 'The experiment log is disabled (experiments.enabled = false).')
+    return false
+  end
+  local Exp = require('coagent.agent.experiments')
+  local ui = require('coagent.ui.experiments')
+  arg = vim.trim(arg or '')
+  local verb, rest = arg:match('^(%S+)%s*(.-)$')
+  local handlers = {}
+  local function missing(id)
+    c:notice('error', '/exp: unknown experiment ' .. tostring(id))
+    return false
+  end
+  function handlers.show(id)
+    local e = log:get(id)
+    if not e then
+      return missing(id)
+    end
+    return true, ui.open('experiment-' .. e.id, Exp.show_text(log, e), { ft = 'markdown' })
+  end
+  function handlers.diff(a, b)
+    local ea = log:get(a)
+    if not ea then
+      return missing(a)
+    end
+    local eb
+    if b then
+      eb = log:get(b)
+      if not eb then
+        return missing(b)
+      end
+    else
+      -- the run before `a`
+      for _, e in ipairs(log:list()) do
+        if e.id < ea.id then
+          eb = e
+        end
+      end
+      if not eb then
+        c:notice('warn', '/exp diff: #' .. ea.id .. ' is the first run; give two ids')
+        return false
+      end
+      ea, eb = eb, ea
+    end
+    return true, ui.open('experiment-diff', Exp.diff_text(log, ea, eb), { ft = 'diff' })
+  end
+  function handlers.compare(ids)
+    local text, err = Exp.compare_markdown(log, ids)
+    if not text then
+      c:notice('warn', '/exp compare: ' .. tostring(err))
+      return false
+    end
+    local clip = to_clipboard(text)
+    local n = select(2, text:gsub('\n', '\n'))
+    c:notice('info', string.format('Experiment comparison (%d lines of Markdown) copied to the %s register.', n, clip and '+' or 'unnamed'))
+    return true, text
+  end
+
+  if arg == '' then
+    return true, ui.table(log, handlers)
+  elseif verb == 'show' then
+    return handlers.show(rest)
+  elseif verb == 'diff' then
+    local a, b = rest:match('^(%S+)%s*(%S*)$')
+    if not a then
+      c:notice('error', '/exp diff <a> [b]')
+      return false
+    end
+    return handlers.diff(a, b ~= '' and b or nil)
+  elseif verb == 'note' then
+    local id, text = rest:match('^(%S+)%s+(.+)$')
+    if not id then
+      c:notice('error', '/exp note <id> <text>')
+      return false
+    end
+    local ok, err = log:note(id, text)
+    if not ok then
+      c:notice('error', '/exp note: ' .. tostring(err))
+      return false
+    end
+    c:notice('info', 'Note added to experiment #' .. log:get(id).id .. '.')
+    return true
+  elseif verb == 'compare' then
+    local ids = {}
+    for w in rest:gmatch('%S+') do
+      table.insert(ids, w)
+    end
+    return handlers.compare(ids)
+  elseif verb == 'run' then
+    if rest == '' then
+      c:notice('error', '/exp run <command>')
+      return false
+    end
+    return exp_run(c, rest)
+  end
+  c:notice('error', '/exp: unknown argument "' .. arg .. '". Usage: ' .. M.EXP_USAGE)
+  return false
+end
+
 function M.new_session()
   local c = state.controller
   if c and c:busy() then

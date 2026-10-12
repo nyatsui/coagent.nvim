@@ -89,6 +89,16 @@ M.COMMANDS = {
     end,
   },
   {
+    name = 'exp',
+    args = '[show|diff|note|compare|run ...]',
+    desc = 'Experiment log: table, details, diff, notes, Markdown comparison (local, no request)',
+    complete = { 'show', 'diff', 'note', 'compare', 'run' },
+    run = function(arg)
+      local ok = app().exp(arg)
+      return ok
+    end,
+  },
+  {
     name = 'new',
     desc = 'Start a new session',
     run = function()

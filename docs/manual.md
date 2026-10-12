@@ -109,6 +109,7 @@
 | `/go <task>` | 計画フェーズなしで実行（`plan.default = true` のとき） |
 | `/skills [enable\|disable <name>\|reload]` | Agent Skills の一覧 / このセッションだけ有効・無効（[Agent Skills](#agent-skills)） |
 | `/skill <name> [task]` | スキルを最初から読み込んでタスクを実行 |
+| `/exp [show\|diff\|note\|compare\|run ...]` | 実験ログ（[実験ログ](#実験ログexp)。ローカルのみ、リクエストなし） |
 | `/new` `/sessions` `/model [role]` `/mode [mode]` `/roles [preset]` | 対応する `:Coagent*` コマンドと同じ |
 | `/usage [billing]` `/changes` `/diff` `/review` `/stop` `/processes` | 同上（`/usage billing` は GitHub の請求ページを開く） |
 | `/resume` | 一時停止したタスクを再開（`:CoagentResume` と同じ。上限による一時停止ならカウンタをリセット） |
@@ -165,6 +166,24 @@
 - `/skills` で一覧（パス・user / repo・有効か・スキップした `SKILL.md`）を表示し、選んだスキルをこのセッションだけ有効 / 無効に
   （次のタスクから反映）。`/skills reload` で再スキャン、`:CoagentSkills` も同じ
 - `/skill <name> [task]` はスキルを最初からメッセージに添付してタスクを実行（そのタスクのツールも `allowed-tools` で絞る）
+
+### 実験ログ（`/exp`）
+
+ML の学習・評価の実行とメトリクスをプロジェクトごとにローカルへ記録します（モデルへのリクエストなし）。
+
+- 記録対象: `run_command` / `start_process` のうち `experiments.commands` に合うコマンド（既定は `python … train*.py`・
+  `eval*.py`・`test*.py`・`torchrun`・`accelerate launch`。`pytest` は除外）と、`/exp run <command>` で実行したもの
+- 内容: コマンド・cwd・git HEAD・`git diff HEAD` のハッシュと差分（上限あり）・変更ファイル・実行時間・終了コード・
+  出力の末尾・コマンドラインの設定値・メトリクス（`val_acc=0.91` / `loss: 0.3`、JSON 行、`patterns`、`log_files` の
+  CSV/JSON。キーごとに最後の値）
+- バックグラウンドの実行はプロセス終了時に記録され、パネルにお知らせが出る
+- 保存先: `stdpath('state')/coagent/experiments/<project>-<hash>.jsonl`（0600、リポジトリ外、秘密情報はマスク）
+- `/exp` — 表（`値 Δ前回/Δベスト`、`*` がベスト）。`<CR>` 詳細、`D` 前回との差分、`c` 比較をコピー、`R` 再表示、`q` 閉じる
+- `/exp show <id>` 詳細、`/exp diff <a> [b]` 記録した差分どうしの違い、`/exp note <id> <text>` メモ
+- `/exp compare [ids]` — Web チャットに貼るための Markdown の比較を `+` レジスタへ
+- `/exp run <command>` — バックグラウンドで実行して記録（承認は通常どおり）
+- エージェントは読み取り専用の `experiments` ツールで表・詳細・比較を読める
+- `:CoagentExp …` も同じ
 
 ### インライン編集（`:CoagentInline`）
 

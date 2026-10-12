@@ -210,6 +210,47 @@ local defaults = {
     max_description = 200, -- bytes of each description in the system prompt
   },
 
+  -- Experiment log (ML training / evaluation runs). Commands matching
+  -- `commands` (Lua patterns on the command line, minus `exclude`) that run
+  -- through run_command / start_process, and every `/exp run <cmd>`, are
+  -- recorded per project in stdpath('state')/coagent/experiments/<project>.jsonl
+  -- (0600, outside the repo, secrets redacted): command, cwd, git HEAD and a
+  -- hash of `git diff HEAD` (the diff kept up to max_diff_bytes), duration,
+  -- exit code and metrics from the output (`key=value` / `key: value` for
+  -- `metrics` names, optionally with a `metric_prefixes` prefix such as
+  -- val_acc / train/loss; JSON lines; extra `patterns`; the last value per
+  -- key wins) and from `log_files` the run wrote (CSV / JSON / JSONL globs
+  -- relative to the run's cwd). /exp shows them; the agent reads them with
+  -- the read-only `experiments` tool. Nothing here sends a model request.
+  experiments = {
+    enabled = true,
+    dir = nil, -- nil = stdpath('state')/coagent/experiments
+    commands = {
+      'python[%d%.]*%s.-train[%w_%-%.]*%.py',
+      'python[%d%.]*%s.-eval[%w_%-%.]*%.py',
+      'python[%d%.]*%s.-test[%w_%-%.]*%.py',
+      'torchrun%s.-%.py',
+      'accelerate%s+launch%s.-%.py',
+    },
+    exclude = { 'pytest', '%-m%s+unittest' },
+    metrics = { 'loss', 'val_loss', 'acc', 'accuracy', 'f1', 'auc', 'mae', 'rmse', 'epoch', 'lr' },
+    metric_prefixes = { 'train', 'val', 'valid', 'validation', 'test', 'eval' },
+    -- extra Lua patterns: 'pattern with (key) and (value) captures', or
+    -- { pattern = 'Top%-1 acc ([%d%.]+)', key = 'top1' }
+    patterns = {},
+    json_lines = true, -- numeric fields of output lines that are JSON objects
+    log_files = {}, -- e.g. { 'lightning_logs/*/metrics.csv', 'outputs/**/metrics.json' }
+    lower_is_better = { 'loss', 'mae', 'rmse', 'mse', 'error', 'err', 'perplexity', 'ppl', 'wer', 'cer' },
+    neutral = { 'epoch', 'lr', 'step', 'steps', 'iter', 'time', 'batch' }, -- no "best"
+    columns = nil, -- metric columns of /exp (nil = automatic)
+    max_columns = 5,
+    primary = nil, -- metric that picks the best run for /exp compare (nil = first column)
+    compare_runs = 5, -- runs in /exp compare without ids (plus the best run)
+    max_diff_bytes = 100 * 1024,
+    max_output_tail = 8 * 1024,
+    max_entries = 500, -- per project; the oldest are dropped
+  },
+
   -- Inline edit (:'<,'>CoagentInline [instruction]): one request with the
   -- builder model/effort, no tools; the reply is previewed in the buffer.
   inline = {
@@ -329,6 +370,11 @@ function M.setup(opts)
   end
   if opts and opts.auto and opts.auto.protected_globs then
     M.options.auto.protected_globs = opts.auto.protected_globs
+  end
+  for _, k in ipairs({ 'commands', 'exclude', 'metrics', 'metric_prefixes', 'patterns', 'log_files', 'lower_is_better', 'neutral', 'columns' }) do
+    if opts and opts.experiments and opts.experiments[k] then
+      M.options.experiments[k] = opts.experiments[k]
+    end
   end
   local Roles = require('coagent.agent.roles')
   local function check(path, v)

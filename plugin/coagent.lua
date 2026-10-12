@@ -58,6 +58,18 @@ end, {
     return { 'enable', 'disable', 'reload' }
   end,
 })
+cmd('CoagentExp', function(a)
+  agent().exp(a.args)
+end, {
+  nargs = '*',
+  desc = 'Experiment log: table, show <id>, diff <a> [b], note <id> <text>, compare [ids], run <command>',
+  complete = function(_, line)
+    if line:match('^%S+%s+%S+%s') then
+      return {}
+    end
+    return { 'show', 'diff', 'note', 'compare', 'run' }
+  end,
+})
 cmd('CoagentInline', function(a)
   agent().inline(a.args, { range = a.range > 0 and { a.line1, a.line2 } or nil })
 end, { nargs = '*', range = true, desc = 'Inline edit of the selected lines (one request, previewed in place)' })

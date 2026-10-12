@@ -48,6 +48,10 @@ I'll find the `add` implementation and its tests.
 - **Agent Skills** — コミュニティの `SKILL.md` スキル（Claude Code / VS Code Copilot と同じ形式）を自分のフォルダと
   リポジトリの `.github/skills/`・`.claude/skills/`・`.agents/skills/` から読み込む。常に送るのは名前と説明だけで、
   本文は必要になったときにモデルが読み込む（キャッシュに優しい）。リポジトリのスキルは `AGENTS.md` と同じく信頼しない
+- **実験ログ（ML 向け）** — 学習・評価の実行（`python train.py`・`eval.py` など）を、コマンド・git HEAD と差分の
+  ハッシュ・実行時間・終了コード・出力から読み取ったメトリクス（`val_acc=0.91`、JSON 行、メトリクスの CSV/JSON
+  ファイル）と一緒にローカルへ記録。`/exp` で前回・ベストとの差分つきの表、`/exp compare` で Web チャットに貼る
+  Markdown の比較をコピー。エージェントは `experiments` ツールで読める。リクエストは使わない
 - **`#url` / `#clipboard`** — 入力した URL のページ本文やクリップボードを添付
 - **インライン編集** — `:'<,'>CoagentInline 指示` で選択範囲だけを 1 リクエスト（ツールなし）で書き換え、
   バッファ内に diff プレビュー（`ga` 適用 / `gr` 破棄 / `gi` 追加指示）。適用した変更は巻き戻し可能
@@ -272,6 +276,7 @@ vim.keymap.set('x', '<leader>ai', ':CoagentInline<CR>', { desc = 'Coagent inline
 | `/go <task>` | 計画フェーズなしでタスクを実行（`plan.default = true` のとき） |
 | `/skills [enable\|disable <name>\|reload]` | Agent Skills の一覧（パス、user / repo）。このセッションだけ有効 / 無効を切替（下記「Agent Skills」） |
 | `/skill <name> [task]` | スキルを最初から読み込んだ状態でタスクを実行 |
+| `/exp [show\|diff\|note\|compare\|run ...]` | 実験ログ: 表・詳細・差分・メモ・Markdown の比較・実行の記録（下記「実験ログ」。ローカルのみ、リクエストなし） |
 | `/new` / `/sessions` | 新規セッション / 保存済みセッション一覧 |
 | `/model [role]` | モデル選択（`builder` / `explorer` / `advisor`） |
 | `/mode [mode]` / `/roles [preset]` | 承認モード / 役割分担の切替 |
@@ -550,12 +555,65 @@ allowed-tools: Read, Grep, Bash   # 任意。ツールを「絞る」ことし�
 `/skills reload`（再スキャン）・`:CoagentSkills` も使えます。`/skill <name> [task]` はスキルを最初からタスクの
 メッセージに読み込みます（そのタスクのツール一覧も `allowed-tools` で絞られます）。
 
+### 実験ログ（/exp）
+
+ML の作業（PyTorch の学習・評価、データ分析）向けに、実行とメトリクスをローカルに記録します。リクエストを使わずに
+実行どうしを比べたり、Web チャットやエージェントに渡したりできます。
+
+**記録されるもの。** `run_command` / `start_process` で実行されたコマンドのうち `experiments.commands`（Lua パターン。
+既定は `python … *train*.py`・`*eval*.py`・`*test*.py`・`torchrun …`・`accelerate launch …`。`pytest` は除外）に
+合うもの、または `/exp run <command>` で自分で実行したものを記録します。1 回の実行ごとに:
+
+- id・時刻・コマンド・cwd・実行元（`agent`・`agent:bg`・`user`）
+- git の HEAD とブランチ、`git diff HEAD` の短いハッシュ（差分本体は `max_diff_bytes` まで）、変更ファイル
+  （`+追加 -削除`）、未追跡ファイル名
+- 実行時間・終了コード（`ok` / `exit N` / `killed` / `timeout`）・出力の末尾
+- コマンドラインの設定値: `--lr 1e-3`・`--epochs=10`・`--amp`・`LR=0.1 python …`・Hydra 形式の `model.lr=0.01`
+- メトリクス: `experiments.metrics` の名前（loss, val_loss, acc, accuracy, f1, auc, mae, rmse, epoch, lr）の
+  `key=value` と `key: value`。`train` / `val` / `valid` / `test` / `eval` の接頭辞つき（`val_acc`・`train/loss`・
+  `test-f1`）も対象。JSON オブジェクトの出力行（`{"epoch": 3, "val_auc": 0.91}`）の数値、独自の `patterns` も読みます。
+  **キーごとに最後の値**を採るので、最終エポックの値が残ります
+- 実行が書き出したメトリクスファイル: `experiments.log_files`（実行時の cwd からの glob。例
+  `lightning_logs/*/metrics.csv`・`outputs/**/metrics.json`）。実行中に更新されたファイルのみ、パターンごとに最新の 1 つ。
+  CSV/TSV（数値列ごとに最後の値）、JSON（オブジェクトまたはオブジェクトの配列）、JSONL に対応
+
+フォアグラウンドの実行はコマンド終了時に記録します（モデルが受け取る結果の末尾に
+`[experiment #12 recorded: val_acc=0.912 (best 0.921 #9), loss=0.31 (best)]` が付きます）。バックグラウンドの実行
+（`start_process`・`/exp run`）はプロセス終了時に記録し、パネルにお知らせを出します。
+
+**保存先。** `stdpath('state')/coagent/experiments/<project>-<hash>.jsonl`。リポジトリの外で、ディレクトリ 0700・
+ファイル 0600、秘密情報はセッションファイルと同じくマスクします。追記型のファイルで（自動で詰め直し）、最大
+`max_entries` 件です。
+
+**表示**（すべてローカル。モデルへのリクエストなし）:
+
+| コマンド | 内容 |
+|---|---|
+| `/exp` | スクラッチバッファに表: id・時刻・状態・時間・短いコマンド・主なメトリクスを `値 Δ前回/Δベスト`（`*` = ベストの実行）・最新のメモ。`<CR>` 詳細、`D` 前回との差分、`c` 比較をコピー、`R` 再表示、`q` 閉じる |
+| `/exp show <id>` | 詳細（Markdown）: コマンド・cwd・git・設定値・メトリクスとベスト値・メモ・変更ファイル・記録した差分・出力の末尾 |
+| `/exp diff <a> [b]` | 2 つの実行で記録した差分どうしの違い（id が 1 つなら直前の実行と比較）。HEAD が動いていればコミット分の `git diff --stat` も表示 |
+| `/exp note <id> <text>` | 実行にメモを追加（「dropout 0.3、augmentation あり」など） |
+| `/exp compare [ids]` | コンパクトな Markdown の比較を `+` レジスタへ（クリップボードがなければ無名レジスタ）: メトリクス（ベストは太字）と実行ごとに違う設定値の表、共通の設定値、コマンド、実行ごとのコードの要約（`same code as #7`・変更ファイル）、メモ。id なしなら直近 `compare_runs` 件＋ベストの実行 |
+| `/exp run <command>` | コマンドをバックグラウンドで実行し、`experiments.commands` に合わなくても記録。承認は通常どおり（supervised では確認、read-only では拒否） |
+
+「ベスト」は大きいほど良いとみなします。`lower_is_better` の名前（loss, mae, rmse, mse, error, perplexity など）は小さい
+ほど良く、`neutral` の名前（epoch, lr, step など）は前回との差だけを表示します。`:CoagentExp …` は `/exp …` と同じです。
+
+**エージェントから。** 読み取り専用の `experiments` ツールが、コンパクトな表（query なし）、1 件の詳細（`"12"`。差分
+本体は含めない）、比較（`"compare"` や `"3 7"`）、コマンドやメモに文字列を含む実行を返します。「ベストの実行より
+val_acc を上げて」のようなタスクを、何も再実行せずに始められます。
+
+**Web チャットと組み合わせる流れ。** `/exp run python train.py --lr 3e-4` で学習を実行（またはエージェントに実行させる）
+→ メモを追加 → `/exp compare` → Microsoft 365 Copilot などのチャットに貼って次の変更を検討 → 決めた具体的な変更を
+coagent に指示。
+
 ### エージェントが使うツール
 
 | 種類 | ツール | 承認（supervised） |
 |---|---|---|
 | 調査 | `list_dir`, `glob`, `search`, `read_file`, `git_status`, `git_diff`, `diagnostics` | 不要 |
 | スキル | `use_skill`（スキルの手順を読み込む。スキルがあるときだけ提供） | 不要 |
+| 実験 | `experiments`（ローカルの実験ログ: 表・詳細・比較） | 不要 |
 | 言語サーバー | `lsp_definition`（定義）, `lsp_references`（参照）, `lsp_symbols`（アウトライン / シンボル検索）, `lsp_hover`（型・ドキュメント） | 不要 |
 | 編集 | `edit_file`, `write_file`, `delete_file` | 必要（diff 表示） |
 | コマンド | `run_command`（終了するコマンド） | 必要 |
@@ -575,6 +633,7 @@ allowed-tools: Read, Grep, Bash   # 任意。ツールを「絞る」ことし�
 | `:'<,'>CoagentInline [指示]` | 選択行をその場で書き換え（1 リクエスト、バッファ内 diff プレビュー。`ga` 適用 / `gr` 破棄 / `gi` 追加指示 / `gd` diff） |
 | `:CoagentPlan [task\|approve\|discard]` | タスクを計画から始める（`/plan` と同じ。範囲指定で選択範囲を添付） |
 | `:CoagentSkills [enable\|disable <name>\|reload]` | Agent Skills の一覧 / このセッションだけ有効・無効を切替（`/skills` と同じ） |
+| `:CoagentExp [show\|diff\|note\|compare\|run ...]` | 実験ログ（`/exp` と同じ） |
 | `:CoagentPrompt [name] [text]` | プロンプトテンプレートを実行（範囲指定で選択範囲。名前なしなら一覧から選択） |
 | `:CoagentToggle` / `Open` / `Close` | パネル開閉 |
 | `:CoagentStop` | 即時停止（リクエスト中断・実行中プロセスグループ kill・承認待ち破棄） |
@@ -693,6 +752,16 @@ require('coagent').setup({
   prompts = {}, -- 独自のプロンプトテンプレート（「プロンプトテンプレート」参照）
   -- Agent Skills（「Agent Skills」参照）。paths は既定のリストを置き換える
   skills = { enabled = true, paths = { '~/.config/coagent/skills' }, repo = true, max_listed = 50, max_description = 200 },
+  -- 実験ログ（「実験ログ」参照）。リストの設定は既定値を置き換える
+  experiments = {
+    enabled = true,
+    commands = { 'python[%d%.]*%s.-train[%w_%-%.]*%.py', 'python[%d%.]*%s.-eval[%w_%-%.]*%.py' }, -- Lua パターン
+    exclude = { 'pytest', '%-m%s+unittest' },
+    metrics = { 'loss', 'val_loss', 'acc', 'accuracy', 'f1', 'auc', 'mae', 'rmse', 'epoch', 'lr' },
+    patterns = { { pattern = 'Top%-1 acc ([%d%.]+)', key = 'top1' } }, -- 追加のメトリクス
+    log_files = { 'lightning_logs/*/metrics.csv' }, -- 実行が書き出すメトリクスファイル
+    max_diff_bytes = 100 * 1024,
+  },
   references = { url = true, url_max_bytes = 32 * 1024, clipboard_max_bytes = 32 * 1024 },
   inline = { context_lines = 40, keymaps = { accept = 'ga', reject = 'gr', retry = 'gi', diff = 'gd' } },
   notify = { on = { 'approval', 'done', 'failed', 'limit' }, bell = true, desktop = false, only_when_unfocused = true },
@@ -850,6 +919,7 @@ opts = {
 - ツール結果は切り詰め・マスクして保存。`session.save_tool_output = false` でツール出力を保存しない、
   `session.persist = false` で保存しない
 - 認証トークンは保存しません（認証は CopilotChat が管理）
+- 実験ログも同じ場所の `stdpath('state')/coagent/experiments/<project>-<hash>.jsonl` に保存します（0600。「実験ログ」参照）
 
 ## 制限事項
 

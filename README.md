@@ -55,6 +55,10 @@ I'll find the `add` implementation and its tests.
 - **Agent Skills** — community `SKILL.md` skills (the format of Claude Code and VS Code Copilot) from your own folder and
   the repository's `.github/skills/`, `.claude/skills/`, `.agents/skills/`. Only names and descriptions are always sent;
   the model loads a skill when it needs it (cache friendly). Repository skills are untrusted notes, like `AGENTS.md`
+- **Experiment log (ML)** — training / evaluation runs (`python train.py`, `eval.py`, ...) are recorded locally with the
+  command, git HEAD + diff hash, duration, exit code and metrics parsed from the output (`val_acc=0.91`, JSON lines,
+  metrics CSV/JSON files). `/exp` shows a table with deltas vs the previous and the best run, `/exp compare` copies a
+  Markdown comparison for a web chat, and the agent reads the log with the `experiments` tool. No requests are made
 - **`#url` / `#clipboard`** — attach the text of a web page you typed, or the clipboard
 - **Inline edit** — `:'<,'>CoagentInline <instruction>` rewrites just the selection with one request (no tools) and previews
   the diff in the buffer (`ga` apply / `gr` discard / `gi` follow-up). Applied edits can be rewound
@@ -282,6 +286,7 @@ input history (`<C-p>`/`<C-n>`) like normal prompts.
 | `/go <task>` | Run a task without the plan phase (with `plan.default = true`) |
 | `/skills [enable\|disable <name>\|reload]` | List Agent Skills (source path, user / repo); enable or disable one for this session (see "Agent Skills") |
 | `/skill <name> [task]` | Run a task with a skill loaded up front |
+| `/exp [show\|diff\|note\|compare\|run ...]` | Experiment log: table, details, diff, notes, Markdown comparison, record a run (see "Experiment log"; local, no request) |
 | `/new` / `/sessions` | New session / saved sessions |
 | `/model [role]` | Pick a model (`builder` / `explorer` / `advisor`) |
 | `/mode [mode]` / `/roles [preset]` | Switch approval mode / model roles |
@@ -566,12 +571,64 @@ Trust and safety:
 (re-scan) and `:CoagentSkills` work too. `/skill <name> [task]` loads a skill into the task message up front (its
 `allowed-tools` also shrink the tool list of that task).
 
+### Experiment log (/exp)
+
+For ML work (PyTorch training, evaluation, data analysis) coagent keeps a local log of runs and their metrics, so you can
+compare runs and hand them to a web chat or to the agent without spending requests.
+
+**What is recorded.** A command is recorded when it runs through `run_command` or `start_process` and matches
+`experiments.commands` (Lua patterns; by default `python … *train*.py`, `*eval*.py`, `*test*.py`, `torchrun …`,
+`accelerate launch …`, but not `pytest`), or when you run it yourself with `/exp run <command>`. Each run stores:
+
+- id, time, command, cwd, source (`agent`, `agent:bg`, `user`)
+- git HEAD and branch, a short hash of `git diff HEAD` (the diff itself up to `max_diff_bytes`), the changed files
+  (`+added -removed`) and untracked file names
+- duration, exit code (`ok` / `exit N` / `killed` / `timeout`), the output tail
+- settings from the command line: `--lr 1e-3`, `--epochs=10`, `--amp`, `LR=0.1 python …`, Hydra-style `model.lr=0.01`
+- metrics: `key=value` and `key: value` for the names in `experiments.metrics` (loss, val_loss, acc, accuracy, f1, auc, mae,
+  rmse, epoch, lr), also with a `train` / `val` / `valid` / `test` / `eval` prefix (`val_acc`, `train/loss`, `test-f1`);
+  numeric fields of output lines that are JSON objects (`{"epoch": 3, "val_auc": 0.91}`); your own `patterns`. The **last
+  value per key wins**, so the final epoch's numbers are kept
+- metrics files the run wrote: `experiments.log_files` globs relative to the run's cwd (e.g. `lightning_logs/*/metrics.csv`,
+  `outputs/**/metrics.json`); only files modified during the run, the newest per pattern. CSV/TSV (last value per numeric
+  column), JSON (object, or an array of objects) and JSONL
+
+Foreground runs are recorded when the command exits (the result the model sees ends with
+`[experiment #12 recorded: val_acc=0.912 (best 0.921 #9), loss=0.31 (best)]`). Background runs (`start_process`,
+`/exp run`) are recorded when the process exits, with a notice in the panel.
+
+**Storage.** `stdpath('state')/coagent/experiments/<project>-<hash>.jsonl` — outside the repository, directory 0700, file
+0600, secrets masked like session files. The file is append-only (compacted automatically), at most `max_entries` runs.
+
+**Views** (all local; no model request):
+
+| Command | What it does |
+|---|---|
+| `/exp` | Table in a scratch buffer: id, time, status, duration, short command, key metrics as `value Δprev/Δbest` (`*` = the best run), last note. `<CR>` details, `D` diff vs the previous run, `c` copy the comparison, `R` refresh, `q` close |
+| `/exp show <id>` | Details (Markdown): command, cwd, git, settings, metrics with the best values, notes, changed files, the recorded diff and the output tail |
+| `/exp diff <a> [b]` | Difference between the recorded diffs of two runs (one id: vs the run before it); when HEAD moved, the committed `git diff --stat` too |
+| `/exp note <id> <text>` | Add a note to a run ("dropout 0.3, augmentation on") |
+| `/exp compare [ids]` | Compact Markdown comparison into the `+` register (unnamed register without a clipboard): a table of metrics (best in bold) and the settings that differ, common settings, commands, a short code summary per run (`same code as #7`, changed files) and notes. Without ids: the last `compare_runs` runs plus the best run |
+| `/exp run <command>` | Run a command in the background and record it even if it does not match `experiments.commands`. The usual approval rules apply (asks in supervised mode, refused in read-only) |
+
+"Best" means highest, except for names in `lower_is_better` (loss, mae, rmse, mse, error, perplexity, ...); names in
+`neutral` (epoch, lr, step, ...) only show the change vs the previous run. `:CoagentExp …` does the same as `/exp …`.
+
+**For the agent.** The read-only `experiments` tool returns the compact table (no query), one run's details (`"12"`, no
+full diff), a comparison (`"compare"` or `"3 7"`) or runs whose command / notes contain a text. A task such as
+"improve val_acc over the best run" can start from it without re-running anything.
+
+**Typical loop with a web chat.** Run training with `/exp run python train.py --lr 3e-4` (or let the agent run it), add a
+note, `/exp compare`, paste into Microsoft 365 Copilot / any chat to reason about the next change, then give coagent the
+concrete change to make.
+
 ### Tools the agent uses
 
 | Kind | Tools | Approval (supervised) |
 |---|---|---|
 | Investigation | `list_dir`, `glob`, `search`, `read_file`, `git_status`, `git_diff`, `diagnostics` | No |
 | Skills | `use_skill` (loads a skill's instructions; offered only when skills exist) | No |
+| Experiments | `experiments` (the local experiment log: table, details, comparison) | No |
 | Language server | `lsp_definition`, `lsp_references`, `lsp_symbols` (outline / symbol search), `lsp_hover` (types / docs) | No |
 | Editing | `edit_file`, `write_file`, `delete_file` | Yes (with diff) |
 | Commands | `run_command` (commands that exit) | Yes |
@@ -591,6 +648,7 @@ Trust and safety:
 | `:'<,'>CoagentInline [instruction]` | Rewrite the selected lines in place (one request, in-buffer diff preview; `ga` apply / `gr` discard / `gi` follow-up / `gd` diff) |
 | `:CoagentPlan [task\|approve\|discard]` | Plan a task first (same as `/plan`; a range attaches the selection) |
 | `:CoagentSkills [enable\|disable <name>\|reload]` | List Agent Skills / enable or disable one for this session (same as `/skills`) |
+| `:CoagentExp [show\|diff\|note\|compare\|run ...]` | Experiment log (same as `/exp`) |
 | `:CoagentPrompt [name] [text]` | Run a prompt template (a range attaches the selection; no name = pick from a list) |
 | `:CoagentToggle` / `Open` / `Close` | Toggle / open / close the panel |
 | `:CoagentStop` | Stop now (abort the request, kill running process groups, drop pending approvals) |
@@ -713,6 +771,16 @@ require('coagent').setup({
   prompts = {}, -- your own prompt templates (see "Prompt templates")
   -- Agent Skills (see "Agent Skills"); paths replace the default list
   skills = { enabled = true, paths = { '~/.config/coagent/skills' }, repo = true, max_listed = 50, max_description = 200 },
+  -- experiment log (see "Experiment log"); list options replace the defaults
+  experiments = {
+    enabled = true,
+    commands = { 'python[%d%.]*%s.-train[%w_%-%.]*%.py', 'python[%d%.]*%s.-eval[%w_%-%.]*%.py' }, -- Lua patterns
+    exclude = { 'pytest', '%-m%s+unittest' },
+    metrics = { 'loss', 'val_loss', 'acc', 'accuracy', 'f1', 'auc', 'mae', 'rmse', 'epoch', 'lr' },
+    patterns = { { pattern = 'Top%-1 acc ([%d%.]+)', key = 'top1' } }, -- extra metrics
+    log_files = { 'lightning_logs/*/metrics.csv' }, -- metrics files written by the run
+    max_diff_bytes = 100 * 1024,
+  },
   references = { url = true, url_max_bytes = 32 * 1024, clipboard_max_bytes = 32 * 1024 },
   inline = { context_lines = 40, keymaps = { accept = 'ga', reject = 'gr', retry = 'gi', diff = 'gd' } },
   notify = { on = { 'approval', 'done', 'failed', 'limit' }, bell = true, desktop = false, only_when_unfocused = true },
@@ -882,6 +950,8 @@ opts = {
 - Tool results are clipped and masked before saving. `session.save_tool_output = false` does not save tool output;
   `session.persist = false` saves nothing
 - Authentication tokens are never saved (CopilotChat manages authentication)
+- The experiment log lives next to them: `stdpath('state')/coagent/experiments/<project>-<hash>.jsonl` (0600; see
+  "Experiment log")
 
 ## Limitations
 
