@@ -266,10 +266,55 @@ local function tool(b, item, o)
   end
 end
 
+local PLAN_STATUS = {
+  reviewing = { 'advisor reviewing', 'CoagentRunning' },
+  ready = { 'ready for approval', 'CoagentApproval' },
+  approved = { 'approved', 'CoagentOk' },
+  revised = { 'revised', 'CoagentDim' },
+  discarded = { 'discarded', 'CoagentDim' },
+  interrupted = { 'interrupted', 'CoagentWarn' },
+}
+
+--- The plan written in the plan phase, the advisor's review, and the actions
+--- while it waits for approval.
+local function plan(b, item, o)
+  local i = o.icons
+  local st = PLAN_STATUS[item.status] or PLAN_STATUS.ready
+  local head = (i.plan or i.task) .. ' Plan'
+  local r = b.line(head .. ' ' .. i.dot .. ' ' .. st[1])
+  b.hl(r, 0, #head, 'CoagentAssistant')
+  b.hl(r, #head, -1, st[2])
+  if item.status == 'reviewing' then
+    b.icon_row = r
+  end
+  for _, l in ipairs(vim.split(item.text or '', '\n', { plain = true })) do
+    b.line(l)
+  end
+  if item.advice then
+    local rr = b.line(string.format('%s Advisor %s plan review %s %s', i.advisor or '#', i.dot, i.dot, tostring(item.advice_model or '')))
+    b.hl(rr, 0, -1, 'CoagentSummary')
+    for _, l in ipairs(vim.split(item.advice, '\n', { plain = true })) do
+      b.line('  ' .. l, item.advice_lgtm and 'CoagentDim' or nil)
+    end
+  end
+  if item.status == 'ready' then
+    local k = o.keys or {}
+    local parts = {
+      (key(k, 'approve') or 'a') .. ' approve and execute',
+      (key(k, 'plan_revise') or 'gi') .. ' revise',
+      (key(k, 'deny') or 'd') .. ' discard',
+    }
+    local rr = b.line('  ' .. i.running .. ' ' .. table.concat(parts, ' ' .. i.dot .. ' ') .. ' (or type feedback)')
+    b.hl(rr, 0, -1, 'CoagentApproval')
+  end
+end
+
 local function summary(b, item, o)
   local i = o.icons
   local title, group, icon
-  if item.state == 'COMPLETED' then
+  if item.plan then
+    title, group, icon = 'Plan ready', 'CoagentApproval', i.plan or i.task
+  elseif item.state == 'COMPLETED' then
     title, group, icon = 'Task completed', 'CoagentOk', i.task
   elseif item.state == 'CANCELLED' then
     title, group, icon = 'Task cancelled', 'CoagentWarn', i.cancelled
@@ -388,6 +433,8 @@ function M.item(item, o)
     for k = 2, #lines do
       b.line('  ' .. lines[k], group)
     end
+  elseif item.type == 'plan' then
+    plan(b, item, o)
   elseif item.type == 'summary' then
     summary(b, item, o)
   end
@@ -430,7 +477,7 @@ function M.intro(o)
   b.line('reports back. Edits and commands ask for approval in supervised mode.', 'CoagentDim')
   b.line('')
   b.line('Context: @path @dir/ #buffer #buffers #selection #file:path #diagnostics #gitdiff', 'CoagentDim')
-  b.line('Commands: /help /compact /model /mode /new /usage ... (// sends a literal "/")', 'CoagentDim')
+  b.line('Commands: /help /plan /compact /model /mode /new /usage ... (// sends a literal "/")', 'CoagentDim')
   b.line('Help: g? in this panel', 'CoagentDim')
   b.line('')
   return b

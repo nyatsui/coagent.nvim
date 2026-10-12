@@ -25,12 +25,14 @@ local M = {}
 ---@field next_item integer
 ---@field usage_totals Coagent.UsageAcc? requests/tokens over the session's lifetime
 ---@field checkpoints Coagent.Checkpoint[] one per user prompt (/rewind)
+---@field plan table? plan phase: {phase='planning'|'ready', start, item, reviewed, advice}
 ---@class Coagent.Checkpoint
 ---@field id integer
 ---@field text string the prompt as typed (put back into the input on rewind)
 ---@field messages integer #session.messages before the prompt
 ---@field items integer #session.items before the prompt
 ---@field changes integer change-tracker write sequence at the prompt
+---@field plan table? plan phase state before the prompt
 ---@field created_at integer
 
 local Session = {}
@@ -90,6 +92,7 @@ function Session:checkpoint(text)
     messages = #self.messages,
     items = #self.items,
     changes = self.changes:mark(),
+    plan = self.plan and vim.deepcopy(self.plan) or nil,
     created_at = os.time(),
   }
   table.insert(self.checkpoints, cp)
@@ -120,6 +123,13 @@ function Session:truncate(cp)
   self.checkpoints = vim.tbl_filter(function(c)
     return c.id < cp.id
   end, self.checkpoints)
+  -- back to the plan phase of that moment (a plan approved or revised later
+  -- is waiting again)
+  self.plan = cp.plan and vim.deepcopy(cp.plan) or nil
+  local item = self.plan and self.plan.item and self:get_item(self.plan.item)
+  if item and self.plan.phase == 'ready' then
+    item.status = 'ready'
+  end
 end
 
 function Session:touch()
@@ -169,6 +179,9 @@ function Session:repair(note)
     end
     if item.type == 'assistant' then
       item.streaming = false
+    end
+    if item.type == 'plan' and item.status == 'reviewing' then
+      item.status = 'interrupted'
     end
   end
   return repaired
@@ -235,6 +248,7 @@ function Session:serialize(opts)
     role_stats = self.role_stats,
     usage_totals = self.usage_totals,
     rewind_note = self.rewind_note,
+    plan = self.plan and vim.tbl_extend('force', self.plan, { advice = clean(self.plan.advice) }) or nil,
     checkpoints = vim.tbl_map(function(c)
       return vim.tbl_extend('force', c, { text = clean(c.text) })
     end, self.checkpoints),
@@ -264,6 +278,7 @@ function M.deserialize(data)
   s.usage_totals = data.usage_totals
   s.checkpoints = data.checkpoints or {}
   s.rewind_note = data.rewind_note
+  s.plan = data.plan
   s.changes = Changes.new(data.changes)
   return s
 end

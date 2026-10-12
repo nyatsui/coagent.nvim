@@ -102,6 +102,15 @@ function View:attach(c)
   on('roles', function()
     self:refresh_bar()
   end)
+  on('plan', function()
+    self:refresh_bar()
+    self:input_statusline()
+  end)
+  on('plan_ready', function()
+    if not self:visible() then
+      vim.notify('[coagent] plan ready for approval (:CoagentPlan approve / discard)', vim.log.levels.WARN)
+    end
+  end)
   on('usage', function()
     self:refresh_bar()
   end)
@@ -136,7 +145,7 @@ function View:attach(c)
     end
   end)
   on('done', function(s)
-    if not self:visible() then
+    if not self:visible() and not s.plan then
       vim.notify(string.format('[coagent] %s (%s)', s.state:lower(), s.message or (s.verification and s.verification.status) or ''), s.state == 'COMPLETED' and vim.log.levels.INFO or vim.log.levels.WARN)
     end
   end)
@@ -285,8 +294,14 @@ function View:bar()
   end
   local mode = c.permissions.mode
   local mode_short = ({ supervised = 'supervised', readonly = 'read-only', auto = 'AUTO' })[mode] or mode
-  if c.permissions.task_readonly and mode ~= 'readonly' then
+  local plan = c:plan_phase()
+  if plan == 'planning' then
+    mode_short = 'plan'
+  elseif c.permissions.task_readonly and mode ~= 'readonly' then
     mode_short = 'read-only (task)'
+  end
+  if plan == 'ready' and not State.is_busy(st) then
+    label, state_group = 'plan ready', 'CoagentBarAlert'
   end
   -- Optional segments: {display order, priority (lower = more important), text}
   local segs = {}
@@ -678,6 +693,7 @@ function View:_keymaps()
   pmap('usage', function()
     require('coagent').usage()
   end)
+  pmap('plan_revise', a.plan_revise)
 
   local ik = self.config.keymaps.input
   local ib = self.input.buf
@@ -772,7 +788,9 @@ function View:input_statusline()
   end
   local d = ' ' .. icons.get(self.config.ui.icons).dot .. ' '
   local line
-  if self.c and self.c:state() == 'WAITING_APPROVAL' then
+  if self.c and not self.c:busy() and self.c:plan_phase() == 'ready' then
+    line = '%#CoagentApproval# plan: ' .. k(ik.approve) .. ' approve' .. d .. k(ik.deny) .. ' discard' .. d .. 'type feedback to revise'
+  elseif self.c and self.c:state() == 'WAITING_APPROVAL' then
     line = '%#CoagentApproval# ' .. k(ik.approve) .. ' approve' .. d .. k(ik.approve_always) .. ' always' .. d .. k(ik.deny) .. ' deny' .. d
       .. k(ik.deny_stop) .. ' stop' .. d .. k(ik.review) .. ' hunks' .. d .. k(ik.diff) .. ' diff'
   else

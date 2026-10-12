@@ -322,7 +322,7 @@ function Panel:anchors()
   local out = {}
   local start = 0
   for _, b in ipairs(self.blocks) do
-    if b.item and (b.item.type == 'tool' or b.item.type == 'summary' or b.item.type == 'user') then
+    if b.item and (b.item.type == 'tool' or b.item.type == 'summary' or b.item.type == 'user' or b.item.type == 'plan') then
       table.insert(out, { id = b.id, line = start + 1 })
     end
     start = start + #b.lines
@@ -341,7 +341,7 @@ function Panel:_spinner_tick()
   local start = 0
   for _, b in ipairs(self.blocks) do
     local item = b.item
-    if item and b.icon_row and ((item.type == 'tool' and item.status == 'running') or ((item.type == 'assistant' or item.type == 'advisor') and item.streaming)) then
+    if item and b.icon_row and ((item.type == 'tool' and item.status == 'running') or ((item.type == 'assistant' or item.type == 'advisor') and item.streaming) or (item.type == 'plan' and item.status == 'reviewing')) then
       any = true
       local row = start + b.icon_row
       vim.api.nvim_buf_clear_namespace(self.buf, ns_spin, row, row + 1)

@@ -70,6 +70,14 @@ local defaults = {
   --         (or enabled explicitly for the session with `:CoagentMode auto`).
   mode = 'supervised',
 
+  -- Plan phase (/plan <task>, :CoagentPlan): the agent first investigates with
+  -- read/search tools only and writes a plan (steps, files, verification,
+  -- risks) that you approve, revise or discard before anything changes.
+  -- default = true: every new task starts with a plan (/go <task> skips it).
+  plan = {
+    default = false,
+  },
+
   -- Workspace root. nil = git root of cwd, or cwd.
   root = nil,
 
@@ -237,6 +245,8 @@ local defaults = {
       new_session = 'gn',
       mode = 'gm',
       usage = 'gu',
+      -- plan waiting for approval: approve / deny (above) approve or discard it
+      plan_revise = 'gi', -- revise the plan with feedback
       next_item = ']]',
       prev_item = '[[',
       help = 'g?',

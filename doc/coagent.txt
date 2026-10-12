@@ -7,6 +7,7 @@ CONTENTS                                              *coagent-contents*
   2. Commands ................................ |coagent-commands|
   3. Panel keys .............................. |coagent-keys|
   4. Slash commands .......................... |coagent-slash|
+     Plan first .............................. |coagent-plan|
      Inline edit ............................. |coagent-inline|
      Rewind .................................. |coagent-rewind|
      Formatting .............................. |coagent-format|
@@ -34,6 +35,12 @@ Check the setup with |:checkhealth| coagent.
 :Coagent [task]          Open the panel or send a task. With a range the
                               selection is attached (#selection).
                               ":Coagent /explain" runs a template.
+:CoagentPlan [task|approve|discard]
+                         Start a task in the plan phase, or approve /
+                              discard the plan waiting for approval
+                              (|coagent-plan|). With a range the selection
+                              is attached; without a task the next message
+                              starts in the plan phase.
 :CoagentPrompt [name] [text]
                          Run a prompt template (|coagent-templates|).
                               With a range the selection is attached;
@@ -51,8 +58,9 @@ Check the setup with |:checkhealth| coagent.
 :CoagentResume           Resume a paused/interrupted/restored task. After a
                               limit pause the counters start fresh
                               (|coagent-limits|).
-:CoagentApprove[!]       Approve the pending action (! = always).
-:CoagentDeny[!] [reason] Deny (! = deny and stop).
+:CoagentApprove[!]       Approve the pending action (! = always), or the
+                              plan waiting for approval.
+:CoagentDeny[!] [reason] Deny (! = deny and stop); discards a waiting plan.
 :CoagentReview           Review the pending edit hunk by hunk.
 :CoagentChanges          List files changed by the agent.
 :CoagentDiff             Diff of all agent changes.
@@ -151,8 +159,9 @@ client identity and URLs stay CopilotChat's.
   gc changes          ]] [[ next/prev item   <C-c> stop (|coagent-queue|)
   p  pause            R  resume             gs sessions
   gn new session      gm mode               i  input
-  q  close            g? help
+  q  close            g? help               gi revise the plan
 
+While a plan waits for approval, a / ga approve it, d / gx discard it.
 Input: <CR> (normal) / <C-s> (insert) send (queued while the agent works),
 <C-c> take back queued messages, else stop, <C-k> panel,
 <C-p>/<C-n> history, /help slash commands (|coagent-slash|). All keys are
@@ -208,6 +217,10 @@ Commands go into the input history like prompts.
   /compact summary    Ask the current model ONCE to summarize the older
                       turns into one message (costs one request; <C-c>
                       cancels it).
+  /plan [task]        Plan first (|coagent-plan|). "/plan approve" and
+                      "/plan discard" act on the plan waiting for
+                      approval.
+  /go <task>          Run a task without the plan phase (plan.default).
   /new  /sessions  /model [role]  /mode [mode]  /roles [preset]
   /usage [billing]  /changes  /diff  /review  /stop  /processes
                       Same as the matching :Coagent* command.
@@ -228,6 +241,44 @@ command name (e.g. "/etc/hosts is wrong") is sent as a normal prompt.
 /compact is refused while the agent is working. The session history itself
 is not changed; only what later requests send. Because the start of the
 request changes, the next request is a one-time prompt-cache miss.
+
+                                                   *coagent-plan* *:CoagentPlan*
+Plan first: check the direction before anything changes (like Claude Code's
+plan mode). >
+
+  /plan add a --dry-run flag to the export command
+  /plan                 " the next message starts in the plan phase
+<
+The plan phase restricts the task to the read, search, LSP and explore tools
+(like read-only templates): edit and command tools are not offered and are
+refused if called. The winbar shows "plan". The model investigates and ends
+with a plan (steps, files to change, verification, risks), shown as a plan
+item; the winbar shows "plan ready" and an "approval" notification is sent
+(|coagent-notify|). Then:
+
+  approve   a (panel), ga (input), /plan approve, :CoagentApprove
+            Appends "Plan approved. Execute it now." to the same
+            conversation and runs it in the session's own mode
+            (supervised still asks for every edit and command).
+  revise    gi (panel), or type feedback and send it. Continues the plan
+            phase; the revised plan replaces the old one.
+  discard   d (panel), gx (input), /plan discard, :CoagentDeny
+            Leaves the plan phase; nothing was changed.
+
+The approval never raises the permission mode. The history stays
+append-only; the plan phase offers fewer tools and a plan section in the
+system prompt, so the first request after approving is a one-time
+prompt-cache miss. With the advisor role (:CoagentRoles, roles.advisor.on_plan), its
+PLAN review checks the written plan before you see it; the advice is shown
+under the plan, goes with the approval, and the usual PLAN review before
+the first edit is skipped.
+
+<C-c> stops a planning task but stays in the plan phase; /plan discard
+leaves it. `plan = { default = true }` starts every new task in the plan
+phase; "/go <task>" skips it for one task (read-only templates never plan).
+The plan phase is saved with the session, and |coagent-rewind| to a prompt
+inside it restores it (rewinding "/plan approve" makes the plan wait for
+approval again).
 
                                                 *coagent-inline* *:CoagentInline*
 Inline edit: rewrite a selection without the panel (like Copilot inline chat
@@ -415,7 +466,9 @@ focus events Neovim always counts as focused, so set
 `only_when_unfocused = false` instead. No "done" notification is sent when
 a queued message immediately starts the next task. 'limit' is sent when a
 per-task limit pauses the task (|coagent-limits|); 'paused' covers the
-other pauses (:CoagentPause, interruptions).
+other pauses (:CoagentPause, interruptions). A plan ready for approval
+(|coagent-plan|) is sent as 'approval' ("approval needed (plan)"), not
+'done'.
 
                                                         *coagent-limits*
 Per-task limits are brakes against runaway loops: every request resends

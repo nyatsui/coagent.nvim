@@ -63,11 +63,28 @@ local function git_branch(root)
   end
 end
 
----@param opts {root:string, mode:string, instruction_files:string[], tools:table[]}
+M.PLAN = [[
+<plan_mode>
+You are in the PLAN PHASE. Only read/search tools are available; nothing may be changed and no command may run.
+Investigate just enough to be confident (read the relevant code, find callers and tests), then reply WITHOUT
+calling tools with a concise plan in Markdown:
+## Steps
+numbered, concrete steps
+## Files to change
+path: what changes (and new files)
+## Verification
+the commands or checks you will run and what they must show
+## Risks
+risks, open questions and assumptions (say "none" if there are none)
+The user approves, revises or discards the plan. Once approved you will execute it with the normal tools.
+</plan_mode>
+]]
+
+---@param opts {root:string, mode:string, plan:boolean?, instruction_files:string[], tools:table[]}
 ---@return string
 function M.build(opts)
   local parts = { vim.trim(BASE) }
-  local mode_text = ({
+  local mode_text = opts.plan and 'PLAN PHASE: read and search only until the user approves the plan (see <plan_mode>).' or ({
     readonly = 'READ-ONLY: you can only read and search. Do not attempt to modify files or run commands; '
       .. 'answer with analysis and concrete suggestions instead.',
     supervised = 'SUPERVISED: file changes and commands are shown to the user for approval before they run.',
@@ -88,6 +105,9 @@ function M.build(opts)
   end
   table.insert(env, '</environment>')
   table.insert(parts, table.concat(env, '\n'))
+  if opts.plan then
+    table.insert(parts, vim.trim(M.PLAN))
+  end
 
   local notes = M.project_notes(opts.root, opts.instruction_files)
   if #notes > 0 then

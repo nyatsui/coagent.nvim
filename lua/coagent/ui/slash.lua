@@ -51,6 +51,23 @@ M.COMMANDS = {
     end,
   },
   {
+    name = 'plan',
+    args = '[task|approve|discard]',
+    desc = 'Plan first: investigate read-only, then approve / revise / discard the plan',
+    complete = { 'approve', 'discard' },
+    run = function(arg)
+      return app().plan(arg)
+    end,
+  },
+  {
+    name = 'go',
+    args = '<task>',
+    desc = 'Run a task without the plan phase (with plan.default = true)',
+    run = function(arg)
+      return app().go(arg)
+    end,
+  },
+  {
     name = 'new',
     desc = 'Start a new session',
     run = function()

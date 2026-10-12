@@ -350,6 +350,10 @@ function actions.approve(action, ask_reason)
   local c = M.controller()
   local p = c:pending()
   if not p then
+    if c:plan_phase() == 'ready' and not c:busy() then
+      -- approve / deny keys act on the plan waiting for approval
+      return M.plan((action == 'approve' or action == 'approve_always') and 'approve' or 'discard')
+    end
     notify('nothing is waiting for approval')
     return
   end
@@ -363,6 +367,29 @@ function actions.approve(action, ask_reason)
   else
     c:approve(p.item.id, { action = action })
   end
+end
+
+--- Revise the plan waiting for approval: asks for the feedback (empty =
+--- focus the input to type it there).
+function actions.plan_revise()
+  local c = M.controller()
+  if c:plan_phase() ~= 'ready' or c:busy() then
+    notify('no plan is waiting for approval')
+    return
+  end
+  vim.ui.input({ prompt = 'Revise the plan (feedback): ' }, function(text)
+    if text == nil then
+      return
+    end
+    if vim.trim(text) == '' then
+      M.view():focus_input()
+      return
+    end
+    local ok, err = c:plan_revise(text, { input = text })
+    if not ok then
+      notify(err, vim.log.levels.WARN)
+    end
+  end)
 end
 
 ------------------------------------------------------------------------------
@@ -506,6 +533,9 @@ function M.deny(reason, stop)
   local c = M.controller()
   local p = c:pending()
   if not p then
+    if c:plan_phase() == 'ready' and not c:busy() then
+      return M.plan('discard')
+    end
     notify('nothing is waiting for approval')
     return
   end
@@ -514,6 +544,63 @@ end
 
 function M.review()
   return M.view():review()
+end
+
+--- `/plan [task|approve|discard]`, `:CoagentPlan [...]` (range = selection).
+--- A task starts in the plan phase; no argument: the next message does.
+---@param arg string?
+---@param opts {range:integer[]?, open:boolean?}?
+---@return boolean ok
+function M.plan(arg, opts)
+  opts = opts or {}
+  arg = vim.trim(arg or '')
+  local c = M.controller()
+  if opts.open then
+    track_editor()
+    capture_selection(opts.range)
+    M.view():open({ focus = arg == '' and 'input' or nil })
+  end
+  local ok, err
+  if arg == 'approve' then
+    ok, err = c:plan_approve()
+  elseif arg == 'discard' then
+    ok, err = c:plan_discard()
+  elseif arg == '' then
+    ok, err = c:plan('')
+  else
+    c.source = source()
+    local sel = state.selection
+    state.selection = nil
+    local text = arg
+    if sel and opts.range and not text:find('#selection', 1, true) then
+      text = text .. ' #selection'
+    end
+    ok, err = c:plan(text, { source = c.source, selection = sel, input = '/plan ' .. arg })
+  end
+  if not ok then
+    c:notice('warn', '/plan: ' .. tostring(err))
+  end
+  return ok
+end
+
+--- `/go <task>`: run a task without the plan phase (plan.default = true).
+---@param arg string?
+---@return boolean ok
+function M.go(arg)
+  arg = vim.trim(arg or '')
+  local c = M.controller()
+  if arg == '' then
+    c:notice('error', '/go: give the task to run without a plan, e.g. /go fix the typo in README.md')
+    return false
+  end
+  c.source = source()
+  local sel = state.selection
+  state.selection = nil
+  local ok, err = c:submit(arg, { source = c.source, selection = sel, skip_plan = true, input = '/go ' .. arg })
+  if not ok then
+    c:notice('warn', '/go: ' .. tostring(err))
+  end
+  return ok
 end
 
 function M.new_session()
@@ -539,7 +626,9 @@ function M.load_session(id)
   end
   c = set_controller(build(s))
   M.open()
-  if c:state() == 'PAUSED' then
+  if c:plan_phase() == 'ready' then
+    c:notice('info', 'A plan is waiting for approval: /plan approve, /plan discard, or type feedback to revise it.')
+  elseif c:state() == 'PAUSED' then
     if c.session.pause_reason == 'limit' then
       c:notice('info', 'This task was paused at a per-task limit. :CoagentResume or /resume continues it with fresh counters; /stop ends it.')
     else

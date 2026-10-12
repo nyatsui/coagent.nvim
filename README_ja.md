@@ -41,6 +41,9 @@ I'll find the `add` implementation and its tests.
 - **ユーザーの変更を壊さない** — 未保存バッファとの競合検出、承認待ち中のディスク変更検出、作業開始前の状態を基準にしたロールバック
 - **リッチな TUI** — タイムライン、折りたたみ、ストリーミング描画（ちらつき防止の差分更新）、hunk 単位レビュー、side-by-side diff、コマンド出力パネル、変更一覧
 - **ターミナル適応** — 80×24 で動作、tmux、256 色/true color、Unicode/ASCII/Nerd Font アイコン、split/float 切替、リサイズ追従
+- **計画を先に確認** — `/plan タスク` で読み取り専用の調査だけを行い、計画（手順・変更するファイル・検証方法・リスク）を
+  提示。承認・修正・破棄を選ぶまで何も変更しない。承認すると同じ会話のまま実行（キャッシュに優しい）。
+  `plan.default = true` ですべてのタスクを計画から始める
 - **プロンプトテンプレート** — `/explain` `/codereview` `/fix` `/tests` `/commit` など（CopilotChat の定型プロンプト相当）と設定での独自定義。説明・レビューはそのタスクだけ読み取り専用
 - **`#url` / `#clipboard`** — 入力した URL のページ本文やクリップボードを添付
 - **インライン編集** — `:'<,'>CoagentInline 指示` で選択範囲だけを 1 リクエスト（ツールなし）で書き換え、
@@ -75,7 +78,7 @@ I'll find the `add` implementation and its tests.
   'nyatsui/coagent.nvim',
   main = 'coagent',
   dependencies = { 'CopilotC-Nvim/CopilotChat.nvim' },
-  cmd = { 'Coagent', 'CoagentToggle', 'CoagentStop', 'CoagentSessions', 'CoagentMode', 'CoagentModel', 'CoagentChanges', 'CoagentRewind', 'CoagentFormat', 'CoagentInline', 'CoagentResume', 'CoagentUsage', 'CoagentProcesses' },
+  cmd = { 'Coagent', 'CoagentToggle', 'CoagentStop', 'CoagentSessions', 'CoagentMode', 'CoagentModel', 'CoagentChanges', 'CoagentRewind', 'CoagentFormat', 'CoagentInline', 'CoagentResume', 'CoagentUsage', 'CoagentProcesses', 'CoagentPlan' },
   keys = {
     { '<leader>aa', '<cmd>CoagentToggle<cr>', desc = 'Coagent' },
     { '<leader>aa', ':Coagent<cr>', mode = 'v', desc = 'Coagent (selection)' },
@@ -213,6 +216,43 @@ vim.keymap.set('x', '<leader>ai', ':CoagentInline<CR>', { desc = 'Coagent inline
   空のコードブロックは選択行の削除です
 - エージェントの作業中は使えません（CopilotChat のクライアントは同時に 1 リクエストのみ追跡するため）
 
+### 計画を先に確認する（/plan）
+
+何かを変更する前に方針を確認できます（Claude Code の plan mode 相当）:
+
+```
+/plan export コマンドに --dry-run フラグを追加
+:CoagentPlan export に --dry-run を追加   " 同じ。範囲指定で選択範囲を添付
+/plan                                   " 次に送るメッセージを計画フェーズで始める
+```
+
+1. **計画フェーズ**: 読み取り専用テンプレートと同じく、そのタスクは読み込み・検索・LSP・`explore` ツールだけに制限されます。
+   編集・コマンドのツールはモデルに渡されません（呼ばれても拒否）。winbar には `plan` と表示されます
+2. モデルは調査したうえで、簡潔な計画（**手順・変更するファイル・検証方法・リスク**）で締めくくります。最後の回答は
+   タイムラインの **Plan** 項目になり、winbar は `plan ready` になり、`approval` 通知が送られます
+3. その後の操作:
+
+   | 操作 | キー / コマンド | 動作 |
+   |---|---|---|
+   | 承認して実行 | `a`（パネル）/ `ga`（入力欄）/ `/plan approve` / `:CoagentApprove` | **同じ会話**に「Plan approved. Execute it now.」を追加し、セッション本来のモードで実行（`supervised` なら編集・コマンドごとに承認、`readonly` のセッションは読み取り専用のまま） |
+   | 修正 | `gi`（パネル）、または**フィードバックをそのまま入力して送信** | フィードバック付きで計画フェーズを続行。修正版の計画が古い計画に置き換わる |
+   | 破棄 | `d`（パネル）/ `gx`（入力欄）/ `/plan discard` / `:CoagentDeny` | 計画フェーズを終了（何も変更されていない） |
+
+- 承認で権限モードが上がることはありません。計画フェーズは自分のタスクの間だけモードを下げるだけです
+- 履歴は追記のみ: 承認・修正はそれぞれユーザーメッセージを 1 つ追加するだけなので、履歴はキャッシュの効く prefix のまま
+  です。計画フェーズはツールが少なくシステムプロンプトに計画用の節があるため、承認直後の最初のリクエストだけは履歴を
+  キャッシュなしで 1 回送り直します。計画フェーズ内と承認後のリクエストは通常どおりキャッシュが効きます
+- **アドバイザー**（`:CoagentRoles advisor` / `full`、`roles.advisor.on_plan`）: PLAN レビューが書かれた計画をユーザーに見せる前に
+  確認し、助言は計画の下に表示されます。助言は承認時に一緒に渡され（作業担当が対応）、最初の編集前の通常の PLAN レビューは
+  省略されます（同じ計画に 2 回リクエストしない）
+- `<C-c>` は計画中のタスクを止めますが計画フェーズは続きます（次のメッセージで計画を続行）。抜けるには `/plan discard`。
+  上限で一時停止した計画タスクは `/resume` で読み取り専用のまま続行します
+- **すべてのタスクで計画から**: `plan = { default = true }`。`/go タスク` でそのタスクだけ計画フェーズを省略します。
+  読み取り専用テンプレート（`/explain`、`/commit` など）は計画なしでそのまま回答します
+- 計画フェーズはセッションに保存されます（`:CoagentSessions` で開き直しても承認待ちのまま）。`/rewind` で計画フェーズ内の
+  プロンプトへ戻ると計画フェーズも戻ります: `/plan approve` へ巻き戻すと計画は再び承認待ちになり、コードも戻せば実行で
+  変更したファイルも元に戻ります
+
 ### スラッシュコマンド
 
 入力欄の先頭に `/` を書くとコマンドとして実行され、モデルには送られません（リクエストは発生しません）。
@@ -223,6 +263,8 @@ vim.keymap.set('x', '<leader>ai', ':CoagentInline<CR>', { desc = 'Coagent inline
 |---|---|
 | `/compact` | 今すぐ圧縮: 直近 8 メッセージより前の長いツール出力をすべて省略（ローカル処理、リクエストなし） |
 | `/compact summary` | 古いやり取りを現在のモデルに 1 回だけ要約させて 1 メッセージに置き換える（**1 リクエスト消費**） |
+| `/plan [task\|approve\|discard]` | 計画を先に確認: 読み取り専用で調査して計画を作成し、承認 / 修正 / 破棄（上記「計画を先に確認する」） |
+| `/go <task>` | 計画フェーズなしでタスクを実行（`plan.default = true` のとき） |
 | `/new` / `/sessions` | 新規セッション / 保存済みセッション一覧 |
 | `/model [role]` | モデル選択（`builder` / `explorer` / `advisor`） |
 | `/mode [mode]` / `/roles [preset]` | 承認モード / 役割分担の切替 |
@@ -294,6 +336,7 @@ notify = {
   （無いと常に「フォーカス中」とみなされて通知されません。その場合は `only_when_unfocused = false`）
 - tmux でベルを使うときは `monitor-bell on`（既定）と、必要に応じて `bell-action any` を設定してください
 - 実行中のタスクの完了直後にキューのメッセージで次のタスクが始まる場合、その完了通知は出しません
+- `/plan` の計画が承認待ちになったときは `done` ではなく `approval`（`coagent: approval needed (plan)`）として通知します
 
 ### 巻き戻し（/rewind）
 
@@ -432,12 +475,13 @@ require('coagent').setup({
 |---|---|
 | `:Coagent [task]` | パネルを開く / タスク送信（範囲指定で選択範囲を添付）。`:Coagent /explain` でテンプレート実行 |
 | `:'<,'>CoagentInline [指示]` | 選択行をその場で書き換え（1 リクエスト、バッファ内 diff プレビュー。`ga` 適用 / `gr` 破棄 / `gi` 追加指示 / `gd` diff） |
+| `:CoagentPlan [task\|approve\|discard]` | タスクを計画から始める（`/plan` と同じ。範囲指定で選択範囲を添付） |
 | `:CoagentPrompt [name] [text]` | プロンプトテンプレートを実行（範囲指定で選択範囲。名前なしなら一覧から選択） |
 | `:CoagentToggle` / `Open` / `Close` | パネル開閉 |
 | `:CoagentStop` | 即時停止（リクエスト中断・実行中プロセスグループ kill・承認待ち破棄） |
 | `:CoagentPause` / `:CoagentResume` | ステップ境界で一時停止 / 再開（中断・復元セッション、上限による一時停止の再開も） |
-| `:CoagentApprove[!]` | 承認（`!` = このセッション中は同じ操作を常に許可） |
-| `:CoagentDeny[!] [理由]` | 拒否（理由はモデルに伝わる。`!` = 拒否して停止） |
+| `:CoagentApprove[!]` | 承認（`!` = このセッション中は同じ操作を常に許可）。承認待ちの計画も承認 |
+| `:CoagentDeny[!] [理由]` | 拒否（理由はモデルに伝わる。`!` = 拒否して停止）。承認待ちの計画は破棄 |
 | `:CoagentReview` | 承認待ちの編集を hunk 単位でレビュー |
 | `:CoagentChanges` / `:CoagentDiff` | 変更一覧 / セッション全体の diff |
 | `:CoagentRevert [path\|all]` | エージェントの変更を巻き戻し |
@@ -459,15 +503,15 @@ require('coagent').setup({
 
 | キー | 動作 | キー | 動作 |
 |---|---|---|---|
-| `a` | 承認 | `<Tab>` / `za` | ツール詳細の展開/折りたたみ |
+| `a` | 承認（承認待ちの計画も） | `<Tab>` / `za` | ツール詳細の展開/折りたたみ |
 | `A` | 常に承認（危険操作は不可） | `<CR>` | 詳細を開く（コマンド出力 / diff） |
-| `d` | 拒否（理由入力） | `gd` | diff（承認待ちなら side-by-side） |
+| `d` | 拒否（理由入力）。承認待ちの計画は破棄 | `gd` | diff（承認待ちなら side-by-side） |
 | `D` | 拒否して停止 | `gf` | 該当ファイルの変更箇所へジャンプ |
 | `r` | hunk レビュー | `gc` | 変更ファイル一覧 |
 | `<C-c>` | 停止（キューがあれば先に入力欄へ戻す。完了後に押すとバックグラウンドプロセスも停止） | `]]` / `[[` | 次/前の項目 |
 | `p` / `R` | 一時停止 / 再開 | `gs` / `gn` | セッション一覧 / 新規 |
 | `gm` | モード切替 | `i` | 入力欄へ |
-| `gu` | 利用量・残量 | | |
+| `gu` | 利用量・残量 | `gi` | 承認待ちの計画を修正（フィードバックを入力） |
 | `q` | 閉じる | `g?` | ヘルプ |
 
 入力欄: `<CR>`（ノーマル）/ `<C-s>`（インサート）送信（作業中はキューへ）、`<C-c>` キューを戻す / 停止、`<C-k>` パネルへ、`<C-p>`/`<C-n>` 履歴。
@@ -522,6 +566,7 @@ require('coagent').setup({
     rates = nil,        -- クレジットの概算用（下記「利用量とクレジット」）
   },
   mode = 'supervised',
+  plan = { default = false }, -- true: 新しいタスクはすべて計画フェーズから（/go で省略。「計画を先に確認する」参照）
   limits = { -- 暴走ループの歯止め（「タスクごとの上限」参照）
     max_steps = 40,               -- 1 タスクあたりのモデル要求数（到達で一時停止、/resume で続行）
     max_tool_calls = 120,         -- 同上（ツール実行回数）
@@ -632,7 +677,7 @@ Copilot のモデル一覧 API は旧方式（Premium requests の回数課金�
 | プリセット | 構成 |
 |---|---|
 | `single`（既定） | 選んだモデルだけ |
-| `advisor` | 作業担当 ＋ アドバイザー（計画の確定前・同じチェックが 2 回失敗したとき・完了の直前にレビュー） |
+| `advisor` | 作業担当 ＋ アドバイザー（計画の確定前（計画フェーズでは書かれた計画）・同じチェックが 2 回失敗したとき・完了の直前にレビュー） |
 | `explorers` | 作業担当 ＋ 調査担当（`explore` ツール。読み取り専用のサブエージェントを並列実行） |
 | `full` | 作業担当 ＋ 調査担当 ＋ アドバイザー |
 

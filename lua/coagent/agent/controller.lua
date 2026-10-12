@@ -241,10 +241,12 @@ end
 
 --- Start a new task (or a follow-up in the same session).
 ---@param text string
----@param opts {source:table?, selection:table?, readonly:boolean?, input:string?}?
+---@param opts {source:table?, selection:table?, readonly:boolean?, input:string?, plan:boolean?, skip_plan:boolean?}?
 ---  readonly: restrict this task to read/search tools (prompt templates);
 ---  it can only lower the mode, never raise it.
 ---  input: the text as typed (e.g. "/fix x"), put back into the input by /rewind.
+---  plan: start this task in the plan phase (/plan); skip_plan: not even with
+---  plan.default (/go). While a plan waits for approval, any message revises it.
 ---@return boolean ok, string? err
 function Controller:submit(text, opts)
   opts = opts or {}
@@ -253,9 +255,27 @@ function Controller:submit(text, opts)
     return false, 'empty prompt'
   end
   if self:busy() then
+    if opts.plan or opts.plan_approved then
+      return false, 'the agent is busy; wait for it or stop it first (<C-c>)'
+    end
     -- Follow-up while the agent works: delivered at the next step boundary
     -- (never interrupting a running tool or an approval prompt).
     return self:_enqueue(text, opts)
+  end
+  local phase = self:plan_phase()
+  local planning -- 'start' | 'revise' | nil: this task runs in the plan phase
+  local leave_plan = false
+  if opts.plan_approved then
+    planning = nil
+  elseif phase == 'ready' then
+    if opts.skip_plan then
+      return false, Controller.PLAN_WAITING
+    end
+    planning = 'revise'
+  elseif opts.skip_plan then
+    leave_plan = phase == 'planning'
+  elseif opts.plan or phase == 'planning' or (self.config.plan and self.config.plan.default and not opts.readonly) then
+    planning = 'start'
   end
   if self.machine.current == S.PAUSED then
     -- A new message while paused abandons the paused task's pending steps.
@@ -270,14 +290,38 @@ function Controller:submit(text, opts)
   if self.session.title == 'New session' then
     self.session.title = util.ellipsize((text:gsub('\n.*', '')), 80)
   end
-  self.permissions:set_task_readonly(opts.readonly)
+  self.permissions:set_task_readonly(opts.readonly or planning ~= nil)
+  -- the checkpoint keeps the plan state from before this prompt (/rewind)
   self.session:checkpoint(opts.input or text)
   local note = self.session.rewind_note
   self.session.rewind_note = nil
+  local prefix = ''
+  if leave_plan then
+    self:_set_plan(nil)
+    self:notice('info', 'Plan phase left (/go): this task runs without a plan.')
+  end
+  if planning == 'revise' then
+    local plan = self.session.plan
+    local item = plan.item and self.session:get_item(plan.item)
+    if item then
+      item.status = 'revised'
+      self:_update(item)
+    end
+    self:_set_plan({ phase = 'planning', start = plan.start })
+    prefix = Controller.PLAN_REVISE_PREFIX
+  elseif planning == 'start' then
+    local plan = self.session.plan or {}
+    self:_set_plan({ phase = 'planning', start = plan.start or (#self.session.messages + 1) })
+    prefix = Controller.PLAN_PREFIX
+  end
   self:_add({ type = 'user', text = text })
-  if opts.readonly and self.permissions.mode ~= 'readonly' then
+  if planning == 'start' and phase ~= 'planning' then
+    self:notice('info', 'Plan phase: the agent only investigates (read/search tools) and writes a plan for you to approve, revise or discard.')
+  elseif opts.readonly and self.permissions.mode ~= 'readonly' then
     self:notice('info', 'Read-only for this task (' .. (opts.template or 'template') .. '): only read and search tools.')
   end
+  local approved = opts.plan_approved
+  local brief_from = (planning and self.session.plan.start) or (approved and approved.start) or nil
   return self:_start(function(gen)
     local clean, atts, errors, infos = context.resolve_references(text, {
       ws = self.ws,
@@ -292,9 +336,12 @@ function Controller:submit(text, opts)
     for _, e in ipairs(errors) do
       self:notice('warn', e)
     end
-    local content = clean ~= '' and clean or text
+    local content = prefix .. (clean ~= '' and clean or text)
     if note then
       content = note .. '\n\n' .. content
+    end
+    if opts.extra then
+      content = content .. '\n\n' .. opts.extra
     end
     if #atts > 0 then
       content = content .. '\n\n' .. table.concat(atts, '\n\n')
@@ -302,7 +349,172 @@ function Controller:submit(text, opts)
     end
     table.insert(self.session.messages, { role = 'user', content = content })
     self:_loop(gen)
-  end)
+  end, {
+    planning = planning ~= nil,
+    brief_from = brief_from,
+    -- the advisor already reviewed the approved plan: no second PLAN checkpoint
+    plan_reviewed = approved and approved.reviewed or nil,
+  })
+end
+
+------------------------------------------------------------------------------
+-- Plan phase (/plan)
+------------------------------------------------------------------------------
+-- session.plan = nil | {phase = 'planning'|'ready', start = index of the
+-- first plan prompt in session.messages, item = id of the plan item,
+-- reviewed = the advisor reviewed it, advice = its review}.
+-- Planning tasks are restricted to read tools like read-only templates; the
+-- approval is one more user message in the same conversation (append-only),
+-- after which the session's own mode applies again. Nothing here changes the
+-- permission mode.
+
+Controller.PLAN_PREFIX = '[Plan mode: investigate with the read/search tools, then reply with the plan. Do not change anything yet.]\n\n'
+Controller.PLAN_REVISE_PREFIX = '[Plan mode: revise the plan with this feedback, then reply with the full revised plan. Do not change anything yet.]\n\n'
+Controller.PLAN_APPROVED = 'Plan approved. Execute it now.'
+Controller.PLAN_WAITING = 'a plan is waiting for approval: /plan approve, /plan discard, or type feedback to revise it'
+
+---@return 'planning'|'ready'|nil
+function Controller:plan_phase()
+  return self.session.plan and self.session.plan.phase or nil
+end
+
+function Controller:_set_plan(plan)
+  self.session.plan = plan
+  self.events:emit('plan', plan)
+end
+
+--- `/plan [task]`: start `task` in the plan phase. Without a task, the next
+--- message starts in the plan phase.
+---@param text string?
+---@param opts table? submit opts
+---@return boolean ok, string? err
+function Controller:plan(text, opts)
+  text = vim.trim(text or '')
+  if text ~= '' then
+    return self:submit(text, vim.tbl_extend('force', opts or {}, { plan = true }))
+  end
+  if self:busy() then
+    return false, 'the agent is busy; wait for it or stop it first (<C-c>)'
+  end
+  local phase = self:plan_phase()
+  if phase == 'ready' then
+    return false, Controller.PLAN_WAITING
+  end
+  if phase ~= 'planning' then
+    self:_set_plan({ phase = 'planning' })
+    self:save()
+  end
+  self:notice('info', 'Plan mode: the next message starts in the plan phase (read/search tools only, ends with a plan to approve). /go <task> runs a task without it.')
+  return true
+end
+
+--- Approve the plan waiting for approval and execute it in the same
+--- conversation, in the session's own permission mode.
+---@param opts {input:string?}?
+---@return boolean ok, string? err
+function Controller:plan_approve(opts)
+  local plan = self.session.plan
+  if not plan or plan.phase ~= 'ready' then
+    return false, 'no plan is waiting for approval'
+  end
+  if self:busy() then
+    return false, 'the agent is busy'
+  end
+  local item = plan.item and self.session:get_item(plan.item)
+  local extra
+  if plan.advice and not Advisor.is_lgtm(plan.advice) then
+    extra = 'Advisor review of the plan (address these points where they apply):\n' .. plan.advice
+  end
+  local ok, err = self:submit(Controller.PLAN_APPROVED, {
+    input = (opts and opts.input) or '/plan approve',
+    plan_approved = { reviewed = plan.reviewed, start = plan.start },
+    extra = extra,
+  })
+  if not ok then
+    return false, err
+  end
+  self:_set_plan(nil)
+  if item then
+    item.status = 'approved'
+    self:_update(item)
+  end
+  return true
+end
+
+--- Revise the plan with feedback (same as typing a message while it waits).
+---@param feedback string
+---@return boolean ok, string? err
+function Controller:plan_revise(feedback, opts)
+  if self:plan_phase() ~= 'ready' then
+    return false, 'no plan is waiting for approval'
+  end
+  return self:submit(feedback, opts)
+end
+
+--- Leave the plan phase without executing anything. Stops a running planning
+--- task first.
+---@return boolean ok, string? err
+function Controller:plan_discard()
+  local plan = self.session.plan
+  if not plan then
+    return false, 'not in the plan phase'
+  end
+  if self:busy() and not (self.task and self.task.planning) then
+    return false, 'the agent is busy'
+  end
+  if self:busy() or self.machine.current == S.PAUSED then
+    self:stop('plan')
+  end
+  local item = plan.item and self.session:get_item(plan.item)
+  if item then
+    item.status = 'discarded'
+    self:_update(item)
+  end
+  self:_set_plan(nil)
+  self:notice('info', 'Plan discarded; nothing was changed.')
+  self:save(true)
+  return true
+end
+
+--- The planning task ended with a plan (a reply without tool calls): it
+--- becomes the plan item, reviewed by the advisor first when that role is on.
+function Controller:_plan_ready(gen, res)
+  local t = self.task
+  local text = vim.trim(res.content or '')
+  local item = t.last_item
+  if item and item.type == 'assistant' then
+    item.type = 'plan'
+  else
+    item = self:_add({ type = 'plan', text = text })
+  end
+  item.text = text ~= '' and text or '(the model wrote no plan)'
+  item.status = 'reviewing'
+  local roles = self:roles()
+  local plan = self.session.plan or {}
+  if roles.advisor and roles.advisor_opts.on_plan then
+    item.advice_model = roles.advisor_model
+    self:_update(item)
+    local task = self:_task_brief()
+    local advice = t.advisor:review(gen, 'PLAN', table.concat({
+      'Task:\n' .. task,
+      'Proposed plan (nothing executed yet; the user approves it after your review):\n' .. util.clip(text, 6000),
+    }, '\n\n'), { item = false })
+    if self.gen ~= gen then
+      return
+    end
+    if advice then
+      item.advice = advice
+      item.advice_lgtm = Advisor.is_lgtm(advice)
+      plan.reviewed = true
+      plan.advice = advice
+    end
+  end
+  item.status = 'ready'
+  self:_update(item)
+  plan.phase = 'ready'
+  plan.item = item.id
+  self:_set_plan(plan)
+  self.events:emit('plan_ready', item)
 end
 
 --- Record an accepted inline edit (:CoagentInline) of a live buffer: a
@@ -342,9 +554,11 @@ function Controller:resume()
     return false, 'nothing to resume; send a new message instead'
   end
   self:notice('info', 'Resuming task')
+  local planning = self:plan_phase() == 'planning'
+  self.permissions:set_task_readonly(planning)
   return self:_start(function(gen)
     self:_loop(gen)
-  end)
+  end, { planning = planning, brief_from = planning and self.session.plan.start or nil })
 end
 
 --- Ask the loop to pause before its next request.
@@ -407,6 +621,9 @@ function Controller:stop(reason)
     elseif item.type == 'assistant' and item.streaming then
       item.streaming = false
       item.interrupted = true
+      self:_update(item)
+    elseif item.type == 'plan' and item.status == 'reviewing' then
+      item.status = 'interrupted'
       self:_update(item)
     end
   end
@@ -619,6 +836,7 @@ function Controller:rewind(id, mode, opts)
   end
   if conv then
     self.session:truncate(cp)
+    self.events:emit('plan', self.session.plan)
     if mode == 'all' then
       self.session.rewind_note = nil
     end
@@ -814,7 +1032,8 @@ end
 -- Loop
 ------------------------------------------------------------------------------
 
-function Controller:_start(body)
+---@param extra {planning:boolean?, brief_from:integer?, plan_reviewed:boolean?}? task fields
+function Controller:_start(body, extra)
   self.gen = self.gen + 1
   local gen = self.gen
   self.pause_requested = false
@@ -835,6 +1054,9 @@ function Controller:_start(body)
     fail_streak = {},
     usage = Usage.new(),
   }
+  for k, v in pairs(extra or {}) do
+    self.task[k] = v
+  end
   self.task.advisor = Advisor.new(self)
   self.machine:to(S.THINKING)
   async.run(function()
@@ -990,6 +1212,13 @@ function Controller:_loop(gen)
     })
 
     if #tool_calls == 0 then
+      if self.task.planning then
+        self:_plan_ready(gen, res)
+        if self.gen ~= gen then
+          return
+        end
+        return self:_finish(gen, S.COMPLETED, { reason = 'plan_ready' })
+      end
       local advice = self:_advise_before_done(gen)
       if self.gen ~= gen then
         return
@@ -1097,6 +1326,22 @@ end
 
 --- Compact text of what the builder said so far in this task.
 function Controller:_task_brief()
+  local from = self.task and self.task.brief_from
+  if from then
+    -- a planned task: every prompt since the plan phase began (task,
+    -- revisions, approval) and everything the builder said (the plan included)
+    local asks, said = {}, {}
+    for i = from, #self.session.messages do
+      local m = self.session.messages[i]
+      local text = vim.trim(m.content or '')
+      if m.role == 'user' and not text:match('^Advisor review') then
+        table.insert(asks, text)
+      elseif m.role == 'assistant' and text ~= '' then
+        table.insert(said, text)
+      end
+    end
+    return util.clip(table.concat(asks, '\n---\n'), 3000), util.clip(table.concat(said, '\n---\n'), 4000)
+  end
   local first_user, said = nil, {}
   for i = #self.session.messages, 1, -1 do
     local m = self.session.messages[i]
@@ -1177,13 +1422,16 @@ end
 function Controller:_request(gen)
   local model = self:active_model()
   local mode = self.permissions:effective_mode()
-  if not self.task.system_prompt or self.task.system_mode ~= mode then
+  local planning = self.task.planning and true or false
+  local key = planning and 'plan' or mode
+  if not self.task.system_prompt or self.task.system_mode ~= key then
     self.task.system_prompt = prompt.build({
       root = self.ws.root,
       mode = mode,
+      plan = planning,
       instruction_files = self.config.instruction_files,
     })
-    self.task.system_mode = mode
+    self.task.system_mode = key
   end
   local system_prompt = self.task.system_prompt
   local roles = self:roles()
@@ -1280,6 +1528,7 @@ function Controller:_request(gen)
       elseif vim.trim(text) ~= '' then
         item = self:_add({ type = 'assistant', text = text, streaming = false, reasoning = res.reasoning })
       end
+      self.task.last_item = item -- becomes the plan item when a planning task ends
       if res.usage then
         res.usage.requested_model = model
         if item then
@@ -1656,6 +1905,8 @@ function Controller:_finish_now(state, info)
     duration_ms = util.now() - (t.begun or t.started),
     verification = self:_verification(),
     changes = changes,
+    -- a planning task that ended with a plan waiting for approval
+    plan = (t.planning and state == S.COMPLETED and self:plan_phase() == 'ready') or nil,
   }
   local u = t.usage
   if u and u.requests > 0 then

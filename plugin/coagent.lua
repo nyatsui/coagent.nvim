@@ -33,6 +33,19 @@ end, {
     return names
   end,
 })
+cmd('CoagentPlan', function(a)
+  agent().plan(a.args, { range = a.range > 0 and { a.line1, a.line2 } or nil, open = true })
+end, {
+  nargs = '*',
+  range = true,
+  desc = 'Plan a task first (read-only), or approve / discard the waiting plan',
+  complete = function(_, line)
+    if line:match('^%S+%s+%S+%s') then
+      return {}
+    end
+    return { 'approve', 'discard' }
+  end,
+})
 cmd('CoagentInline', function(a)
   agent().inline(a.args, { range = a.range > 0 and { a.line1, a.line2 } or nil })
 end, { nargs = '*', range = true, desc = 'Inline edit of the selected lines (one request, previewed in place)' })

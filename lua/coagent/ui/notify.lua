@@ -1,5 +1,5 @@
 --- Attention notifications: terminal bell and (opt-in) desktop notifications
---- when the agent needs the user (approval requested, task done/failed,
+--- when the agent needs the user (approval requested or a plan ready, task done/failed,
 --- paused, a per-task limit reached).
 ---
 --- Messages are generic status text only ("coagent: approval needed
@@ -122,9 +122,14 @@ function M.attach(c, get_cfg)
     c.events:on('approval_request', function(item)
       M.signal(get_cfg(), 'approval', item and item.tool)
     end),
+    c.events:on('plan_ready', function()
+      M.signal(get_cfg(), 'approval', 'plan')
+    end),
     c.events:on('done', function(s)
-      if s.followup then
-        return -- a queued message starts the next task right away
+      if s.followup or s.plan then
+        -- a queued message starts the next task right away; a plan waiting
+        -- for approval was signalled as 'approval'
+        return
       end
       if s.state == 'COMPLETED' then
         M.signal(get_cfg(), 'done')

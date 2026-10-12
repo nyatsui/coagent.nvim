@@ -47,6 +47,9 @@ I'll find the `add` implementation and its tests.
   command output panel, list of changes
 - **Terminal friendly** — works at 80×24, in tmux, with 256 colors / true color, Unicode / ASCII / Nerd Font icons,
   split or float layout, follows resizes
+- **Plan first** — `/plan <task>` investigates read-only and ends with a plan (steps, files, verification, risks) that you
+  approve, revise or discard before anything changes; approving continues the same conversation (cache friendly).
+  `plan.default = true` plans every task
 - **Prompt templates** — `/explain` `/codereview` `/fix` `/tests` `/commit` and more (like CopilotChat's predefined prompts),
   plus your own. Explanations and reviews run read-only for that task
 - **`#url` / `#clipboard`** — attach the text of a web page you typed, or the clipboard
@@ -84,7 +87,7 @@ I'll find the `add` implementation and its tests.
   'nyatsui/coagent.nvim',
   main = 'coagent',
   dependencies = { 'CopilotC-Nvim/CopilotChat.nvim' },
-  cmd = { 'Coagent', 'CoagentToggle', 'CoagentStop', 'CoagentSessions', 'CoagentMode', 'CoagentModel', 'CoagentChanges', 'CoagentRewind', 'CoagentFormat', 'CoagentInline', 'CoagentResume', 'CoagentUsage', 'CoagentProcesses' },
+  cmd = { 'Coagent', 'CoagentToggle', 'CoagentStop', 'CoagentSessions', 'CoagentMode', 'CoagentModel', 'CoagentChanges', 'CoagentRewind', 'CoagentFormat', 'CoagentInline', 'CoagentResume', 'CoagentUsage', 'CoagentProcesses', 'CoagentPlan' },
   keys = {
     { '<leader>aa', '<cmd>CoagentToggle<cr>', desc = 'Coagent' },
     { '<leader>aa', ':Coagent<cr>', mode = 'v', desc = 'Coagent (selection)' },
@@ -222,6 +225,43 @@ vim.keymap.set('x', '<leader>ai', ':CoagentInline<CR>', { desc = 'Coagent inline
   An empty code block deletes the selected lines
 - Not available while the agent is working (CopilotChat's client tracks one request at a time)
 
+### Plan first (/plan)
+
+Check the direction before anything changes (like Claude Code's plan mode):
+
+```
+/plan add a --dry-run flag to the export command
+:CoagentPlan add a --dry-run flag     " same; a range attaches the selection
+/plan                                 " the next message starts in the plan phase
+```
+
+1. **Plan phase**: the task is restricted to the read / search / LSP / `explore` tools, like the read-only templates. Edit
+   and command tools are not offered to the model (and are refused if it calls them anyway). The winbar shows `plan`
+2. The model investigates and ends with a concise plan: **steps, files to change, how it will verify, risks**. The final
+   answer becomes a **plan** item in the timeline, the winbar shows `plan ready`, and an `approval` notification is sent
+3. Then:
+
+   | Action | Keys / command | What happens |
+   |---|---|---|
+   | Approve and execute | `a` (panel) / `ga` (input) / `/plan approve` / `:CoagentApprove` | Appends "Plan approved. Execute it now." to the **same conversation** and runs it in the session's own mode (`supervised` still asks before every edit and command; a `readonly` session stays read-only) |
+   | Revise | `gi` (panel) or just **type feedback** and send it | Continues the plan phase with your feedback; a revised plan replaces the old one |
+   | Discard | `d` (panel) / `gx` (input) / `/plan discard` / `:CoagentDeny` | Leaves the plan phase; nothing was changed |
+
+- The approval never raises the permission mode: the plan phase only lowers it for its own tasks
+- Append-only: approving and revising add one user message each, so the history stays a cache-friendly prefix. The plan
+  phase offers fewer tools and a plan section in the system prompt, so the first request after approval re-sends the
+  history once without a cache hit; requests within the plan phase and after the approval hit the cache as usual
+- **Advisor** (`:CoagentRoles advisor` / `full`, `roles.advisor.on_plan`): its PLAN review checks the written plan before you
+  see it, and the advice is shown under the plan. The advice goes with the approval (the builder addresses it), and the
+  usual PLAN review before the first edit is skipped (no second request for the same plan)
+- `<C-c>` stops a planning task but keeps the plan phase (the next message continues planning); `/plan discard` leaves it.
+  `/resume` continues a planning task paused at a limit, still read-only
+- **Every task with a plan**: `plan = { default = true }`. `/go <task>` runs one task without the plan phase. Read-only
+  templates (`/explain`, `/commit`, ...) answer directly
+- Sessions save the plan phase (a plan waiting for approval is still waiting after `:CoagentSessions`). `/rewind` to a prompt
+  inside the plan phase restores it: rewinding to `/plan approve` brings the plan back to "waiting for approval" (and, with
+  code, restores the files the execution changed)
+
 ### Slash commands
 
 Input starting with `/` runs a command and is not sent to the model (no request is made). Typing `/` at the start of the
@@ -232,6 +272,8 @@ input history (`<C-p>`/`<C-n>`) like normal prompts.
 |---|---|
 | `/compact` | Compact now: elide all long tool outputs older than the last 8 messages (local, no request) |
 | `/compact summary` | Have the current model summarize older turns once and replace them with one message (**costs one request**) |
+| `/plan [task\|approve\|discard]` | Plan first: investigate read-only and write a plan to approve / revise / discard (see "Plan first") |
+| `/go <task>` | Run a task without the plan phase (with `plan.default = true`) |
 | `/new` / `/sessions` | New session / saved sessions |
 | `/model [role]` | Pick a model (`builder` / `explorer` / `advisor`) |
 | `/mode [mode]` / `/roles [preset]` | Switch approval mode / model roles |
@@ -305,6 +347,7 @@ notify = {
   as focused and nothing is sent; in that case use `only_when_unfocused = false`)
 - For the bell in tmux keep `monitor-bell on` (the default) and set `bell-action any` if needed
 - If a queued message starts the next task right after one completes, that completion is not notified
+- A plan ready for approval (`/plan`) is notified as `approval` (`coagent: approval needed (plan)`), not as `done`
 
 ### Rewind (/rewind)
 
@@ -447,12 +490,13 @@ slash command (`/review`, ...) is only available through `:CoagentPrompt`. `cont
 |---|---|
 | `:Coagent [task]` | Open the panel / send a task (a range attaches the selection). `:Coagent /explain` runs a template |
 | `:'<,'>CoagentInline [instruction]` | Rewrite the selected lines in place (one request, in-buffer diff preview; `ga` apply / `gr` discard / `gi` follow-up / `gd` diff) |
+| `:CoagentPlan [task\|approve\|discard]` | Plan a task first (same as `/plan`; a range attaches the selection) |
 | `:CoagentPrompt [name] [text]` | Run a prompt template (a range attaches the selection; no name = pick from a list) |
 | `:CoagentToggle` / `Open` / `Close` | Toggle / open / close the panel |
 | `:CoagentStop` | Stop now (abort the request, kill running process groups, drop pending approvals) |
 | `:CoagentPause` / `:CoagentResume` | Pause at the next step boundary / resume (also interrupted or restored sessions and limit pauses) |
-| `:CoagentApprove[!]` | Approve (`!` = always allow the same operation for this session) |
-| `:CoagentDeny[!] [reason]` | Deny (the reason is passed to the model; `!` = deny and stop) |
+| `:CoagentApprove[!]` | Approve (`!` = always allow the same operation for this session). Approves a plan waiting for approval |
+| `:CoagentDeny[!] [reason]` | Deny (the reason is passed to the model; `!` = deny and stop). Discards a plan waiting for approval |
 | `:CoagentReview` | Review the pending edit hunk by hunk |
 | `:CoagentChanges` / `:CoagentDiff` | List of changes / diff of the whole session |
 | `:CoagentRevert [path\|all]` | Revert the agent's changes |
@@ -474,15 +518,15 @@ Panel (buffer-local):
 
 | Key | Action | Key | Action |
 |---|---|---|---|
-| `a` | Approve | `<Tab>` / `za` | Expand / collapse tool details |
+| `a` | Approve (or the plan waiting for approval) | `<Tab>` / `za` | Expand / collapse tool details |
 | `A` | Always approve (not for dangerous operations) | `<CR>` | Open details (command output / diff) |
-| `d` | Deny (asks for a reason) | `gd` | Diff (side-by-side while approval is pending) |
+| `d` | Deny (asks for a reason); discards a waiting plan | `gd` | Diff (side-by-side while approval is pending) |
 | `D` | Deny and stop | `gf` | Jump to the change in the file |
 | `r` | Hunk review | `gc` | List of changed files |
 | `<C-c>` | Stop (returns the queue to the input first; after completion also stops background processes) | `]]` / `[[` | Next / previous item |
 | `p` / `R` | Pause / resume | `gs` / `gn` | Sessions / new |
 | `gm` | Switch mode | `i` | Go to the input |
-| `gu` | Usage and quota | | |
+| `gu` | Usage and quota | `gi` | Revise the plan waiting for approval (asks for feedback) |
 | `q` | Close | `g?` | Help |
 
 Input box: `<CR>` (Normal) / `<C-s>` (Insert) sends (queued while the agent works), `<C-c>` returns the queue / stops,
@@ -541,6 +585,7 @@ require('coagent').setup({
     rates = nil,        -- for the credit estimate (see "Usage and credits")
   },
   mode = 'supervised',
+  plan = { default = false }, -- true: every new task starts in the plan phase (/go skips it; see "Plan first")
   limits = { -- brakes for runaway loops (see "Per-task limits")
     max_steps = 40,               -- model requests per task (pauses when reached; /resume continues)
     max_tool_calls = 120,         -- same, for tool calls
@@ -656,7 +701,7 @@ By default (`single`) the one model you picked with `:CoagentModel` does everyth
 | Preset | Setup |
 |---|---|
 | `single` (default) | Only the selected model |
-| `advisor` | Builder + advisor (reviews before the plan is committed, when the same check fails twice, and right before finishing) |
+| `advisor` | Builder + advisor (reviews before the plan is committed — or the written plan in the plan phase —, when the same check fails twice, and right before finishing) |
 | `explorers` | Builder + explorers (`explore` tool; read-only subagents running in parallel) |
 | `full` | Builder + explorers + advisor |
 
