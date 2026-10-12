@@ -110,6 +110,7 @@
 | `/skills [enable\|disable <name>\|reload]` | Agent Skills の一覧 / このセッションだけ有効・無効（[Agent Skills](#agent-skills)） |
 | `/skill <name> [task]` | スキルを最初から読み込んでタスクを実行 |
 | `/exp [show\|diff\|note\|compare\|run ...]` | 実験ログ（[実験ログ](#実験ログexp)。ローカルのみ、リクエストなし） |
+| `/ledger [init\|refresh[!]\|note\|decision\|update\|review\|log\|open\|bundle\|info ...]` | プロジェクト台帳（[プロジェクト台帳](#プロジェクト台帳ledger)。リクエストを送るのは init / refresh / update だけ） |
 | `/new` `/sessions` `/model [role]` `/mode [mode]` `/roles [preset]` | 対応する `:Coagent*` コマンドと同じ |
 | `/usage [billing]` `/changes` `/diff` `/review` `/stop` `/processes` | 同上（`/usage billing` は GitHub の請求ページを開く） |
 | `/resume` | 一時停止したタスクを再開（`:CoagentResume` と同じ。上限による一時停止ならカウンタをリセット） |
@@ -184,6 +185,38 @@ ML の学習・評価の実行とメトリクスをプロジェクトごとに�
 - `/exp run <command>` — バックグラウンドで実行して記録（承認は通常どおり）
 - エージェントは読み取り専用の `experiments` ツールで表・詳細・比較を読める
 - `:CoagentExp …` も同じ
+
+### プロジェクト台帳（`/ledger`）
+
+進行中の作業の全体像（概要・目標・決定・サブタスクの履歴・現状）を、プロジェクトごとの Markdown ファイルに
+coagent がセッションをまたいで保ちます。長いチャットで前のことを忘れないため、また別のチャットへ仕事を任せるときに
+全体像ごと渡すための記録です。
+
+- ファイル: `overview.md`（目的・ディレクトリ構成・各ファイルの役割・データの流れ・設定とハイパーパラメータ・実行方法・
+  出力と指標）、`goals.md`（目標・目標指標・制約。あなたが書く）、`status.md`（現状・最良結果・未解決の課題・次の一手。
+  更新のたびに書き直し）、`decisions.md` と `subtasks.md`（追記のみ）
+- 保存先: `stdpath('state')/coagent/ledger/<project>-<hash>/`（0700 / 0600、リポジトリ外）。
+  `ledger.dir_in_repo = '.coagent/ledger'` でリポジトリ内（`.gitignore` に `.coagent/` を追加するか、共有するならコミット）
+- まず `/ledger init` — ディレクトリ構成と中核ファイル（README・requirements・`train*.py`・model / dataset / loss /
+  config 系・設定ファイル）を coagent が読み、**1 リクエスト**（ツールなし）で `overview.md` を作ります。`.env` などの保護
+  ファイルとバイナリは送りません
+- 概要に載ったファイルが変わると、次のタスク開始時に一度だけ「古くなった」と警告します。`/ledger refresh`（1 リクエスト。
+  変化がなければ送らない）、`/ledger refresh!` は強制
+- タスクの完了・取り込んだ外部の結果・バックグラウンド実験の終了のたびに、**小さな 1 リクエスト**で `subtasks.md` と
+  （本当に決めたことがあれば）`decisions.md` に追記し、`status.md` を書き直します（`ledger.auto_update = true`。台帳を
+  作ってからだけ）。`false` なら自動では送らず、`/ledger note <text>`・`/ledger decision <題> [-- 理由 [-- 退けた案]]`・
+  ファイルの直接編集・`/ledger update`（直前のタスクを 1 リクエストで記録）で更新します
+- `/ledger` — `goals.md` と `status.md` を右の分割で開いて編集。`/ledger open decisions` などで他のファイル
+- **あなたの編集が優先**: 編集した節は上書きしません。更新は保留され、`/ledger review` で差分（あなたの文 → 提案）を見て
+  「適用」「自分の版を残す」「後で」を選びます。未保存のバッファがあるファイルにも書きません
+- `/ledger log` — 直近 10 件（`recent`）は全文、それより古いものは 1 件 1 行。ファイル自体は全履歴を残します
+- `/ledger bundle` — 台帳全体を Markdown で `+` レジスタへ（別のチャットに貼る）。Lua からは
+  `require('coagent').ledger.bundle(opts)`
+- ローカルのタスクには、目標・状況・直近の決定の要約を最初のメッセージに `<project_ledger>` として付けます（優先度の低い
+  メモの扱い。変化したときだけ一度。システムプロンプトは変えないのでキャッシュが効きます）。パネルでは
+  `(+ project ledger digest)` と表示。`ledger.inject = false` で無効
+- 台帳はモデルが書いた文を含む「データ」です。権限・モード・モデルは変えられません
+- `:CoagentLedger …` も同じ
 
 ### インライン編集（`:CoagentInline`）
 

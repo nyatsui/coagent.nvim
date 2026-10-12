@@ -331,7 +331,8 @@ function Controller:submit(text, opts)
     self:_set_plan({ phase = 'planning', start = plan.start or (#self.session.messages + 1) })
     prefix = Controller.PLAN_PREFIX
   end
-  self:_add({ type = 'user', text = text })
+  local user_item = self:_add({ type = 'user', text = text })
+  self:_ledger_stale_notice()
   if skill then
     self:_add({ type = 'tool', tool = 'use_skill', kind = 'read', title = 'skill: ' .. skill.name, status = 'done', summary = 'used for this task (/skill)', output = skill_text })
   end
@@ -369,6 +370,14 @@ function Controller:submit(text, opts)
     if #atts > 0 then
       content = content .. '\n\n' .. table.concat(atts, '\n\n')
       self.session.items[#self.session.items].attachments = #atts
+    end
+    -- the project ledger digest: once per change, in the task's first
+    -- message (append-only; the system prompt and earlier turns stay cached)
+    local digest, rev = self:_ledger_digest()
+    if digest then
+      content = content .. '\n\n' .. digest
+      user_item.ledger = rev
+      self:_update(user_item)
     end
     table.insert(self.session.messages, { role = 'user', content = content })
     self:_loop(gen)
@@ -1085,6 +1094,7 @@ function Controller:_start(body, extra)
     abort = nil,
     fail_streak = {},
     usage = Usage.new(),
+    item_start = #self.session.items, -- the task's user item (ledger: experiments of this task)
   }
   for k, v in pairs(extra or {}) do
     self.task[k] = v
@@ -1498,6 +1508,10 @@ function Controller:_request(gen)
     watermark = self.session.compact_watermark,
   })
   self.session.compact_watermark = cinfo.watermark
+  if cinfo.dropped > 0 then
+    -- an injected ledger digest may be among the dropped turns
+    self.ledger_dropped = true
+  end
   if cinfo.dropped > 0 or cinfo.elided > 0 then
     self.events:emit('context_compacted', cinfo)
   end
@@ -1693,6 +1707,9 @@ function Controller:_tool_ctx(item, gen)
     on_experiment = function(e)
       local Exp = require('coagent.agent.experiments')
       self:notice('info', string.format('Experiment #%d finished (%s): %s', e.id, Exp.status_text(e), Exp.metrics_summary(self.experiments, e)))
+      if self.ledger and self.ledger:exists() then
+        self.ledger:record(require('coagent.agent.ledger').experiment_event(self.experiments, e))
+      end
     end,
   }
 end
@@ -2014,6 +2031,7 @@ function Controller:_finish_now(state, info)
     self.events:emit('state', { state = state, info = info })
   end
   self.events:emit('done', summary)
+  self:_ledger_after_task(state, summary, t)
   self:save()
   if self.store and self.config.session.persist then
     pcall(self.store.prune, self.store, self.session.root, self.config.session.max_saved_sessions or 50)
@@ -2022,6 +2040,113 @@ function Controller:_finish_now(state, info)
     vim.schedule(function()
       self:_drain_queue()
     end)
+  end
+end
+
+------------------------------------------------------------------------------
+-- Project ledger
+------------------------------------------------------------------------------
+
+--- Digest block to append to a new task's first message, or nil when the
+--- model already sees the same digest (same rev, still in the context).
+---@return string? block, string? rev
+function Controller:_ledger_digest()
+  local l = self.ledger
+  if not (l and l:enabled() and l.config.inject ~= false) then
+    return nil
+  end
+  local ok, block, rev = pcall(l.digest, l)
+  if not ok or not block then
+    return nil
+  end
+  local Ledger = require('coagent.agent.ledger')
+  if not self.ledger_dropped and Ledger.injected_rev(self.session.messages, self.session.compact_summary) == rev then
+    return nil
+  end
+  self.ledger_dropped = false
+  return block, rev
+end
+
+--- Warn once per distinct set of changes that the overview is stale.
+function Controller:_ledger_stale_notice()
+  local l = self.ledger
+  if not (l and l:enabled() and l:exists()) then
+    return
+  end
+  local ok, st = pcall(l.stale, l)
+  if not ok or not st then
+    return
+  end
+  local files = vim.list_extend(vim.deepcopy(st.changed), st.missing)
+  local key = table.concat(files, '\n')
+  if self.ledger_stale_key == key then
+    return
+  end
+  self.ledger_stale_key = key
+  self:notice('warn', string.format('Ledger overview is stale: %d file%s it lists changed (%s). /ledger refresh regenerates it (1 request).', #files, #files == 1 and '' or 's', table.concat(vim.list_slice(files, 1, 4), ', ') .. (#files > 4 and ', ...' or '')))
+end
+
+--- Ledger event of the task that just ended (nil: nothing worth recording).
+---@return Coagent.LedgerEvent?
+function Controller:_ledger_task_event(state, summary, t)
+  if not (state == S.COMPLETED or state == S.FAILED) or summary.plan or (t.steps or 0) + (t.prior_steps or 0) == 0 then
+    return nil
+  end
+  local request = self:_task_brief()
+  local final
+  for i = #self.session.messages, 1, -1 do
+    local m = self.session.messages[i]
+    if m.role == 'assistant' and vim.trim(m.content or '') ~= '' then
+      final = vim.trim(m.content)
+      break
+    elseif m.role == 'user' and not (m.content or ''):match('^Advisor review') then
+      break -- the task never replied in text
+    end
+  end
+  local files = {}
+  for _, c in ipairs(summary.changes or {}) do
+    table.insert(files, c.rel .. (c.status ~= 'modified' and (' (' .. c.status .. ')') or ''))
+  end
+  local v = summary.verification or {}
+  local outcome = (state == S.COMPLETED and 'completed' or 'failed')
+    .. (summary.message and state == S.FAILED and (': ' .. util.clip(summary.message, 120)) or '')
+    .. ', ' .. tostring(v.status or 'unverified')
+    .. (v.command and (' (`' .. util.clip(v.command, 80) .. '`)') or '')
+  local details = {}
+  if self.experiments then
+    local Exp = require('coagent.agent.experiments')
+    for i = (t.item_start or 1), #self.session.items do
+      local item = self.session.items[i]
+      local id = item.tool == 'run_command' and item.meta and item.meta.experiment
+      local e = id and self.experiments:get(id)
+      if e then
+        table.insert(details, Exp.brief(self.experiments, e) .. ' ' .. Exp.short_command(e.command or '', 80))
+      end
+    end
+  end
+  return {
+    kind = 'local',
+    request = util.redact(require('coagent.agent.ledger').strip_digest(request or '')),
+    result = final and util.redact(final) or nil,
+    files = files,
+    outcome = outcome,
+    details = #details > 0 and ('Experiments recorded during the task:\n' .. table.concat(details, '\n')) or nil,
+  }
+end
+
+--- After a task: ONE small request records it in the ledger (auto_update).
+function Controller:_ledger_after_task(state, summary, t)
+  local l = self.ledger
+  if not (l and l:enabled() and l:exists()) then
+    return
+  end
+  local ok, ev = pcall(self._ledger_task_event, self, state, summary, t)
+  if not ok or not ev then
+    return
+  end
+  self.last_ledger_event = ev
+  if l.config.auto_update ~= false then
+    l:record(ev)
   end
 end
 

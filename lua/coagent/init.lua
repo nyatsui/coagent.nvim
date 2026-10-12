@@ -908,6 +908,123 @@ function M.exp(arg)
   return false
 end
 
+------------------------------------------------------------------------------
+-- Project ledger (/ledger)
+------------------------------------------------------------------------------
+
+M.LEDGER_USAGE = '/ledger [init | refresh[!] | note <text> | decision <title> [-- reason [-- alternatives]] | update | review | log [decisions|subtasks] | open <file> | bundle | info]'
+M.LEDGER_ARGS = { 'init', 'refresh', 'note', 'decision', 'update', 'review', 'log', 'open', 'bundle', 'info' }
+
+--- `/ledger ...` (see M.LEDGER_USAGE). Only init, refresh and update send a
+--- request (one each); everything else is local.
+---@param arg string?
+---@return boolean? ok, any result
+local function ledger_cmd(arg)
+  local c = M.controller()
+  local l = c.ledger
+  if not l or not l:enabled() then
+    c:notice('warn', 'The project ledger is disabled (ledger.enabled = false).')
+    return false
+  end
+  local ui = require('coagent.ui.ledger')
+  local Ledger = require('coagent.agent.ledger')
+  local function notice(level, text)
+    c:notice(level, text)
+  end
+  arg = vim.trim(arg or '')
+  local verb, rest = arg:match('^(%S+)%s*(.-)$')
+  if arg == '' then
+    local bufs = ui.open(l)
+    notice('info', table.concat(l:info_lines(), '\n') .. '\nOther files: /ledger open overview|decisions|subtasks; /ledger log shows the recent entries.')
+    return true, bufs
+  elseif verb == 'open' then
+    local name = rest ~= '' and rest:gsub('%.md$', '') or 'status'
+    if not vim.tbl_contains(Ledger.FILES, name) then
+      notice('error', '/ledger open: unknown file "' .. rest .. '" (' .. table.concat(Ledger.FILES, ', ') .. ')')
+      return false
+    end
+    return true, ui.open(l, name)
+  elseif verb == 'init' then
+    local ok, err = l:init()
+    if not ok then
+      notice('error', '/ledger init: ' .. tostring(err))
+    end
+    return ok
+  elseif verb == 'refresh' or verb == 'refresh!' then
+    local ok, err = l:refresh({ force = verb == 'refresh!' or rest == 'force' or rest == '!' })
+    if not ok then
+      notice('warn', '/ledger refresh: ' .. tostring(err))
+    end
+    return ok
+  elseif verb == 'note' or verb == 'decision' then
+    if not l:exists() then
+      l:ensure()
+    end
+    local id, err = l[verb](l, rest)
+    if not id then
+      notice('error', '/ledger ' .. verb .. ': ' .. tostring(err) .. (verb == 'note' and ' (/ledger note <text>)' or ' (/ledger decision <title> [-- reason [-- alternatives]])'))
+      return false
+    end
+    notice('info', string.format('Ledger: %s-%d added to %s.md.', verb == 'note' and 'S' or 'D', id, verb == 'note' and 'subtasks' or 'decisions'))
+    return true, id
+  elseif verb == 'update' then
+    local ev = c.last_ledger_event
+    if not ev then
+      notice('warn', '/ledger update: no finished task to record in this session yet.')
+      return false
+    end
+    local ok, err = l:record(ev, { manual = true })
+    if not ok then
+      notice('error', '/ledger update: ' .. tostring(err))
+    end
+    return ok
+  elseif verb == 'review' then
+    return ui.review(l, notice)
+  elseif verb == 'log' then
+    if rest ~= '' and rest ~= 'decisions' and rest ~= 'subtasks' then
+      notice('error', '/ledger log [decisions|subtasks]')
+      return false
+    end
+    return true, ui.log(l, rest ~= '' and rest or nil)
+  elseif verb == 'bundle' then
+    local text = l:bundle()
+    local clip = to_clipboard(text)
+    notice('info', string.format('Ledger bundle (%d bytes of Markdown) copied to the %s register.', #text, clip and '+' or 'unnamed'))
+    return true, text
+  elseif verb == 'info' then
+    notice('info', table.concat(l:info_lines(), '\n'))
+    return true
+  end
+  notice('error', '/ledger: unknown argument "' .. arg .. '". Usage: ' .. M.LEDGER_USAGE)
+  return false
+end
+
+--- `require('coagent').ledger(arg)` runs `/ledger arg`; the fields are the
+--- API for other features (delegating subtasks to other chats):
+---   ledger.bundle(opts)  the full ledger as Markdown (Coagent.Ledger:bundle)
+---   ledger.digest()      the digest block local tasks get
+---   ledger.record(ev)    record an event (e.g. an imported external result:
+---                        { kind = 'delegated', request, result, files, outcome })
+---   ledger.get()         the Coagent.Ledger of the current project
+M.ledger = setmetatable({
+  get = function()
+    return M.controller().ledger
+  end,
+  bundle = function(opts)
+    return M.controller().ledger:bundle(opts)
+  end,
+  digest = function()
+    return M.controller().ledger:digest()
+  end,
+  record = function(ev, cb)
+    return M.controller().ledger:record(ev, nil, cb)
+  end,
+}, {
+  __call = function(_, arg)
+    return ledger_cmd(arg)
+  end,
+})
+
 function M.new_session()
   local c = state.controller
   if c and c:busy() then
@@ -1537,6 +1654,7 @@ function M._reset()
     state.unnotify()
     state.unnotify = nil
   end
+  require('coagent.agent.ledger')._reset()
   state.view, state.controller, state.backend, state.store = nil, nil, nil, nil
   state.selection, state.extra_tools = nil, {}
 end

@@ -52,6 +52,10 @@ I'll find the `add` implementation and its tests.
   ハッシュ・実行時間・終了コード・出力から読み取ったメトリクス（`val_acc=0.91`、JSON 行、メトリクスの CSV/JSON
   ファイル）と一緒にローカルへ記録。`/exp` で前回・ベストとの差分つきの表、`/exp compare` で Web チャットに貼る
   Markdown の比較をコピー。エージェントは `experiments` ツールで読める。リクエストは使わない
+- **プロジェクト台帳（ledger）** — プロジェクトごとに 1 つの Markdown の記録（概要・目標・状況・決定・サブタスク）を
+  coagent がセッションをまたいで保ちます。`/ledger init` で概要を 1 リクエストで作成し、タスク完了・外部結果の取り込み・
+  実験のたびに小さな 1 リクエストで更新。ローカルのタスクには要約（digest）を渡し、`ledger.bundle()` で全体像を他の
+  チャットへ渡せます。あなたが編集した部分は差分を見せずに上書きしません
 - **`#url` / `#clipboard`** — 入力した URL のページ本文やクリップボードを添付
 - **インライン編集** — `:'<,'>CoagentInline 指示` で選択範囲だけを 1 リクエスト（ツールなし）で書き換え、
   バッファ内に diff プレビュー（`ga` 適用 / `gr` 破棄 / `gi` 追加指示）。適用した変更は巻き戻し可能
@@ -277,6 +281,7 @@ vim.keymap.set('x', '<leader>ai', ':CoagentInline<CR>', { desc = 'Coagent inline
 | `/skills [enable\|disable <name>\|reload]` | Agent Skills の一覧（パス、user / repo）。このセッションだけ有効 / 無効を切替（下記「Agent Skills」） |
 | `/skill <name> [task]` | スキルを最初から読み込んだ状態でタスクを実行 |
 | `/exp [show\|diff\|note\|compare\|run ...]` | 実験ログ: 表・詳細・差分・メモ・Markdown の比較・実行の記録（下記「実験ログ」。ローカルのみ、リクエストなし） |
+| `/ledger [init\|refresh[!]\|note\|decision\|update\|review\|log\|open\|bundle\|info ...]` | プロジェクト台帳: ファイルを開く・概要の生成と更新・メモと決定の追記・編集した節への更新の確認（下記「プロジェクト台帳」。リクエストを送るのは init / refresh / update だけ） |
 | `/new` / `/sessions` | 新規セッション / 保存済みセッション一覧 |
 | `/model [role]` | モデル選択（`builder` / `explorer` / `advisor`） |
 | `/mode [mode]` / `/roles [preset]` | 承認モード / 役割分担の切替 |
@@ -607,6 +612,75 @@ val_acc を上げて」のようなタスクを、何も再実行せずに始め
 → メモを追加 → `/exp compare` → Microsoft 365 Copilot などのチャットに貼って次の変更を検討 → 決めた具体的な変更を
 coagent に指示。
 
+### プロジェクト台帳（/ledger）
+
+長いチャットは遅くなり、前のことを忘れます。台帳（ledger）は、プロジェクトで進行中の作業についての唯一の情報源です。
+コードが何をしているか、何を目指しているか、何をなぜ決めたか、各サブタスクで何をしたか、いまどこにいるか — を
+coagent がセッションをまたいで保つので、新しいタスクも（サブタスクを任せる別のチャットも）全体像から始められます。
+
+**ファイル**。安定した `## ` 見出しを持つ普通の Markdown です。あなたが編集し、coagent が更新します。
+
+| ファイル | 内容 | 書くのは |
+|---|---|---|
+| `overview.md` | 目的、ディレクトリ構成、各ファイルの役割、データの流れ（dataset → dataloader → model → loss / optimizer → 学習ループ → 評価 → 出力）、設定とハイパーパラメータ、実行方法、出力と指標 | `/ledger init`、`/ledger refresh` |
+| `goals.md` | 現在の目標、目標指標、制約 | あなた（書き換えません） |
+| `status.md` | 現状、これまでの最良結果、未解決の課題、次の一手 | 更新のたびに書き直し |
+| `decisions.md` | 追記のみ: `### D-<n> · <日付> · <題>` と決定内容・理由・退けた案・出どころ | 更新、`/ledger decision` |
+| `subtasks.md` | 追記のみ: `### S-<n> · <日付> · <種類> · <題>`（種類は `local` / `delegated` / `experiment` / `note`）と依頼・結果・変更ファイル・結末 | 更新、`/ledger note` |
+
+**保存先**。`stdpath('state')/coagent/ledger/<project>-<hash>/` — リポジトリの外、ディレクトリ 0700、ファイル 0600
+（書き込みのたびに戻します）。`ledger.dir_in_repo = '.coagent/ledger'` にするとリポジトリ内に置きます。その場合は
+`.gitignore` に `.coagent/` を加えるか、チームで共有するならコミットしてください（モデルが書いた文が git に入ります）。
+
+**リクエスト**（それ以外はすべてローカル）:
+
+| いつ | リクエスト | 内容 |
+|---|---|---|
+| `/ledger init` | 1 回、ツールなし | ディレクトリ構成と中核ファイル（README、pyproject / requirements、`train*.py`、model / dataset / loss / config 系、設定ファイルなど）を coagent 自身が読み（品質優先: 合計 `init_max_bytes` = 160 KB まで、1 ファイル `max_file_bytes` まで。`.env` などの保護ファイルとバイナリは送らず、秘密情報はマスク）、モデルが `overview.md` を書きます。概要がバッククォートで挙げたファイルは指紋（sha256 + mtime）を記録します |
+| `/ledger refresh` | 1 回、古くなったときだけ | 概要に載っているファイルが変わった・消えたとき（次のタスク開始時に一度だけ `Ledger overview is stale: 2 files it lists changed (...)` と警告）。現在の概要と変わったファイルを渡します。`/ledger refresh!` は変化がなくても作り直します |
+| タスク完了・外部結果の取り込み・バックグラウンド実験の終了後 | 小さな 1 回、ツールなし | `ledger.auto_update = true` のとき。サブタスクの記録、本当に決めたことがあれば決定、`status.md` の書き直し。変更ファイルと結末はモデルではなく coagent が書きます。タスク中の実験はそのタスクの記録に含めます。リクエストが失敗したら簡易な記録だけを書き、`status.md` は変えません |
+
+自動更新は台帳ができてから（`/ledger` か `/ledger init` で作成）だけ行います。`auto_update = false` なら自動では何も
+送りません。`/ledger note`・`/ledger decision`・ファイルの直接編集、または `/ledger update`（直前に終わったタスクを
+1 リクエストで記録）を使います。
+
+**コマンド**。
+
+| コマンド | 内容 |
+|---|---|
+| `/ledger` | `goals.md` と `status.md` を右の分割で開いて編集（台帳がなければ作成）し、状態を表示 |
+| `/ledger open <file>` | `overview` / `goals` / `status` / `decisions` / `subtasks` をその分割で開く |
+| `/ledger init` / `refresh[!]` | 概要の生成 / 更新（上記） |
+| `/ledger note <text>` | `subtasks.md` に `note` を追記（リクエストなし） |
+| `/ledger decision <題> [-- 理由 [-- 退けた案]]` | 決定を追記（リクエストなし） |
+| `/ledger update` | 直前に終わったタスクをいま記録（1 リクエスト。`auto_update = false` 向け） |
+| `/ledger review` | あなたが編集した節への保留中の更新: 差分（あなたの文 → 提案）を見せ、適用 / 自分の版を残す / 後で、を選ぶ |
+| `/ledger log [decisions\|subtasks]` | 上限つきの表示: 直近 `recent`（10）件は全文、それより古いものは 1 件 1 行 |
+| `/ledger bundle` | 台帳全体を Markdown で `+` レジスタへ（別のチャットに貼る用） |
+| `/ledger info` | 場所、概要の生成日時と鮮度、件数、保留中の更新 |
+
+**あなたの編集が優先**。coagent は書いた節ごとにハッシュを覚えています。文面が違う節はあなたが編集したものとみなし、
+上書きしません。更新は `/ledger review` で差分を見て選ぶまで保留されます。バッファで未保存の変更があるファイルにも
+書きません（追記は保存後に行います）。開いていて未変更のバッファは書き込み後に読み直します。
+
+**上限つき**。`status.md` は追記せず書き直します。`decisions.md` と `subtasks.md` は全履歴を残しますが、表示・バンドル・
+更新リクエストには直近 N 件と、古いものの 1 行要約だけを含めます。
+
+**ローカルのタスクには要約（digest）**。タスク開始時に、目標・状況・直近 `digest_decisions`（5）件の決定（各 1 行）を
+まとめた要約（最大 `digest_max_bytes`）を、そのタスクの最初のメッセージの末尾に `<project_ledger rev="...">` として、
+優先度の低いプロジェクトメモの扱いで付けます。プロンプトキャッシュに優しい作り: 変化したときだけ一度入れ（台帳が
+変わらなければ再送しません。システムプロンプトは変えません）、途中で台帳が変わってもタスク中のメッセージはどのステップでも
+同じバイト列のままです。`ledger.inject = false` で無効。
+
+**委任のために**。`require('coagent').ledger.bundle(opts)` は台帳全体を Markdown で返します（`opts.recent`、全件なら
+`opts.full = true`、`opts.include = { 'overview', 'status', ... }`、`opts.experiments = false`、`opts.max_bytes`）。
+`ledger.record({ kind = 'delegated', request, result, files, outcome })` で取り込んだ外部の結果を記録し、`ledger.digest()`
+は要約ブロックを返します。実験ログに実行があれば、その場所と要約（最良値と直近の実行）も含めます。
+
+**信頼の扱い**。台帳にはモデルが書いた文やリポジトリ由来の文が入ります。あくまで文脈のデータで、権限・モード・モデルは
+変えられません。モデルの文は節や記録を追加できず（`#` で始まる行は太字にします）、秘密情報はマスクし、要約は自分の
+ブロックを途中で閉じられません。
+
 ### エージェントが使うツール
 
 | 種類 | ツール | 承認（supervised） |
@@ -634,6 +708,7 @@ coagent に指示。
 | `:CoagentPlan [task\|approve\|discard]` | タスクを計画から始める（`/plan` と同じ。範囲指定で選択範囲を添付） |
 | `:CoagentSkills [enable\|disable <name>\|reload]` | Agent Skills の一覧 / このセッションだけ有効・無効を切替（`/skills` と同じ） |
 | `:CoagentExp [show\|diff\|note\|compare\|run ...]` | 実験ログ（`/exp` と同じ） |
+| `:CoagentLedger [init\|refresh[!]\|note\|decision\|update\|review\|log\|open\|bundle\|info ...]` | プロジェクト台帳（`/ledger` と同じ） |
 | `:CoagentPrompt [name] [text]` | プロンプトテンプレートを実行（範囲指定で選択範囲。名前なしなら一覧から選択） |
 | `:CoagentToggle` / `Open` / `Close` | パネル開閉 |
 | `:CoagentStop` | 即時停止（リクエスト中断・実行中プロセスグループ kill・承認待ち破棄） |
@@ -761,6 +836,15 @@ require('coagent').setup({
     patterns = { { pattern = 'Top%-1 acc ([%d%.]+)', key = 'top1' } }, -- 追加のメトリクス
     log_files = { 'lightning_logs/*/metrics.csv' }, -- 実行が書き出すメトリクスファイル
     max_diff_bytes = 100 * 1024,
+  },
+  ledger = {
+    enabled = true,
+    dir_in_repo = nil,  -- 例 '.coagent/ledger'（既定: stdpath('state')/coagent/ledger/<project>）
+    auto_update = true, -- タスク・取り込んだ結果・実験のたびに小さな 1 リクエスト
+    inject = true,      -- ローカルのタスクに要約（目標・状況・直近の決定）を付ける
+    model = nil, update_model = nil, -- nil = 選択中のモデル
+    recent = 10,        -- 表示とバンドルで全文を含める件数
+    init_max_bytes = 160 * 1024, max_file_bytes = 24 * 1024,
   },
   references = { url = true, url_max_bytes = 32 * 1024, clipboard_max_bytes = 32 * 1024 },
   inline = { context_lines = 40, keymaps = { accept = 'ga', reject = 'gr', retry = 'gi', diff = 'gd' } },
@@ -920,6 +1004,7 @@ opts = {
   `session.persist = false` で保存しない
 - 認証トークンは保存しません（認証は CopilotChat が管理）
 - 実験ログも同じ場所の `stdpath('state')/coagent/experiments/<project>-<hash>.jsonl` に保存します（0600。「実験ログ」参照）
+- プロジェクト台帳も同じ場所の `stdpath('state')/coagent/ledger/<project>-<hash>/` です（0700 / 0600。「プロジェクト台帳」参照）
 
 ## 制限事項
 

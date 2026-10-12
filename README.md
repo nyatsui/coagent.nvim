@@ -59,6 +59,10 @@ I'll find the `add` implementation and its tests.
   command, git HEAD + diff hash, duration, exit code and metrics parsed from the output (`val_acc=0.91`, JSON lines,
   metrics CSV/JSON files). `/exp` shows a table with deltas vs the previous and the best run, `/exp compare` copies a
   Markdown comparison for a web chat, and the agent reads the log with the `experiments` tool. No requests are made
+- **Project ledger** — one Markdown record per project (overview, goals, status, decisions, subtasks) that coagent keeps
+  across sessions: `/ledger init` writes the overview with one request, each finished task / imported result /
+  experiment updates it with one small request, local tasks get a compact digest, and `ledger.bundle()` hands the whole
+  picture to another chat. Your edits are never overwritten without a diff
 - **`#url` / `#clipboard`** — attach the text of a web page you typed, or the clipboard
 - **Inline edit** — `:'<,'>CoagentInline <instruction>` rewrites just the selection with one request (no tools) and previews
   the diff in the buffer (`ga` apply / `gr` discard / `gi` follow-up). Applied edits can be rewound
@@ -287,6 +291,7 @@ input history (`<C-p>`/`<C-n>`) like normal prompts.
 | `/skills [enable\|disable <name>\|reload]` | List Agent Skills (source path, user / repo); enable or disable one for this session (see "Agent Skills") |
 | `/skill <name> [task]` | Run a task with a skill loaded up front |
 | `/exp [show\|diff\|note\|compare\|run ...]` | Experiment log: table, details, diff, notes, Markdown comparison, record a run (see "Experiment log"; local, no request) |
+| `/ledger [init\|refresh[!]\|note\|decision\|update\|review\|log\|open\|bundle\|info ...]` | Project ledger: open the files, generate / refresh the overview, notes and decisions, review updates of sections you edited (see "Project ledger"; only init / refresh / update send a request) |
 | `/new` / `/sessions` | New session / saved sessions |
 | `/model [role]` | Pick a model (`builder` / `explorer` / `advisor`) |
 | `/mode [mode]` / `/roles [preset]` | Switch approval mode / model roles |
@@ -622,6 +627,77 @@ full diff), a comparison (`"compare"` or `"3 7"`) or runs whose command / notes 
 note, `/exp compare`, paste into Microsoft 365 Copilot / any chat to reason about the next change, then give coagent the
 concrete change to make.
 
+### Project ledger (/ledger)
+
+Long chats get slow and forget. The ledger is the single source of truth about the ongoing work of a project — what the
+code does, what you are trying to achieve, what was decided and why, what each subtask did, where things stand — kept by
+coagent across sessions, so every new task (and every chat you delegate a subtask to) starts from the whole picture.
+
+**Files.** Plain Markdown with stable `## ` headers: you edit them, coagent updates them.
+
+| File | Content | Written by |
+|---|---|---|
+| `overview.md` | Purpose; directory tree; each file's role; data flow (dataset → dataloader → model → loss / optimizer → train loop → eval → outputs); configs and hyperparameters; how to run; outputs and metrics | `/ledger init`, `/ledger refresh` |
+| `goals.md` | Objective, target metric, constraints | you (never rewritten) |
+| `status.md` | Current state, best results, open issues, next steps | rewritten after each update |
+| `decisions.md` | Append-only: `### D-<n> · <date> · <title>` with decision, reason, rejected alternatives, source | updates, `/ledger decision` |
+| `subtasks.md` | Append-only: `### S-<n> · <date> · <kind> · <title>` (kind `local` / `delegated` / `experiment` / `note`) with request, result, files changed, outcome | updates, `/ledger note` |
+
+**Storage.** `stdpath('state')/coagent/ledger/<project>-<hash>/` — outside the repository, directory 0700, files 0600
+(restored on every write). With `ledger.dir_in_repo = '.coagent/ledger'` it lives in the repository instead: add
+`.coagent/` to `.gitignore`, or commit it to share the ledger with your team (it then holds model-written text in git).
+
+**Requests** (everything else is local):
+
+| When | Requests | What happens |
+|---|---|---|
+| `/ledger init` | 1, no tools | coagent itself reads the directory tree and the core files (README, pyproject / requirements, `train*.py`, model / dataset / loss / config files, configs, ...; quality first: up to `init_max_bytes` = 160 KB, `max_file_bytes` per file; protected files such as `.env` and binaries are skipped, secrets masked) and the model writes `overview.md`. The files the overview names in backticks are fingerprinted (sha256 + mtime) |
+| `/ledger refresh` | 1, only when stale | when a file listed in the overview changed or disappeared (coagent warns once at the next task start: `Ledger overview is stale: 2 files it lists changed (...)`); the model gets the current overview and the changed files. `/ledger refresh!` regenerates anyway |
+| after a task / imported result / background experiment | 1 small, no tools | `ledger.auto_update = true`: a subtask entry, any real decisions, and the rewritten `status.md`. Files changed and the outcome come from coagent, not the model. Experiments run during a task go into that task's entry. If the request fails, a plain entry is written and `status.md` stays |
+
+Automatic updates only happen once the ledger exists (`/ledger` or `/ledger init` created it). With `auto_update = false`
+nothing is sent automatically; use `/ledger note`, `/ledger decision`, edit the files, or `/ledger update` (records the last
+finished task with one request).
+
+**Commands.**
+
+| Command | What it does |
+|---|---|
+| `/ledger` | Open `goals.md` and `status.md` in a split on the right for editing (creates the ledger) and show its state |
+| `/ledger open <file>` | Open `overview` / `goals` / `status` / `decisions` / `subtasks` in that split |
+| `/ledger init` / `refresh[!]` | Generate / refresh the overview (above) |
+| `/ledger note <text>` | Add a `note` entry to `subtasks.md` (no request) |
+| `/ledger decision <title> [-- reason [-- rejected alternatives]]` | Add a decision (no request) |
+| `/ledger update` | Record the last finished task now (one request; for `auto_update = false`) |
+| `/ledger review` | Pending updates of sections you edited: the diff (your text → the proposal), then apply / keep yours / later |
+| `/ledger log [decisions\|subtasks]` | Bounded view: the recent `recent` (10) entries in full plus one line per older entry |
+| `/ledger bundle` | Copy the whole ledger as Markdown to the `+` register (to paste into another chat) |
+| `/ledger info` | Location, overview age and staleness, counts, pending updates |
+
+**Your edits win.** coagent remembers a hash of every section it wrote. A section whose text differs was edited by you
+and is never overwritten: the update waits until `/ledger review` shows the diff and you choose. A file with unsaved
+changes in a buffer is not written either (appended entries wait until you save); an open, unmodified buffer is
+reloaded after a write.
+
+**Bounded.** `status.md` is rewritten, not appended. `decisions.md` and `subtasks.md` keep the full history, but views,
+bundles and update requests show only the recent N entries plus a one-line summary of older ones.
+
+**Local tasks get a digest.** At the start of a task, a compact digest — goals, status and the last
+`digest_decisions` (5) decisions as one line each, at most `digest_max_bytes` — is appended to the task's first message
+as `<project_ledger rev="...">`, framed as lower-priority project notes. Prompt-cache friendly: it is injected once
+per change (an unchanged ledger is not sent again; the system prompt never changes), and the task's messages stay
+byte-identical on every step even if the ledger changes meanwhile. `ledger.inject = false` turns it off.
+
+**For delegation.** `require('coagent').ledger.bundle(opts)` returns the full ledger as Markdown (`opts.recent`,
+`opts.full = true` for every entry, `opts.include = { 'overview', 'status', ... }`, `opts.experiments = false`,
+`opts.max_bytes`); `ledger.record({ kind = 'delegated', request, result, files, outcome })` records an imported result;
+`ledger.digest()` returns the digest block. The experiment log, when it has runs, is referenced and summarized (best
+values and the last runs).
+
+**Trust.** The ledger contains model-written and repository-derived text. It is context data only: it cannot change
+permissions, the mode or the model. Model text cannot add sections or fake entries (`#` lines become bold text),
+secrets are masked, and the digest cannot close its own block.
+
 ### Tools the agent uses
 
 | Kind | Tools | Approval (supervised) |
@@ -649,6 +725,7 @@ concrete change to make.
 | `:CoagentPlan [task\|approve\|discard]` | Plan a task first (same as `/plan`; a range attaches the selection) |
 | `:CoagentSkills [enable\|disable <name>\|reload]` | List Agent Skills / enable or disable one for this session (same as `/skills`) |
 | `:CoagentExp [show\|diff\|note\|compare\|run ...]` | Experiment log (same as `/exp`) |
+| `:CoagentLedger [init\|refresh[!]\|note\|decision\|update\|review\|log\|open\|bundle\|info ...]` | Project ledger (same as `/ledger`) |
 | `:CoagentPrompt [name] [text]` | Run a prompt template (a range attaches the selection; no name = pick from a list) |
 | `:CoagentToggle` / `Open` / `Close` | Toggle / open / close the panel |
 | `:CoagentStop` | Stop now (abort the request, kill running process groups, drop pending approvals) |
@@ -780,6 +857,15 @@ require('coagent').setup({
     patterns = { { pattern = 'Top%-1 acc ([%d%.]+)', key = 'top1' } }, -- extra metrics
     log_files = { 'lightning_logs/*/metrics.csv' }, -- metrics files written by the run
     max_diff_bytes = 100 * 1024,
+  },
+  ledger = {
+    enabled = true,
+    dir_in_repo = nil,  -- e.g. '.coagent/ledger' (default: stdpath('state')/coagent/ledger/<project>)
+    auto_update = true, -- one small request after each task / imported result / experiment
+    inject = true,      -- digest (goals, status, recent decisions) in local tasks
+    model = nil, update_model = nil, -- nil = the selected model
+    recent = 10,        -- entries in full in views and bundles
+    init_max_bytes = 160 * 1024, max_file_bytes = 24 * 1024,
   },
   references = { url = true, url_max_bytes = 32 * 1024, clipboard_max_bytes = 32 * 1024 },
   inline = { context_lines = 40, keymaps = { accept = 'ga', reject = 'gr', retry = 'gi', diff = 'gd' } },
@@ -951,7 +1037,8 @@ opts = {
   `session.persist = false` saves nothing
 - Authentication tokens are never saved (CopilotChat manages authentication)
 - The experiment log lives next to them: `stdpath('state')/coagent/experiments/<project>-<hash>.jsonl` (0600; see
-  "Experiment log")
+  "Experiment log"), and so does the project ledger: `stdpath('state')/coagent/ledger/<project>-<hash>/` (0700 / 0600;
+  see "Project ledger")
 
 ## Limitations
 

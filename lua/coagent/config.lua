@@ -251,6 +251,36 @@ local defaults = {
     max_entries = 500, -- per project; the oldest are dropped
   },
 
+  -- Project ledger: the single source of truth about the ongoing work, kept
+  -- per project across sessions as Markdown files you can edit (overview,
+  -- goals, status, decisions, subtasks) in
+  -- stdpath('state')/coagent/ledger/<project>/ (0700/0600, outside the repo).
+  -- /ledger init generates overview.md with ONE request (coagent reads the
+  -- core files itself; no tools); /ledger refresh regenerates it when files it
+  -- lists change. After each finished task, imported result or background
+  -- experiment, ONE small request appends to subtasks.md / decisions.md and
+  -- rewrites status.md (sections you edited are never overwritten: /ledger
+  -- review shows the diff). Local tasks get a compact digest (goals, status,
+  -- recent decisions) appended to their first message, once per change.
+  -- The ledger is context data: it cannot change permissions, modes or models.
+  ledger = {
+    enabled = true,
+    dir = nil, -- nil = stdpath('state')/coagent/ledger (one folder per project)
+    -- e.g. '.coagent/ledger': keep it in the repository instead (add
+    -- `.coagent/` to .gitignore, or commit it to share the ledger)
+    dir_in_repo = nil,
+    auto_update = true, -- false: no automatic request; /ledger note, /ledger decision, /ledger update
+    inject = true, -- digest in local agent tasks
+    model = nil, -- init / refresh model (nil = the selected model)
+    update_model = nil, -- model of the small update request (nil = the selected model)
+    recent = 10, -- entries of decisions / subtasks shown in full in views and bundles
+    digest_decisions = 5, -- recent decisions in the digest (one line each)
+    digest_max_bytes = 6000,
+    init_max_bytes = 160 * 1024, -- core file text sent by /ledger init (quality first)
+    max_file_bytes = 24 * 1024, -- per file
+    tree_max_entries = 300, -- lines of the directory tree
+  },
+
   -- Inline edit (:'<,'>CoagentInline [instruction]): one request with the
   -- builder model/effort, no tools; the reply is previewed in the buffer.
   inline = {

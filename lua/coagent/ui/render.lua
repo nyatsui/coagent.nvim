@@ -392,6 +392,9 @@ function M.item(item, o)
     if item.attachments then
       b.line(string.format('  (+%d attachment%s)', item.attachments, item.attachments > 1 and 's' or ''), 'CoagentDim')
     end
+    if item.ledger then
+      b.line('  (+ project ledger digest)', 'CoagentDim')
+    end
   elseif item.type == 'assistant' then
     local r = b.line(i.assistant .. ' Copilot')
     b.hl(r, 0, -1, 'CoagentAssistant')

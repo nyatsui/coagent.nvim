@@ -32,6 +32,7 @@ lua/coagent/
     subagent.lua                 調査担当（explore ツール。読み取り専用・新規コンテキスト・並列）
     advisor.lua                  アドバイザー（追記のみの専用履歴、PLAN / REPEATED_FAILURE / BEFORE_DONE）
     changes.lua                  変更追跡・巻き戻し
+    ledger.lua                   プロジェクト台帳（Markdown 5 ファイル・節ハッシュによる編集保護・digest・bundle・init/refresh/更新リクエスト）
   tools/
     init.lua                     ツールレジストリ
     workspace.lua                ワークスペース境界（realpath・symlink 脱出検出）
@@ -50,6 +51,7 @@ lua/coagent/
     output.lua                   コマンド出力パネル
     diffview.lua                 unified / side-by-side / hunk レビュー
     changes.lua                  変更ファイル一覧
+    ledger.lua                   台帳ファイルの分割表示・上限つきログ表示・保留中の更新のレビュー
     icons.lua, highlights.lua
 ```
 
@@ -148,6 +150,29 @@ tool 項目は `status`（pending / awaiting_approval / running / done / failed 
 - セッション履歴そのものは変更しません（送信用のコピーのみ圧縮）。CopilotChat 側の履歴切詰め
   （tool 対応を壊し得る）が発動しないようにする目的もあります
 
+## プロジェクト台帳
+
+`agent/ledger.lua`。プロジェクトの全体像をセッションをまたいで保つ Markdown ファイル群（`overview` / `goals` / `status` /
+`decisions` / `subtasks`）と `.meta.json`。台帳ディレクトリごとに 1 インスタンスを共有し（同じプロジェクトの複数
+controller が書き込みで競合しない）、リクエストと書き込みはジョブキューで 1 つずつ実行します。
+
+```
+/ledger init ──(ツリー + 中核ファイルを coagent が読む)──> 1 request（tools なし, headless）──> overview.md + sources 指紋
+タスク完了 / ledger.record(ev) / 実験終了 ──> 1 request（JSON: subtask, decisions, status）──> 追記 + status 書き直し
+タスク開始 ──> digest（goals + status + 直近の決定, rev = sha256）──> 最初の user メッセージ末尾に追加（rev が変わったときだけ）
+ledger.bundle(opts) ──> 全体の Markdown（ログは直近 N 件 + 古いものの 1 行要約）
+```
+
+- **編集保護**: 書いた節ごとに本文の sha256 を `.meta.json` の `written` に記録。現在の本文が一致しない節は利用者の編集と
+  みなし、提案は `pending` に保留（`/ledger review` で差分を見せて適用 / 維持）。未保存のバッファがあるファイルは書かず、
+  追記は `queued` で保存後に行う
+- **鮮度**: 概要がバッククォートで挙げたワークスペース内のファイルの sha256 / size / mtime を記録。mtime と size が同じなら
+  読まず、違えば sha256 を比べる（内容が同じなら指紋だけ更新）
+- **キャッシュ**: digest はシステムプロンプトに入れず、タスクの最初のメッセージに追記するだけ。直近に注入した rev が
+  まだ見えていれば（`/compact summary` で置換されたターンや、予算超過で削られたターンでなければ）再注入しない
+- **信頼**: 台帳の文はデータとして扱い、権限・モード・モデルの決定には一切使わない。モデルの文の `#` 行は太字に変え、
+  節や記録を偽造できない。digest 内の `</project_ledger` はエスケープ
+
 ## セッション保存
 
 | 項目 | 内容 |
@@ -168,6 +193,6 @@ tool 項目は `status`（pending / awaiting_approval / running / done / failed 
 | 破壊的コマンド | 危険パターンは常に個別承認・「常に許可」不可。auto は単純コマンド + 許可リスト + サンドボックスのみ自動 |
 | 既存変更の破棄 | 未保存バッファ競合・承認待ち中のディスク変更を検出。巻き戻しは作業開始前の内容が基準で、エージェント後のユーザー編集は確認が必要 |
 | 暴走 | ステップ・ツール回数・時間・重複失敗・同一呼び出し反復・連続拒否の上限。停止は即時 |
-| プロンプトインジェクション | ツール結果・リポジトリ文書は「データ」とシステムプロンプトで明示。権限判定はモデルの出力に依存しない |
+| プロンプトインジェクション | ツール結果・リポジトリ文書は「データ」とシステムプロンプトで明示。権限判定はモデルの出力に依存しない。プロジェクト台帳（モデルが書いた文を含む）も低優先度のデータとして渡し、権限・モード・モデルには影響しない |
 | プロセスリーク | detached 起動したプロセスグループに SIGTERM → 2 秒後 SIGKILL。VimLeavePre で全 kill。バックグラウンドプロセスは同時数・寿命・保持出力に上限があり、stop / セッション切替で kill |
 | トークン漏洩 | UI・保存・ツール結果でマスク。認証は CopilotChat 内で完結し本プラグインはトークンに触れない |

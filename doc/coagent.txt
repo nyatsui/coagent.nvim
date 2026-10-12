@@ -13,6 +13,7 @@ CONTENTS                                              *coagent-contents*
      Formatting .............................. |coagent-format|
      Skills .................................. |coagent-skills|
      Experiment log .......................... |coagent-experiments|
+     Project ledger .......................... |coagent-ledger|
      Queue ................................... |coagent-queue|
      Notifications ........................... |coagent-notify|
      Limits .................................. |coagent-limits|
@@ -49,6 +50,9 @@ Check the setup with |:checkhealth| coagent.
 :CoagentExp [show|diff|note|compare|run ...]
                          The experiment log (same as /exp;
                               |coagent-experiments|).
+:CoagentLedger [init|refresh[!]|note|decision|update|review|log|open|bundle|info]
+                         The project ledger (same as /ledger;
+                              |coagent-ledger|).
 :CoagentPrompt [name] [text]
                          Run a prompt template (|coagent-templates|).
                               With a range the selection is attached;
@@ -238,6 +242,9 @@ Commands go into the input history like prompts.
                       The experiment log: table, details, diff, notes,
                       Markdown comparison, record a run
                       (|coagent-experiments|; local, no request).
+  /ledger [init|refresh[!]|note|decision|update|review|log|open|bundle|info]
+                      The project ledger (|coagent-ledger|; only init,
+                      refresh and update send a request).
   /new  /sessions  /model [role]  /mode [mode]  /roles [preset]
   /usage [billing]  /changes  /diff  /review  /stop  /processes
                       Same as the matching :Coagent* command.
@@ -594,6 +601,112 @@ runs whose command or notes contain it.
   }
 <
 
+                                                        *coagent-ledger*
+The project ledger is the single source of truth about the ongoing work of a
+project, kept by coagent across sessions: what the code does, the goal, what
+was decided and why, what each subtask did and where things stand. Local
+tasks start from it, and other chats you delegate a subtask to can get it
+whole (|coagent-ledger-bundle|).
+
+Files (Markdown with stable "## " headers; you edit them, coagent updates
+them):
+  overview.md   Purpose, Directory tree, Files (each file's role), Data flow
+                (dataset -> dataloader -> model -> loss/optimizer -> train
+                loop -> eval -> outputs), Configs and hyperparameters, How
+                to run, Outputs and metrics.
+  goals.md      Objective, Target metric, Constraints. Yours: never
+                rewritten.
+  status.md     Current state, Best results, Open issues, Next steps.
+                Rewritten (not appended) by each update.
+  decisions.md  Append-only: "### D-<n> · <date> · <title>" with decision,
+                reason, rejected alternatives, source.
+  subtasks.md   Append-only: "### S-<n> · <date> · <kind> · <title>" (kind
+                local, delegated, experiment or note) with request, result,
+                files changed, outcome.
+
+Storage: stdpath('state')/coagent/ledger/<project>-<hash>/, outside the
+repository, directory 0700, files 0600 (restored on every write). With
+`ledger.dir_in_repo = '.coagent/ledger'` it is kept in the repository: add
+`.coagent/` to .gitignore, or commit it to share it.
+
+Requests (everything else is local):
+- /ledger init: ONE request without tools. coagent reads the directory tree
+  and the core files itself (README, pyproject / requirements, train /
+  eval / model / dataset / loss / config sources, configs; up to
+  `init_max_bytes`, `max_file_bytes` per file; protected files such as .env
+  and binaries are skipped, secrets masked); the model writes overview.md.
+  Files the overview names in `backticks` are fingerprinted (sha256, mtime).
+- /ledger refresh: ONE request, only when a file listed in the overview
+  changed or disappeared (a warning is shown once at the next task start).
+  "/ledger refresh!" regenerates it anyway.
+- After each finished task, imported result (|coagent-ledger-bundle|) or
+  background experiment: ONE small request appends the subtask entry and
+  any decisions and rewrites status.md (`auto_update`). Files changed and
+  the outcome are written by coagent. If the request fails a plain entry
+  is written and status.md is left alone. Only once the ledger exists.
+
+  /ledger             Open goals.md and status.md in a split for editing
+                      (creates the ledger) and show its state.
+  /ledger open <file> overview, goals, status, decisions or subtasks.
+  /ledger init        Generate overview.md (above).
+  /ledger refresh[!]  Refresh it when stale (! = anyway).
+  /ledger note <text> A note entry in subtasks.md (no request).
+  /ledger decision <title> [-- reason [-- rejected alternatives]]
+                      A decision entry (no request).
+  /ledger update      Record the last finished task now (one request; for
+                      `auto_update = false`).
+  /ledger review      Pending updates of sections you edited: shows the
+                      diff, then apply / keep yours / decide later.
+  /ledger log [decisions|subtasks]
+                      Recent `recent` entries in full plus one line per
+                      older entry.
+  /ledger bundle      The whole ledger as Markdown into the + register.
+  /ledger info        Location, staleness, counts, pending updates.
+
+Your edits win: coagent keeps a hash of every section it wrote; a section
+whose text differs was edited by you and is never overwritten. The update
+waits in the ledger's .meta.json until /ledger review. A file with unsaved
+changes in a buffer is not written (appended entries wait for the save);
+an open unmodified buffer is reloaded.
+
+Digest: at the start of a local task a compact digest (goals, status, the
+last `digest_decisions` decisions, at most `digest_max_bytes`) is appended
+to the task's first message as <project_ledger rev="...">, as
+lower-priority project notes. It is injected once per change and never
+touches the system prompt, so the prompt cache keeps hitting; the task's
+messages stay identical on every step. `inject = false` disables it.
+
+Trust: the ledger holds model-written and repository-derived text. It is
+context data and cannot change permissions, the mode or the model. Model
+text cannot add sections or entries ("#" lines become bold text), secrets
+are masked, and the digest cannot close its own block.
+>lua
+  ledger = {
+    enabled = true,
+    dir = nil,            -- nil = stdpath('state')/coagent/ledger
+    dir_in_repo = nil,    -- e.g. '.coagent/ledger'
+    auto_update = true, inject = true,
+    model = nil, update_model = nil,   -- nil = the selected model
+    recent = 10, digest_decisions = 5, digest_max_bytes = 6000,
+    init_max_bytes = 160 * 1024, max_file_bytes = 24 * 1024,
+    tree_max_entries = 300,
+  }
+<
+                                                 *coagent-ledger-bundle*
+  require('coagent').ledger.bundle(opts)
+      The whole ledger as Markdown: overview, goals, status, decisions and
+      subtasks (the recent `opts.recent` in full plus one line per older
+      entry; `opts.full = true` for all), and the experiment log summary.
+      opts: recent, full, include = { 'overview', ... }, experiments =
+      false, max_bytes.
+  require('coagent').ledger.record(ev)
+      Record an event: { kind = 'delegated', request, result, files,
+      outcome } (one request, like after a task).
+  require('coagent').ledger.digest()
+      The digest block local tasks get (and its rev).
+  require('coagent').ledger(arg)
+      Same as "/ledger arg".
+
                                                          *coagent-queue*
 Messages sent while the agent is busy (responding, running a tool or waiting
 for approval) are queued and shown at the bottom of the panel as
@@ -682,5 +795,6 @@ auto        Only for workspaces in `auto.workspaces` or explicitly enabled.
   require('coagent').controller():queued()
   require('coagent').controller()   -- events: controller.events:on(...)
   require('coagent').register_tool(tool)
+  require('coagent').ledger.bundle(opts)  -- |coagent-ledger-bundle|
 
  vim:tw=78:ts=8:ft=help:norl:

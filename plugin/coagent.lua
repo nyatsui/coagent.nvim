@@ -70,6 +70,21 @@ end, {
     return { 'show', 'diff', 'note', 'compare', 'run' }
   end,
 })
+cmd('CoagentLedger', function(a)
+  agent().ledger(a.args)
+end, {
+  nargs = '*',
+  desc = 'Project ledger: open, init, refresh[!], note, decision, update, review, log, open <file>, bundle, info',
+  complete = function(_, line)
+    if line:match('^%S+%s+%S+%s') then
+      if line:match('^%S+%s+open%s+%S*$') then
+        return require('coagent.agent.ledger').FILES
+      end
+      return {}
+    end
+    return require('coagent').LEDGER_ARGS
+  end,
+})
 cmd('CoagentInline', function(a)
   agent().inline(a.args, { range = a.range > 0 and { a.line1, a.line2 } or nil })
 end, { nargs = '*', range = true, desc = 'Inline edit of the selected lines (one request, previewed in place)' })

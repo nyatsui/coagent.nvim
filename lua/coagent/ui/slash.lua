@@ -99,6 +99,18 @@ M.COMMANDS = {
     end,
   },
   {
+    name = 'ledger',
+    args = '[init|refresh|note|decision|update|review|log|open|bundle|info ...]',
+    desc = 'Project ledger: open the files; init / refresh the overview, notes, review your edits',
+    complete = function()
+      return require('coagent').LEDGER_ARGS
+    end,
+    run = function(arg)
+      local ok = app().ledger(arg)
+      return ok
+    end,
+  },
+  {
     name = 'new',
     desc = 'Start a new session',
     run = function()

@@ -7,6 +7,7 @@ local Emitter = require('coagent.core.events')
 local tools = require('coagent.tools')
 local Skills = require('coagent.agent.skills')
 local Experiments = require('coagent.agent.experiments')
+local Ledger = require('coagent.agent.ledger')
 
 local M = {}
 
@@ -27,9 +28,10 @@ function M.build(opts)
   session.skills_disabled = session.skills_disabled or {}
   local skills = Skills.new(config, ws, session.skills_disabled)
   perms.skills = skills
+  local experiments = Experiments.new(config, ws)
   local c = Controller.new({
     skills = skills,
-    experiments = Experiments.new(config, ws),
+    experiments = experiments,
     config = config,
     backend = opts.backend,
     session = session,
@@ -39,6 +41,9 @@ function M.build(opts)
     events = opts.events or Emitter.new(),
     store = opts.store,
   })
+  -- the ledger is shared per project directory; its requests and notices go
+  -- through the newest controller
+  c.ledger = Ledger.new(config, ws, { experiments = experiments, ctrl = c })
   if config.mode == 'auto' and perms.mode ~= 'auto' then
     c:notice('warn', 'mode = "auto" is not enabled for ' .. ws.root .. ' (not in auto.workspaces); using supervised. Enable it with :CoagentMode auto.')
   end
