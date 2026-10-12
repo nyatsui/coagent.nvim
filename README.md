@@ -60,8 +60,10 @@ I'll find the `add` implementation and its tests.
   agent marks them with `experiment = true`; the "How to run" commands of the project ledger and launchers such as
   `torchrun`, `accelerate launch`, `python -m pkg.train` are recognized too) with the command, git HEAD + diff hash,
   duration, exit code and metrics parsed from the output (`val_acc=0.91`, JSON lines, metrics CSV/JSON files). Long
-  runs are hands-off: the agent starts them in the background and `wait_process` blocks until they finish, without
-  model requests. `/exp` shows a table with deltas vs the previous and the best run, `/exp compare` copies a
+  runs are hands-off and model-monitored: the agent starts them in the background, `wait_process` waits without model
+  requests and returns only at checkpoints (every 20 minutes with new metrics, or at once on NaN, divergence, OOM, a
+  traceback or a stall) with the metric trends and the best previous run at the same epoch, and the agent decides
+  whether the run continues or stops — no fixed time limit. `/exp` shows a table with deltas vs the previous and the best run, `/exp compare` copies a
   Markdown comparison for a web chat, and the agent reads the log with the `experiments` tool. No requests are made
 - **Project ledger** — one Markdown record per project (overview, goals, status, decisions, subtasks) that coagent keeps
   across sessions: `/ledger init` writes the overview with one request, each finished task / imported result /
@@ -303,7 +305,7 @@ input history (`<C-p>`/`<C-n>`) like normal prompts.
 | `/go <task>` | Run a task without the plan phase (with `plan.default = true`) |
 | `/skills [enable\|disable <name>\|reload]` | List Agent Skills (source path, user / repo); enable or disable one for this session (see "Agent Skills") |
 | `/skill <name> [task]` | Run a task with a skill loaded up front |
-| `/exp [show\|diff\|note\|compare\|run ...]` | Experiment log: table, details, diff, notes, Markdown comparison, record a run (see "Experiment log"; local, no request) |
+| `/exp [show\|diff\|note\|compare\|run\|watch\|unwatch ...]` | Experiment log: table, details, diff, notes, Markdown comparison, record a run (local, no request); hand a running `/exp run` to the agent for monitoring (see "Experiment log") |
 | `/ledger [init\|refresh[!]\|note\|decision\|update\|review\|log\|open\|bundle\|info ...]` | Project ledger: open the files, generate / refresh the overview, notes and decisions, review updates of sections you edited (see "Project ledger"; only init / refresh / update send a request) |
 | `/delegate <kind> [instruction]\|list\|open\|cancel\|detach` | Bundle a subtask for another chat you operate (see "Delegating subtasks"; local, no request) |
 | `/receive [id] [paste\|clipboard\|files]` | Import its result: pasted text and/or downloaded files, every change reviewed |
@@ -346,9 +348,9 @@ repeating the same investigation or fix can burn a lot of tokens (money / quota)
 
 | Limit | Default | When reached |
 |---|---|---|
-| `max_steps` | 40 | Model requests. **Pauses** (resumable) |
-| `max_tool_calls` | 120 | Tool calls. **Pauses** (resumable) |
-| `max_duration_ms` | 30 min | Active time (time waiting for approval or in `wait_process` is not counted). **Pauses** (resumable) |
+| `max_steps` | 40 | Model requests. The checkpoint answers of a monitored training run count as one step (see "Monitored runs"). **Pauses** (resumable) |
+| `max_tool_calls` | 120 | Tool calls (`wait_process` calls that return at a checkpoint are not counted). **Pauses** (resumable) |
+| `max_duration_ms` | 30 min | Active time (time waiting for approval or in `wait_process`, and checkpoint answers, are not counted). **Pauses** (resumable) |
 | `max_consecutive_denials` | 3 | Denials in a row. **Ends** the task (you are saying "stop") |
 | `max_identical_calls` / `max_identical_failures` | 4 / 3 | Repeating the same call with no change / the same failure. **Ends** the task (it is looping) |
 
@@ -368,7 +370,7 @@ When Neovim (the terminal) is not focused, coagent rings the bell on approval ne
 
 ```lua
 notify = {
-  on = { 'approval', 'done', 'failed', 'limit', 'waiting' }, -- 'paused' is also available ('limit' = paused at a limit, 'waiting' = WAITING_EXTERNAL)
+  on = { 'approval', 'done', 'failed', 'limit', 'waiting', 'stopped' }, -- 'paused' is also available ('limit' = paused at a limit, 'waiting' = WAITING_EXTERNAL, 'stopped' = the agent stopped a monitored training run)
   bell = true,                -- send BEL to the terminal (tmux flags the window)
   desktop = false,            -- true: desktop notification (Linux: notify-send / macOS: osascript)
   only_when_unfocused = true, -- no notification while focused
@@ -633,11 +635,12 @@ Foreground runs are recorded when the command exits (the result the model sees e
 
 **Long runs are hands-off.** `run_command` stops at `commands.max_timeout_ms` (15 minutes). For training / evaluation
 that may take longer the agent calls `start_process` (with `experiment = true`) and then `wait_process(id, until,
-timeout_ms)`, which blocks **inside the tool** until the process exits (`until = "exit"`, the default) or a Lua pattern
-appears in its new output (`"Epoch 5/"`), at most `background.max_lifetime_ms` (2 hours). While it waits:
+timeout_ms)`, which blocks **inside the tool** until the process exits (`until = "exit"`, the default), a Lua pattern
+appears in its new output (`"Epoch 5/"`), or — for an experiment run — a monitoring checkpoint comes (see "Monitored
+runs" below). While it waits:
 
-- no model request is made (no polling with `read_process_output`, which the prompt forbids), so a two-hour run costs
-  the same as a two-second one;
+- no model request is made (no polling with `read_process_output`, which the prompt forbids), so waiting costs no
+  tokens however long the run takes;
 - the timeline item shows the runtime and the last output line (`12m03s · Epoch 7/50 loss=0.41`, also for `\r`
   progress bars);
 - the wait does not count toward `limits.max_duration_ms` (like waiting for an approval);
@@ -647,6 +650,47 @@ appears in its new output (`"Epoch 5/"`), at most `background.max_lifetime_ms` (
 The result has the exit code, the tail of the new output and the experiment's metrics line, so the agent can report
 or compare the run right away. Approvals are unchanged: `start_process` asks like `run_command` in supervised mode,
 `wait_process` changes nothing and never asks.
+
+**Monitored runs (no fixed time limit).** Instead of a fixed lifetime, the model decides from the training log whether a
+run continues. While an experiment run goes, its parsed metrics are kept as a per-step / per-epoch **series** (in
+memory, and capped — `max_points` per metric — in the experiment entry, so later runs can be compared at the same
+epoch). `wait_process` on the run returns to the model only at a **checkpoint**:
+
+- the interval passed (`check_every_ms`, default `experiments.monitor.interval_ms` = 20 minutes) **and** new metrics
+  arrived;
+- an **anomaly**, detected deterministically and reported once each: NaN/Inf in a loss, a loss rising above
+  `divergence_factor` (3) × its recent minimum, `CUDA out of memory`, a Python traceback, or no new output for
+  `stall_ms` (30 minutes) (`on_events = false` turns these off for one wait);
+- the process exited.
+
+A checkpoint result is compact: why it returned (interval / anomalies), runtime, progress and **ETA** (from `Epoch
+3/10`, `step 1200/50000` or tqdm bars, and `--epochs` on the command line), a trend line per metric (last 5 points,
+best so far and where, points since the best, slope per epoch / 1k steps, NaN/Inf flags), the **best previous run at
+the same epoch / step** ("At epoch 4: this run 0.80, #7 0.84 -> worse by 0.04 (4.8%), within worse_margin"), the last
+20 output lines and "decide: call wait_process again to continue, or stop_process with a reason". The system prompt
+tells the model to stop on NaN / divergence, an error or traceback, no improvement of the validation metric for
+`patience` (3) evaluations (unless warmup or a cosine restart makes a later improvement plausible), a run clearly worse
+than the best run at the same epoch, or a goal of the ledger already reached — and otherwise to continue, always with
+the reason. `stop_process(id, reason)` records `stopped by agent: <reason>` as a note in `/exp` and in the ledger
+(`subtasks.md`), shows a notice and sends the `'stopped'` notification (`notify.on`). Stopping the agent's own run needs
+no approval, as before.
+
+- **Limits:** experiment runs have no lifetime cap while monitoring is on (`background.max_lifetime_ms` still applies
+  to every other process); `experiments.monitor.max_hours` is an optional absolute safety net (default none). With
+  `experiments.monitor.enabled = false` experiment runs get `background.max_lifetime_ms` again and `wait_process` blocks
+  until exit as before.
+- **Cost (tokens):** waiting costs no tokens. Each checkpoint costs the input tokens of the conversation so far (mostly
+  read from the prompt cache) plus about 1–3k new input tokens for the checkpoint and a short answer. A 10-hour run with
+  the 20-minute interval has about 30 checkpoints; a longer `interval_ms` spends fewer tokens, a shorter one reacts
+  sooner (anomalies return at once anyway). Checkpoints appear in the token usage of the task like any other answer.
+- **Steps:** the answers to checkpoints belong to one wait chain and count as a single step of `limits.max_steps`; the
+  `wait_process` calls that return at a checkpoint do not count toward `max_tool_calls`, and the time is not counted
+  toward `max_duration_ms`, so a run of days does not pause the task. (If a task is paused at a limit anyway,
+  `/resume` continues with fresh counters and the agent calls `wait_process` again — the run keeps going meanwhile.)
+- **Runs you started:** `/exp watch [id]` hands a running `/exp run` process to the agent: it starts a task that
+  monitors the run with the same rules (and may stop it with a reason). `/exp unwatch [id]` ends monitoring without
+  killing the process: a waiting `wait_process` returns, and the agent may no longer wait for or stop it. Without
+  `/exp watch` the agent cannot stop a run you started.
 
 **Storage.** `stdpath('state')/coagent/experiments/<project>-<hash>.jsonl` — outside the repository, directory 0700, file
 0600, secrets masked like session files. The file is append-only (compacted automatically), at most `max_entries` runs.
@@ -661,6 +705,8 @@ or compare the run right away. Approvals are unchanged: `start_process` asks lik
 | `/exp note <id> <text>` | Add a note to a run ("dropout 0.3, augmentation on") |
 | `/exp compare [ids]` | Compact Markdown comparison into the `+` register (unnamed register without a clipboard): a table of metrics (best in bold) and the settings that differ, common settings, commands, a short code summary per run (`same code as #7`, changed files) and notes. Without ids: the last `compare_runs` runs plus the best run |
 | `/exp run <command>` | Run a command in the background and record it even if it does not match `experiments.commands`. The usual approval rules apply (asks in supervised mode, refused in read-only) |
+| `/exp watch [id]` | Hand a running `/exp run` (experiment id or process id; the only one when omitted) to the agent, which monitors it in a task (checkpoints, stop with a reason). Needs an idle agent |
+| `/exp unwatch [id]` | End the agent's monitoring of a run (all monitored runs without an id); the process keeps running |
 
 "Best" means highest, except for names in `lower_is_better` (loss, mae, rmse, mse, error, perplexity, ...); names in
 `neutral` (epoch, lr, step, ...) only show the change vs the previous run. `:CoagentExp …` does the same as `/exp …`.
@@ -874,7 +920,7 @@ delegate = {
 | Editing | `edit_file`, `write_file`, `delete_file` | Yes (with diff) |
 | Commands | `run_command` (commands that exit) | Yes |
 | Background | `start_process` (dev servers, long training / evaluation runs; `experiment = true` records a run) | Yes |
-| | `wait_process` (blocks until exit / a pattern, no model requests), `read_process_output`, `list_processes`, `stop_process` | No (only processes the agent started) |
+| | `wait_process` (blocks until exit / a pattern / a monitoring checkpoint, no model requests while waiting), `read_process_output`, `list_processes`, `stop_process` (with a reason for runs) | No (only processes the agent started, or a run handed over with `/exp watch`) |
 
 - LSP tools use the language servers configured in your Neovim (files not yet loaded are loaded invisibly and the server is
   awaited). Files without a server return an error and the model falls back to `search`
@@ -1070,6 +1116,7 @@ require('coagent').setup({
   -- new LSP diagnostics appended to write/edit results (see "New diagnostics after edits")
   diagnostics_after_edit = { enabled = true, min_severity = 'error', timeout_ms = 1500, max_items = 10 },
   -- max_lifetime_ms: background processes are killed after it; also the longest wait_process
+  -- (not for experiment runs while experiments.monitor.enabled; see max_hours there)
   background = { max_processes = 3, max_output_bytes = 1024 * 1024, max_lifetime_ms = 2 * 60 * 60 * 1000 },
   session = { persist = true, save_tool_output = true },
   ui = { layout = 'vertical', width = 0.42, icons = 'unicode', show_reasoning = false },
@@ -1086,6 +1133,17 @@ require('coagent').setup({
     patterns = { { pattern = 'Top%-1 acc ([%d%.]+)', key = 'top1' } }, -- extra metrics
     log_files = { 'lightning_logs/*/metrics.csv' }, -- metrics files written by the run
     max_diff_bytes = 100 * 1024,
+    -- model-monitored runs (see "Monitored runs"); experiment runs have no lifetime cap while enabled
+    monitor = {
+      enabled = true,
+      interval_ms = 20 * 60 * 1000, -- checkpoint interval (wait_process check_every_ms)
+      stall_ms = 30 * 60 * 1000,    -- no output for this long is an anomaly
+      patience = 3,                 -- evaluations without improvement (prompt guidance)
+      divergence_factor = 3,        -- loss above factor x its recent minimum is an anomaly
+      worse_margin = 0.05,          -- relative gap to the best run at the same epoch called "clearly worse"
+      max_hours = nil,              -- optional absolute safety net (nil = none)
+      max_points = 100, trend_points = 5, tail_lines = 20,
+    },
   },
   ledger = {
     enabled = true,
@@ -1100,7 +1158,7 @@ require('coagent').setup({
   inline = { context_lines = 40, keymaps = { accept = 'ga', reject = 'gr', retry = 'gi', diff = 'gd' } },
   -- delegating subtasks to another chat (see "Delegating subtasks")
   delegate = { language = 'en', download_dir = nil, review_imports = true, auto_followup = false, max_source_bytes = 2 * 1024 * 1024, kinds = {} },
-  notify = { on = { 'approval', 'done', 'failed', 'limit', 'waiting' }, bell = true, desktop = false, only_when_unfocused = true },
+  notify = { on = { 'approval', 'done', 'failed', 'limit', 'waiting', 'stopped' }, bell = true, desktop = false, only_when_unfocused = true },
 })
 ```
 

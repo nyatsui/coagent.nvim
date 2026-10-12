@@ -1684,13 +1684,20 @@ end
 ---@return Coagent.LedgerEvent
 function M.experiment_event(log, e)
   local Exp = require('coagent.agent.experiments')
+  -- a run the agent stopped (monitoring): the reason travels with the event
+  local stopped = ''
+  for _, n in ipairs(e.notes or {}) do
+    if n.text:match('^stopped by agent:') then
+      stopped = ' (' .. n.text .. ')'
+    end
+  end
   return {
     kind = 'experiment',
     title = 'experiment #' .. e.id .. ': ' .. Exp.short_command(e.command or '', 60),
     request = e.command or '',
     result = Exp.metrics_summary(log, e) .. (e.output_tail and ('\nOutput tail:\n' .. util.clip_tail(e.output_tail, 1500)) or ''),
     files = {},
-    outcome = string.format('#%d %s', e.id, Exp.status_text(e)),
+    outcome = string.format('#%d %s', e.id, Exp.status_text(e)) .. stopped,
   }
 end
 

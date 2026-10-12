@@ -1,6 +1,6 @@
 --- Attention notifications: terminal bell and (opt-in) desktop notifications
 --- when the agent needs the user (approval requested or a plan ready, task done/failed,
---- paused, a per-task limit reached).
+--- paused, a per-task limit reached, a monitored training run stopped by the agent).
 ---
 --- Messages are generic status text only ("coagent: approval needed
 --- (run_command)"): never prompt, model or code content. Desktop
@@ -11,7 +11,7 @@
 --- with focus reporting enabled (tmux: `set -g focus-events on`).
 local M = {}
 
-M.KINDS = { 'approval', 'done', 'failed', 'paused', 'limit', 'waiting', 'judge' }
+M.KINDS = { 'approval', 'done', 'failed', 'paused', 'limit', 'waiting', 'judge', 'stopped' }
 
 -- true until the terminal reports FocusLost
 M.focused = true
@@ -78,6 +78,7 @@ local LABEL = {
   limit = 'limit reached, paused',
   waiting = 'waiting for an external result',
   judge = 'ran without asking (judge)',
+  stopped = 'run stopped by the agent',
 }
 
 --- Generic message for a notification kind. `detail` must be a tool name or
@@ -95,7 +96,7 @@ end
 
 --- Notify about `kind` according to `cfg` (config.notify).
 ---@param cfg table?
----@param kind 'approval'|'done'|'failed'|'paused'|'limit'|'waiting'
+---@param kind 'approval'|'done'|'failed'|'paused'|'limit'|'waiting'|'stopped'
 ---@param detail string?
 ---@return boolean notified
 function M.signal(cfg, kind, detail)
@@ -130,6 +131,10 @@ function M.attach(c, get_cfg)
       if cfg and c.config.judge and c.config.judge.notify_on_allow then
         M.signal(vim.tbl_extend('force', cfg, { on = { 'judge' } }), 'judge', item and item.tool)
       end
+    end),
+    c.events:on('run_stopped', function(info)
+      -- the agent stopped a monitored run; detail: the process id (bg1)
+      M.signal(get_cfg(), 'stopped', info and info.id)
     end),
     c.events:on('plan_ready', function()
       M.signal(get_cfg(), 'approval', 'plan')

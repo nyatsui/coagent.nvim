@@ -385,8 +385,9 @@ describe('attention notifications', function()
     -- anything but a plain identifier is dropped
     assert.are.equal('coagent: approval needed', notify.message('approval', 'rm -rf "$HOME"'))
     assert.are.equal('coagent: paused', notify.message('paused'))
+    assert.are.equal('coagent: run stopped by the agent (bg1)', notify.message('stopped', 'bg1'))
     local defaults = require('coagent.config').defaults().notify
-    assert.are.same({ on = { 'approval', 'done', 'failed', 'limit', 'waiting' }, bell = true, desktop = false, only_when_unfocused = true }, defaults)
+    assert.are.same({ on = { 'approval', 'done', 'failed', 'limit', 'waiting', 'stopped' }, bell = true, desktop = false, only_when_unfocused = true }, defaults)
     local cmd = notify.sys.desktop_cmd()
     if cmd and cmd[1] == 'osascript' then
       for _, a in ipairs(cmd) do

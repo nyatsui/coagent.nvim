@@ -350,6 +350,10 @@ local function summary(b, item, o)
     i.dot,
     util.format_duration(item.duration_ms or 0)
   )
+  if (item.checkpoints or 0) > 0 then
+    -- monitoring checkpoints of a training run (not counted as steps)
+    stats = stats .. string.format(' %s %d checkpoints', i.dot, item.checkpoints)
+  end
   local r = b.line(icon .. ' ' .. title .. stats)
   b.hl(r, 0, #icon + 1 + #title, group)
   b.hl(r, #icon + 1 + #title, -1, 'CoagentDim')

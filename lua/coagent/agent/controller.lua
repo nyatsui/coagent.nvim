@@ -969,6 +969,7 @@ function Controller:_compact_view(watermark)
       mode = self.permissions:effective_mode(),
       instruction_files = self.config.instruction_files,
       skills = self.skills and self.skills:prompt_section() or nil,
+      monitor = require('coagent.agent.monitor').enabled(self.config) and require('coagent.agent.monitor').cfg(self.config) or nil,
     })
   local sent = context.with_summary(self.session.messages, self.session.compact_summary)
   local _, cinfo = context.compact(sent, budget, { system_prompt = sp, watermark = watermark })
@@ -1260,9 +1261,21 @@ function Controller:_loop(gen)
     if self.machine.current ~= S.THINKING then
       self.machine:to(S.THINKING)
     end
-    self.task.steps = self.task.steps + 1
+    -- the answer to a monitoring checkpoint of wait_process belongs to the
+    -- wait chain: the chain counts as one step, its time is waiting time
+    local chained = self.task.checkpoint_next
+    self.task.checkpoint_next = nil
+    local req_start = util.now()
+    if chained then
+      self.task.checkpoints = (self.task.checkpoints or 0) + 1
+    else
+      self.task.steps = self.task.steps + 1
+    end
     local res, err = self:_request(gen)
     async.main()
+    if chained and self.task then
+      self.task.waiting_ms = self.task.waiting_ms + (util.now() - req_start)
+    end
     if self.gen ~= gen then
       return
     end
@@ -1512,6 +1525,7 @@ function Controller:_request(gen)
       plan = planning,
       instruction_files = self.config.instruction_files,
       skills = self.task.skills_section,
+      monitor = require('coagent.agent.monitor').enabled(self.config) and require('coagent.agent.monitor').cfg(self.config) or nil,
     })
     self.task.system_mode = key
   end
@@ -1764,6 +1778,16 @@ function Controller:_tool_ctx(item, gen)
         return self:_delegate_create(plan, { call_id = item.call_id })
       end,
     },
+    -- the agent stopped a monitored run (stop_process): /exp already has the
+    -- note; the ledger gets one too, and the user a 'stopped' notification
+    on_run_stopped = function(info)
+      local what = info.exp_id and string.format('Experiment #%d (%s)', info.exp_id, info.id) or info.id
+      self:notice('warn', string.format('%s stopped by the agent after %s: %s', what, util.format_duration(info.runtime_ms or 0), info.reason))
+      if info.exp_id and self.ledger and self.ledger:exists() then
+        pcall(self.ledger.note, self.ledger, string.format('Experiment #%d stopped by agent: %s', info.exp_id, info.reason))
+      end
+      self.events:emit('run_stopped', info)
+    end,
     -- a background experiment run finished (its metrics are in the log)
     on_experiment = function(e)
       local Exp = require('coagent.agent.experiments')
@@ -1953,7 +1977,13 @@ function Controller:_execute(gen, tc)
   self:_update(item)
 
   local t = self.task
-  t.tool_calls = t.tool_calls + 1
+  if res.meta and res.meta.checkpoint then
+    -- a monitored run is still going: the next request decides on it (part
+    -- of the wait chain, not counted toward max_steps / max_tool_calls)
+    t.checkpoint_next = true
+  else
+    t.tool_calls = t.tool_calls + 1
+  end
   t.seq = t.seq + 1
   if tool.kind == 'write' and res.ok then
     t.edit_seq = t.seq
@@ -2138,6 +2168,7 @@ function Controller:_finish_now(state, info)
     message = info.message,
     steps = t.steps + (t.prior_steps or 0),
     tool_calls = t.tool_calls + (t.prior_tool_calls or 0),
+    checkpoints = t.checkpoints, -- monitoring checkpoint requests (not in steps)
     duration_ms = util.now() - (t.begun or t.started),
     verification = self:_verification(),
     changes = changes,

@@ -85,8 +85,33 @@ The user approves, revises or discards the plan. Once approved you will execute 
 </plan_mode>
 ]]
 
----@param opts {root:string, mode:string, plan:boolean?, instruction_files:string[], tools:table[], skills:string?}
+--- Decision rules for monitored training runs (experiments.monitor).
+---@param m table experiments.monitor (with defaults)
+---@return string
+function M.experiment_section(m)
+  return table.concat({
+    '<experiment_runs>',
+    'Training / evaluation runs started with start_process (experiment = true) are monitored and have no fixed time limit.',
+    'wait_process on such a run returns at checkpoints: every ' .. require('coagent.agent.monitor').dur(m.interval_ms)
+      .. ' once new metrics arrived, and at once on an anomaly (NaN/Inf loss, loss diverging, CUDA out of memory, a Python',
+    'traceback, no output for a long time) or when the run exits. Each checkpoint shows the metric trends (last values, best',
+    'so far, slope, points since the best), progress / ETA, the best previous run at the same epoch / step and the last output',
+    'lines. At every checkpoint decide whether the run continues, and state the reason in one sentence:',
+    '- STOP it with stop_process (give the reason) when: the loss is NaN/Inf or diverging; the output shows an error or a',
+    '  traceback that breaks the run; the validation metric has not improved for ' .. tostring(m.patience) .. ' evaluations, unless the',
+    '  learning-rate schedule makes a later improvement plausible (still in warmup, a cosine restart or LR drop ahead);',
+    '  the run is clearly worse than the best previous run at the same epoch / step (beyond the margin shown) with no sign',
+    '  of catching up; or the goal in the project ledger is already reached.',
+    '- Otherwise CONTINUE: call wait_process again with the same id. Do not stop a healthy run just to save time.',
+    'The stop reason is recorded in the experiment log and the project ledger. After a run ends or is stopped, report the',
+    'metrics and what you would try next; start another run only if the task asks for it.',
+    '</experiment_runs>',
+  }, '\n')
+end
+
+---@param opts {root:string, mode:string, plan:boolean?, instruction_files:string[], tools:table[], skills:string?, monitor:table?}
 ---  skills: the <skills> section (Skills:prompt_section), stable for a task
+---  monitor: experiments.monitor (with defaults) when monitored runs are on
 ---@return string
 function M.build(opts)
   local parts = { vim.trim(BASE) }
@@ -116,6 +141,9 @@ function M.build(opts)
   table.insert(parts, table.concat(env, '\n'))
   if opts.plan then
     table.insert(parts, vim.trim(M.PLAN))
+  end
+  if opts.monitor and not opts.plan then
+    table.insert(parts, M.experiment_section(opts.monitor))
   end
 
   if opts.skills then

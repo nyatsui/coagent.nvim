@@ -52,8 +52,10 @@ I'll find the `add` implementation and its tests.
 - **実験ログ（ML 向け）** — 学習・評価の実行を、入口のファイル名に関係なく（エージェントが `experiment = true` を付ける。
   台帳の「How to run」のコマンドや `torchrun`・`accelerate launch`・`python -m pkg.train` などのランチャーも認識）、
   コマンド・git HEAD と差分のハッシュ・実行時間・終了コード・出力から読み取ったメトリクス（`val_acc=0.91`、JSON 行、
-  メトリクスの CSV/JSON ファイル）と一緒にローカルへ記録。長い実行は放っておける: エージェントがバックグラウンドで
-  起動し、`wait_process` が終わるまでモデルへのリクエストなしで待ちます。`/exp` で前回・ベストとの差分つきの表、
+  メトリクスの CSV/JSON ファイル）と一緒にローカルへ記録。長い実行は放っておけて、モデルが見守ります: エージェントが
+  バックグラウンドで起動し、`wait_process` はモデルへのリクエストなしで待って、チェックポイント（新しいメトリクスが
+  出ていれば 20 分ごと。NaN・発散・OOM・traceback・出力の停滞はすぐ）でだけ、メトリクスの推移と同じエポックでの
+  過去のベストとの比較を返します。続けるか止めるかはエージェントが判断（固定の時間制限なし）。`/exp` で前回・ベストとの差分つきの表、
   `/exp compare` で Web チャットに貼る Markdown の比較をコピー。エージェントは `experiments` ツールで読める。
   リクエストは使わない
 - **プロジェクト台帳（ledger）** — プロジェクトごとに 1 つの Markdown の記録（概要・目標・状況・決定・サブタスク）を
@@ -292,7 +294,7 @@ vim.keymap.set('x', '<leader>ai', ':CoagentInline<CR>', { desc = 'Coagent inline
 | `/go <task>` | 計画フェーズなしでタスクを実行（`plan.default = true` のとき） |
 | `/skills [enable\|disable <name>\|reload]` | Agent Skills の一覧（パス、user / repo）。このセッションだけ有効 / 無効を切替（下記「Agent Skills」） |
 | `/skill <name> [task]` | スキルを最初から読み込んだ状態でタスクを実行 |
-| `/exp [show\|diff\|note\|compare\|run ...]` | 実験ログ: 表・詳細・差分・メモ・Markdown の比較・実行の記録（下記「実験ログ」。ローカルのみ、リクエストなし） |
+| `/exp [show\|diff\|note\|compare\|run\|watch\|unwatch ...]` | 実験ログ: 表・詳細・差分・メモ・Markdown の比較・実行の記録（ローカルのみ、リクエストなし）。実行中の `/exp run` をエージェントの見守りに渡す（下記「実験ログ」） |
 | `/ledger [init\|refresh[!]\|note\|decision\|update\|review\|log\|open\|bundle\|info ...]` | プロジェクト台帳: ファイルを開く・概要の生成と更新・メモと決定の追記・編集した節への更新の確認（下記「プロジェクト台帳」。リクエストを送るのは init / refresh / update だけ） |
 | `/delegate <種類> [指示]\|list\|open\|cancel\|detach` | 手で操作する別のチャット向けにサブタスクのバンドルを作る（「サブタスクを別のチャットに任せる」参照。ローカル、リクエストなし） |
 | `/receive [id] [paste\|clipboard\|files]` | 結果を取り込む: 貼り付けたテキストやダウンロードしたファイル。変更はすべてレビュー付き |
@@ -334,9 +336,9 @@ Copilot はトークン単位で課金され、エージェントは**リクエ�
 
 | 上限 | 既定値 | 到達したとき |
 |---|---|---|
-| `max_steps` | 40 | モデルへのリクエスト数。**一時停止**（再開可能） |
-| `max_tool_calls` | 120 | ツール実行回数。**一時停止**（再開可能） |
-| `max_duration_ms` | 30 分 | 実働時間（承認待ちと `wait_process` の待ち時間は含まない）。**一時停止**（再開可能） |
+| `max_steps` | 40 | モデルへのリクエスト数。見守り中の学習のチェックポイントへの応答は、まとめて 1 ステップと数える（「見守られる実行」参照）。**一時停止**（再開可能） |
+| `max_tool_calls` | 120 | ツール実行回数（チェックポイントで戻った `wait_process` は数えない）。**一時停止**（再開可能） |
+| `max_duration_ms` | 30 分 | 実働時間（承認待ちと `wait_process` の待ち時間、チェックポイントへの応答は含まない）。**一時停止**（再開可能） |
 | `max_consecutive_denials` | 3 | 連続で拒否された回数。タスクを**終了**（ユーザーが「やめて」と言っているため） |
 | `max_identical_calls` / `max_identical_failures` | 4 / 3 | 変更なしの同一呼び出し・同一失敗の繰り返し。タスクを**終了**（ループしているため） |
 
@@ -355,7 +357,7 @@ Neovim（ターミナル）にフォーカスが無いときに、承認待ち�
 
 ```lua
 notify = {
-  on = { 'approval', 'done', 'failed', 'limit', 'waiting' }, -- 'paused' も指定可（'limit' = 上限で一時停止、'waiting' = WAITING_EXTERNAL）
+  on = { 'approval', 'done', 'failed', 'limit', 'waiting', 'stopped' }, -- 'paused' も指定可（'limit' = 上限で一時停止、'waiting' = WAITING_EXTERNAL、'stopped' = 見守り中の学習をエージェントが止めた）
   bell = true,                -- 端末へ BEL を送る（tmux ではウィンドウにベルフラグが立つ）
   desktop = false,            -- true: デスクトップ通知（Linux: notify-send / macOS: osascript）
   only_when_unfocused = true, -- フォーカス中は通知しない
@@ -616,11 +618,12 @@ ML の作業（PyTorch の学習・評価、データ分析）向けに、実行
 
 **長い実行は放っておける。** `run_command` は `commands.max_timeout_ms`（15 分）で打ち切られます。それより長くかかり
 うる学習・評価では、エージェントは `start_process`（`experiment = true`）のあとに `wait_process(id, until, timeout_ms)`
-を呼びます。これは**ツールの中で**、プロセスが終わるまで（`until = "exit"`、既定）または新しい出力に Lua パターン
-（`"Epoch 5/"`）が現れるまで、最大 `background.max_lifetime_ms`（2 時間）待ちます。待っている間は:
+を呼びます。これは**ツールの中で**、プロセスが終わるまで（`until = "exit"`、既定）、新しい出力に Lua パターン
+（`"Epoch 5/"`）が現れるまで、または実験の実行なら見守りのチェックポイントまで待ちます（下の「見守られる実行」）。
+待っている間は:
 
-- モデルへのリクエストは発生しません（`read_process_output` でのポーリングはプロンプトで禁止）。2 時間の実行も
-  2 秒の実行と同じコストです
+- モデルへのリクエストは発生しません（`read_process_output` でのポーリングはプロンプトで禁止）。どれだけ長く
+  待ってもトークンは増えません
 - タイムラインの項目に経過時間と最後の出力行を表示します（`12m03s · Epoch 7/50 loss=0.41`。`\r` の進捗バーも可）
 - 待ち時間は `limits.max_duration_ms` に数えません（承認待ちと同じ）
 - `<C-c>` / `:CoagentStop` はタスクと実行を止めます。`p` / `:CoagentPause` は待つのをやめるだけで、実行は続き、
@@ -629,6 +632,44 @@ ML の作業（PyTorch の学習・評価、データ分析）向けに、実行
 結果には終了コード、新しい出力の末尾、実験のメトリクス行が入るので、エージェントはすぐに報告・比較できます。
 承認は変わりません: `start_process` は supervised では `run_command` と同じく確認し、`wait_process` は何も変えないので
 確認しません。
+
+**見守られる実行（固定の時間制限なし）。** 決まった寿命の代わりに、学習ログを見てモデルが続けるか止めるかを決めます。
+実験の実行中は、読み取ったメトリクスをステップ・エポックごとの**系列**として保持します（メモリ上と、実験エントリに
+上限つき（メトリクスあたり `max_points` 点）で保存。後の実行と同じエポックで比べるため）。`wait_process` は次の
+**チェックポイント**でだけモデルに戻ります:
+
+- 間隔（`check_every_ms`、既定は `experiments.monitor.interval_ms` = 20 分）が過ぎて、**かつ**新しいメトリクスが出た
+- **異常**を決定的に検出した（それぞれ 1 回だけ報告）: loss の NaN/Inf、loss が直近の最小値の `divergence_factor`（3）倍を
+  超えた、`CUDA out of memory`、Python の traceback、`stall_ms`（30 分）新しい出力がない（`on_events = false` でその回だけ無効）
+- プロセスが終了した
+
+チェックポイントの結果はコンパクトです: 戻った理由（間隔・異常）、経過時間、進捗と **ETA**（`Epoch 3/10`・
+`step 1200/50000`・tqdm のバー、コマンドラインの `--epochs` から）、メトリクスごとの推移 1 行（直近 5 点、それまでの
+ベストとその位置、ベストからの点数、エポック／1k ステップあたりの傾き、NaN/Inf）、**同じエポック・ステップでの過去の
+ベストの実行**との比較（「At epoch 4: this run 0.80, #7 0.84 -> worse by 0.04 (4.8%), within worse_margin」）、出力の
+最後の 20 行、そして「wait_process をもう一度呼んで続けるか、stop_process で理由をつけて止めるか決める」の指示。
+システムプロンプトは、NaN・発散、エラーや traceback、検証メトリクスが `patience`（3）回の評価で改善しない（warmup 中や
+cosine の再スタートで後から改善しうる場合を除く）、同じエポックで過去のベストより明らかに悪い、台帳の目標をすでに
+達成した、のいずれかなら止め、それ以外は続けるよう指示し、常に理由を述べさせます。`stop_process(id, reason)` は
+`stopped by agent: <理由>` を `/exp` のメモと台帳（`subtasks.md`）に記録し、パネルにお知らせを出して `'stopped'` の
+通知（`notify.on`）を送ります。エージェント自身の実行を止めるのに承認は不要です（従来どおり）。
+
+- **上限:** 見守りが有効な間、実験の実行に寿命の上限はありません（それ以外のプロセスには `background.max_lifetime_ms`
+  がそのまま効きます）。`experiments.monitor.max_hours` は任意の絶対的な安全網です（既定なし）。
+  `experiments.monitor.enabled = false` にすると、実験の実行にも `background.max_lifetime_ms` が戻り、`wait_process` は
+  従来どおり終了まで待ちます。
+- **コスト（トークン）:** 待っている間はトークンを使いません。チェックポイントごとに、それまでの会話の入力トークン
+  （ほとんどはプロンプトキャッシュから）とチェックポイント分の新しい入力 1〜3k トークン程度、短い応答がかかります。
+  間隔 20 分で 10 時間の実行ならチェックポイントは 30 回ほど。`interval_ms` を長くすればトークンが減り、短くすれば
+  早く反応します（異常はどのみちすぐ戻ります）。チェックポイントの分もタスクのトークン使用量に表示されます。
+- **ステップ:** チェックポイントへの応答は 1 つの待ちの連鎖に属し、`limits.max_steps` では 1 ステップと数えます。
+  チェックポイントで戻った `wait_process` は `max_tool_calls` に数えず、その時間も `max_duration_ms` に含めないので、
+  何日もかかる実行でもタスクは一時停止しません（それでも上限で一時停止したら、`/resume` で新しいカウンタのまま再開し、
+  エージェントがまた `wait_process` を呼びます。その間も学習は続きます）。
+- **自分で始めた実行:** `/exp watch [id]` は実行中の `/exp run` のプロセスをエージェントに渡します。同じルールで見守る
+  タスクが始まり、理由をつけて止めることもあります。`/exp unwatch [id]` はプロセスを止めずに見守りだけを終えます
+  （待っている `wait_process` は戻り、エージェントはもう待つことも止めることもできません）。`/exp watch` しない限り、
+  あなたが始めた実行をエージェントは止められません。
 
 **保存先。** `stdpath('state')/coagent/experiments/<project>-<hash>.jsonl`。リポジトリの外で、ディレクトリ 0700・
 ファイル 0600、秘密情報はセッションファイルと同じくマスクします。追記型のファイルで（自動で詰め直し）、最大
@@ -644,6 +685,8 @@ ML の作業（PyTorch の学習・評価、データ分析）向けに、実行
 | `/exp note <id> <text>` | 実行にメモを追加（「dropout 0.3、augmentation あり」など） |
 | `/exp compare [ids]` | コンパクトな Markdown の比較を `+` レジスタへ（クリップボードがなければ無名レジスタ）: メトリクス（ベストは太字）と実行ごとに違う設定値の表、共通の設定値、コマンド、実行ごとのコードの要約（`same code as #7`・変更ファイル）、メモ。id なしなら直近 `compare_runs` 件＋ベストの実行 |
 | `/exp run <command>` | コマンドをバックグラウンドで実行し、`experiments.commands` に合わなくても記録。承認は通常どおり（supervised では確認、read-only では拒否） |
+| `/exp watch [id]` | 実行中の `/exp run`（実験 id かプロセス id。1 つだけなら省略可）をエージェントに渡し、タスクとして見守らせる（チェックポイント、理由つきの停止）。エージェントが空いているときのみ |
+| `/exp unwatch [id]` | エージェントの見守りを終える（id なしなら見守り中のすべて）。プロセスは動き続ける |
 
 「ベスト」は大きいほど良いとみなします。`lower_is_better` の名前（loss, mae, rmse, mse, error, perplexity など）は小さい
 ほど良く、`neutral` の名前（epoch, lr, step など）は前回との差だけを表示します。`:CoagentExp …` は `/exp …` と同じです。
@@ -848,7 +891,7 @@ delegate = {
 | 編集 | `edit_file`, `write_file`, `delete_file` | 必要（diff 表示） |
 | コマンド | `run_command`（終了するコマンド） | 必要 |
 | バックグラウンド | `start_process`（開発サーバー、長い学習・評価。`experiment = true` で実験として記録） | 必要 |
-| | `wait_process`（終了・パターンまで待つ。モデルへのリクエストなし）, `read_process_output`, `list_processes`, `stop_process` | 不要（自分が起動したプロセスのみ対象） |
+| | `wait_process`（終了・パターン・見守りのチェックポイントまで待つ。待つ間モデルへのリクエストなし）, `read_process_output`, `list_processes`, `stop_process`（実行には理由つき） | 不要（自分が起動したプロセスと、`/exp watch` で渡された実行のみ対象） |
 
 - LSP ツールは Neovim に設定済みの言語サーバーをそのまま使います（未読込のファイルは表示せずに読み込み、自動起動を待ちます）。
   サーバーが無いファイルではエラーを返し、モデルは `search` に切り替えます
@@ -1037,6 +1080,7 @@ require('coagent').setup({
   -- 書込み/編集の結果に付ける新しい LSP 診断（「編集後の新しい診断」参照）
   diagnostics_after_edit = { enabled = true, min_severity = 'error', timeout_ms = 1500, max_items = 10 },
   -- max_lifetime_ms: バックグラウンドのプロセスはこの時間で終了。wait_process の最長の待ち時間でもある
+  -- （experiments.monitor.enabled の間、実験の実行には適用しない。そちらは max_hours を参照）
   background = { max_processes = 3, max_output_bytes = 1024 * 1024, max_lifetime_ms = 2 * 60 * 60 * 1000 },
   session = { persist = true, save_tool_output = true },
   ui = { layout = 'vertical', width = 0.42, icons = 'unicode', show_reasoning = false },
@@ -1053,6 +1097,17 @@ require('coagent').setup({
     patterns = { { pattern = 'Top%-1 acc ([%d%.]+)', key = 'top1' } }, -- 追加のメトリクス
     log_files = { 'lightning_logs/*/metrics.csv' }, -- 実行が書き出すメトリクスファイル
     max_diff_bytes = 100 * 1024,
+    -- モデルが見守る実行（「見守られる実行」参照）。有効な間、実験の実行に寿命の上限はない
+    monitor = {
+      enabled = true,
+      interval_ms = 20 * 60 * 1000, -- チェックポイントの間隔（wait_process の check_every_ms）
+      stall_ms = 30 * 60 * 1000,    -- この時間出力がなければ異常
+      patience = 3,                 -- 改善しない評価の回数（プロンプトの指針）
+      divergence_factor = 3,        -- loss が直近の最小値のこの倍を超えたら異常
+      worse_margin = 0.05,          -- 同じエポックの過去のベストとの相対差がこれを超えたら「明らかに悪い」
+      max_hours = nil,              -- 任意の絶対的な安全網（nil = なし）
+      max_points = 100, trend_points = 5, tail_lines = 20,
+    },
   },
   ledger = {
     enabled = true,
@@ -1067,7 +1122,7 @@ require('coagent').setup({
   inline = { context_lines = 40, keymaps = { accept = 'ga', reject = 'gr', retry = 'gi', diff = 'gd' } },
   -- サブタスクを別のチャットに任せる（「サブタスクを別のチャットに任せる」参照）
   delegate = { language = 'en', download_dir = nil, review_imports = true, auto_followup = false, max_source_bytes = 2 * 1024 * 1024, kinds = {} },
-  notify = { on = { 'approval', 'done', 'failed', 'limit', 'waiting' }, bell = true, desktop = false, only_when_unfocused = true },
+  notify = { on = { 'approval', 'done', 'failed', 'limit', 'waiting', 'stopped' }, bell = true, desktop = false, only_when_unfocused = true },
 })
 ```
 

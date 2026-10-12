@@ -186,13 +186,23 @@ ML の学習・評価の実行とメトリクスをプロジェクトごとに�
 - バックグラウンドの実行はプロセス終了時に記録され、パネルにお知らせが出る
 - 長い実行: `run_command` は最長 15 分。それより長い学習・評価はエージェントが `start_process`（`experiment = true`）で起動し、
   `wait_process(id, until, timeout_ms)` で終了（または `until` のパターン）まで**ツールの中で**待つ。待っている間はモデルへの
-  リクエストなし、`limits.max_duration_ms` に数えない、上限は `background.max_lifetime_ms`。ツール項目に経過時間と最後の出力行。
+  リクエストなし、`limits.max_duration_ms` に数えない。ツール項目に経過時間と最後の出力行。
   結果は終了コード・出力の末尾・実験のメトリクス行。`p` は待つのをやめるだけ（実行は続く）、`<C-c>` は実行ごと停止
+- 見守られる実行（固定の時間制限なし）: 実験の実行は寿命の上限なし（`background.max_lifetime_ms` は実験以外のプロセスだけ。
+  `experiments.monitor.max_hours` は任意の安全網）。実行中は指標をステップ・エポックごとの系列として保持し（エントリにも上限つきで保存）、
+  `wait_process` は `check_every_ms`（既定 `experiments.monitor.interval_ms` = 20 分）が過ぎて新しい指標が出たとき、
+  異常（loss の NaN/Inf・直近の最小値の 3 倍超・`CUDA out of memory`・traceback・`stall_ms` の無出力）のとき、終了時にだけ戻る。
+  結果は推移（直近 5 点・ベスト・ベストからの点数・傾き・NaN）、進捗と ETA、同じエポックでの過去のベストとの比較、出力の最後の 20 行と
+  「続ける（wait_process）か理由つきで止める（stop_process）か決める」の指示。止めると `/exp` のメモ（`stopped by agent: <理由>`）と
+  台帳に記録し、`'stopped'` を通知。費用はトークンで、待つ間は 0、チェックポイントごとに会話の入力（ほぼキャッシュ）＋新しい入力 1〜3k
+  トークン程度。チェックポイントへの応答は `max_steps` では 1 ステップ
 - 保存先: `stdpath('state')/coagent/experiments/<project>-<hash>.jsonl`（0600、リポジトリ外、秘密情報はマスク）
 - `/exp` — 表（`値 Δ前回/Δベスト`、`*` がベスト）。`<CR>` 詳細、`D` 前回との差分、`c` 比較をコピー、`R` 再表示、`q` 閉じる
 - `/exp show <id>` 詳細、`/exp diff <a> [b]` 記録した差分どうしの違い、`/exp note <id> <text>` メモ
 - `/exp compare [ids]` — Web チャットに貼るための Markdown の比較を `+` レジスタへ
 - `/exp run <command>` — バックグラウンドで実行して記録（承認は通常どおり）
+- `/exp watch [id]` — 実行中の `/exp run` をエージェントに渡して見守らせる（同じ基準で、理由つきで止めることもある）。
+  `/exp unwatch [id]` — 実行を止めずに見守りだけ終える。`/exp watch` しない限り、エージェントはあなたの実行を止められない
 - エージェントは読み取り専用の `experiments` ツールで表・詳細・比較を読める
 - `:CoagentExp …` も同じ
 
@@ -419,7 +429,7 @@ app/models.py:42:12 [Pyright] "user_id" is not defined
 エージェントはリクエストのたびに履歴全体を送り直すため、ループが暴走するとトークン（費用・クォータ）を消費し続けます。
 `limits` はその歯止めです。
 
-- `max_steps`（既定 40 リクエスト）、`max_tool_calls`（120 回）、`max_duration_ms`（30 分。承認待ちと `wait_process` の待ち時間は含まない）に達すると、
+- `max_steps`（既定 40 リクエスト。見守り中の学習のチェックポイントへの応答はまとめて 1 ステップ）、`max_tool_calls`（120 回）、`max_duration_ms`（30 分。承認待ちと `wait_process` の待ち時間は含まない）に達すると、
   タスクは**一時停止（PAUSED、reason `limit`）**します。パネルにどの上限か・使用量・続け方が表示され、winbar は `paused (limit)`
 - `R` / `:CoagentResume` / `/resume` で、同じタスク・同じ履歴のままカウンタをリセットして続行。止まるのはステップの切れ目
   （直前のツール結果はすべて記録済み）なので、再実行される呼び出しはありません。完了時のサマリーは全区間の合計を表示します
@@ -430,7 +440,8 @@ app/models.py:42:12 [Pyright] "user_id" is not defined
 
 ### 通知
 
-Neovim にフォーカスが無いとき、承認待ち・完了・失敗・上限による一時停止（`'limit'`）・別のチャットの結果待ち（`'waiting'`）を知らせます
+Neovim にフォーカスが無いとき、承認待ち・完了・失敗・上限による一時停止（`'limit'`）・別のチャットの結果待ち（`'waiting'`）・
+見守り中の学習をエージェントが止めたこと（`'stopped'`）を知らせます
 （`notify.on` に `'paused'` を足すと手動の一時停止・割り込みも）。
 
 - 既定は端末ベル（BEL）のみ。tmux ではそのウィンドウにベルフラグが立ちます

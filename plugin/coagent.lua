@@ -62,12 +62,12 @@ cmd('CoagentExp', function(a)
   agent().exp(a.args)
 end, {
   nargs = '*',
-  desc = 'Experiment log: table, show <id>, diff <a> [b], note <id> <text>, compare [ids], run <command>',
+  desc = 'Experiment log: table, show <id>, diff <a> [b], note <id> <text>, compare [ids], run <command>, watch [id], unwatch [id]',
   complete = function(_, line)
     if line:match('^%S+%s+%S+%s') then
       return {}
     end
-    return { 'show', 'diff', 'note', 'compare', 'run' }
+    return { 'show', 'diff', 'note', 'compare', 'run', 'watch', 'unwatch' }
   end,
 })
 cmd('CoagentLedger', function(a)

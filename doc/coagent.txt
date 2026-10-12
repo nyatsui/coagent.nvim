@@ -593,8 +593,9 @@ Long runs are hands-off. run_command stops at `commands.max_timeout_ms`
 (15 minutes); for training / evaluation that may take longer the agent
 calls start_process (experiment = true) and then
 `wait_process(id, until, timeout_ms)`. It blocks inside the tool until the
-process exits (until = "exit", the default) or a Lua pattern appears in
-its new output, at most `background.max_lifetime_ms`. While it waits no
+process exits (until = "exit", the default), a Lua pattern appears in its
+new output, or (experiment runs) a monitoring checkpoint comes
+(|coagent-monitor|). While it waits no
 model request is made (the prompt forbids polling read_process_output),
 the tool item shows the runtime and the last output line, and the wait is
 not counted toward `limits.max_duration_ms`. <C-c> / :CoagentStop stops
@@ -602,6 +603,50 @@ the task and the run; p / :CoagentPause only stops waiting (the run keeps
 going; /resume waits again). The result has the exit code, the tail of the
 new output and the experiment's metrics line. wait_process changes nothing
 and needs no approval; start_process asks like run_command.
+
+                                                        *coagent-monitor*
+Monitored runs: instead of a fixed lifetime the model decides from the
+training log whether a run continues. While an experiment run goes, its
+metrics are kept as a per-step / per-epoch series (in memory, and capped,
+`max_points` per metric, in the experiment entry for later comparisons).
+wait_process on the run returns to the model only at a checkpoint:
+  - `check_every_ms` (default `experiments.monitor.interval_ms`, 20 min)
+    passed AND new metrics arrived;
+  - an anomaly, detected deterministically and reported once each: NaN/Inf
+    in a loss, a loss above `divergence_factor` (3) x its recent minimum,
+    "CUDA out of memory", a Python traceback, no output for `stall_ms`
+    (30 min) (`on_events = false` turns these off for one wait);
+  - the process exited.
+The result has the reason, runtime, progress and ETA (Epoch 3/10, step
+1200/50000, tqdm bars, --epochs), one trend line per metric (last 5
+points, best so far, points since the best, slope, NaN/Inf), the best
+previous run at the same epoch / step, the last 20 output lines and
+"decide: call wait_process again to continue, or stop_process with a
+reason". The system prompt tells the model to stop on NaN / divergence,
+an error or traceback, no improvement of the validation metric for
+`patience` evaluations (unless warmup or a restart makes one plausible),
+a run clearly worse than the best run at the same epoch, or a ledger goal
+already reached; otherwise to continue; always with the reason.
+`stop_process(id, reason)` records "stopped by agent: <reason>" as an /exp
+note and in the ledger, shows a notice and sends the 'stopped'
+notification. Stopping the agent's own run needs no approval.
+
+Limits: experiment runs have no lifetime cap while monitoring is on
+(`background.max_lifetime_ms` still applies to other processes);
+`experiments.monitor.max_hours` is an optional absolute net (default
+none). Cost in tokens: waiting costs nothing; each checkpoint costs the
+input tokens of the conversation (mostly cached) plus about 1-3k new
+tokens and a short answer. The answers to checkpoints of one wait chain
+count as a single step of `limits.max_steps`; checkpoint returns do not
+count toward `max_tool_calls` and their time is not counted toward
+`max_duration_ms`. If a task pauses at a limit anyway, /resume continues
+and the agent waits again (the run keeps going).
+
+`/exp watch [id]` hands a running /exp run process to the agent (a task
+with the same rules; it may stop the run with a reason). `/exp unwatch
+[id]` ends monitoring without killing the process: a waiting wait_process
+returns and the agent may no longer wait for or stop it. Without /exp
+watch the agent cannot stop a run you started.
 
 Storage: stdpath('state')/coagent/experiments/<project>-<hash>.jsonl,
 outside the repository, directory 0700, file 0600, secrets masked.
@@ -626,6 +671,9 @@ Append-only (last record of an id wins), compacted automatically, at most
   /exp run <command>  Run in the background and record it. The usual
                       approval of start_process applies (asks in
                       supervised mode, refused in read-only mode).
+  /exp watch [id]     Hand a running /exp run to the agent for
+                      monitoring (|coagent-monitor|); needs an idle agent.
+  /exp unwatch [id]   End the agent's monitoring; the run keeps going.
 
 "Best" is the highest value, the lowest for names in `lower_is_better`
 (loss, mae, rmse, ...); `neutral` names (epoch, lr, step) only show the
@@ -645,6 +693,16 @@ runs whose command or notes contain it.
     columns = nil, max_columns = 5, primary = nil, compare_runs = 5,
     max_diff_bytes = 100 * 1024, max_output_tail = 8 * 1024,
     max_entries = 500,
+    monitor = {                      -- |coagent-monitor|
+      enabled = true,
+      interval_ms = 20 * 60 * 1000,  -- checkpoint interval
+      stall_ms = 30 * 60 * 1000,     -- no output this long = anomaly
+      patience = 3,                  -- evaluations without improvement
+      divergence_factor = 3, divergence_window = 50, min_points = 5,
+      worse_margin = 0.05,           -- "clearly worse" than the best run
+      max_hours = nil,               -- optional absolute net (nil = none)
+      max_points = 100, trend_points = 5, tail_lines = 20, max_keys = 8,
+    },
   }
 <
 
@@ -853,7 +911,7 @@ commands are never queued; they run at once.
 When Neovim does not have focus, coagent rings the terminal bell on the
 events in `notify.on`: >lua
     notify = {
-      on = { 'approval', 'done', 'failed', 'limit', 'waiting' }, -- also: 'paused'
+      on = { 'approval', 'done', 'failed', 'limit', 'waiting', 'stopped' }, -- also: 'paused'
       bell = true,                -- BEL to the terminal (tmux: bell flag)
       desktop = false,            -- notify-send (Linux) / osascript (macOS)
       only_when_unfocused = true,
@@ -871,7 +929,8 @@ per-task limit pauses the task (|coagent-limits|); 'paused' covers the
 other pauses (:CoagentPause, interruptions). A plan ready for approval
 (|coagent-plan|) is sent as 'approval' ("approval needed (plan)"), not
 'done'. 'waiting' is sent when a task starts waiting for a delegated
-subtask (|coagent-delegate|).
+subtask (|coagent-delegate|). 'stopped' is sent when the agent stops a
+monitored training run (|coagent-monitor|).
 
                                                         *coagent-limits*
 Per-task limits are brakes against runaway loops: every request resends
@@ -891,7 +950,8 @@ result. The panel says which limit, the usage so far and how to continue;
 the status bar shows "paused (limit)". :CoagentResume, /resume or `R`
 continues the same task and history with fresh counters; nothing is
 re-run. /stop ends it; a new message starts a new task instead. Time spent
-waiting for approval does not count. The pause is saved with the session
+waiting for approval or in wait_process does not count. The answers to the
+checkpoints of a monitored run count as one step (|coagent-monitor|). The pause is saved with the session
 and can be resumed after restoring it (:CoagentSessions).
 
 Denying `max_consecutive_denials` actions in a row, or the model repeating

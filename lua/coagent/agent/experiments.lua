@@ -62,6 +62,13 @@ local function known(key, names, prefixes)
   return prefix ~= nil and prefixes[prefix] == true and names[rest] == true
 end
 
+--- Is `key` a metric name of `cfg` (experiments config)?
+---@param key string
+---@param cfg table
+function M.known(key, cfg)
+  return known(key, set_of(cfg.metrics), set_of(cfg.metric_prefixes))
+end
+
 ---@class Coagent.Metrics
 ---@field values table<string, number>
 ---@field order string[] keys in order of first appearance
@@ -106,6 +113,10 @@ function M.extract(text, cfg)
     local trimmed = vim.trim(line)
     if cfg.json_lines ~= false and trimmed:sub(1, 1) == '{' and trimmed:sub(-1) == '}' then
       local obj = util.json_decode(trimmed)
+      if type(obj) ~= 'table' and trimmed:find("'", 1, true) then
+        -- a Python dict ({'loss': 0.69, 'epoch': 0.5}, Hugging Face Trainer)
+        obj = util.json_decode((trimmed:gsub("'", '"')))
+      end
       if type(obj) == 'table' then
         -- vim.tbl_keys order is arbitrary: sort for a stable first-seen order
         local keys = vim.tbl_keys(obj)
@@ -336,6 +347,7 @@ end
 ---@field files string[]? metrics files that were parsed
 ---@field output_tail string?
 ---@field notes {time:integer, text:string}[]
+---@field series table? per-metric series of the run, capped (agent/monitor.lua Series:export)
 
 ---@class Coagent.Experiments
 ---@field config table experiments config
@@ -845,7 +857,7 @@ end
 
 ---@class Coagent.ExperimentRun
 ---@field entry Coagent.ExperimentEntry
----@field finish fun(res:{code:integer?, output:string?, duration_ms:integer?, timed_out:boolean?, killed:boolean?, error:string?}):Coagent.ExperimentEntry
+---@field finish fun(res:{code:integer?, output:string?, duration_ms:integer?, timed_out:boolean?, killed:boolean?, error:string?, series:table?}):Coagent.ExperimentEntry
 
 --- Start recording a run when `command` matches (or `opts.force`: the
 --- model's experiment = true, /exp run).
@@ -909,6 +921,7 @@ function Log:begin(command, cwd, opts)
       M.merge_metrics(m, fm)
       e.metrics, e.metric_order = m.values, m.order
       e.files = #files > 0 and files or nil
+      e.series = res.series
       e.output_tail = util.clip_tail(util.redact((out:gsub('\27%[[%d;?]*%a', ''))), log.config.max_output_tail or 8192)
       -- keep notes added while the run was going
       local cur = log:get(e.id)
@@ -945,6 +958,20 @@ function Log:note(id, text)
   table.insert(e.notes, { time = now_s(), text = util.redact(text) })
   self:_write(e)
   return true
+end
+
+--- Store the (capped) metric series of a run that is still going, so a
+--- crash of Neovim keeps it; the final record replaces it.
+---@param id integer
+---@param series table
+function Log:set_series(id, series)
+  local e = self:get(id)
+  if not e or e.status ~= 'running' then
+    return false
+  end
+  e = vim.deepcopy(e)
+  e.series = series
+  return self:_write(e)
 end
 
 ------------------------------------------------------------------------------

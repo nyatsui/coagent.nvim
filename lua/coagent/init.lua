@@ -716,7 +716,7 @@ end
 -- Experiment log (/exp)
 ------------------------------------------------------------------------------
 
-M.EXP_USAGE = '/exp [show <id> | diff <a> [b] | note <id> <text> | compare [ids] | run <command>]'
+M.EXP_USAGE = '/exp [show <id> | diff <a> [b] | note <id> <text> | compare [ids] | run <command> | watch [id] | unwatch [id]]'
 
 --- Put text into the + register (the unnamed one too, when no clipboard).
 ---@param text string
@@ -800,6 +800,91 @@ local function exp_run(c, command)
       c:notice('info', '/exp run: cancelled.')
     end
   end)
+  return true
+end
+
+--- Running background processes of experiment runs matching `ref`: an
+--- experiment id ("3", "#3"), a process id ("bg2"), or "" (all).
+---@param c Coagent.Controller
+---@param ref string
+---@param pred fun(p:Coagent.BgProcess):boolean
+---@return Coagent.BgProcess[]
+local function exp_processes(c, ref, pred)
+  ref = vim.trim(ref or '')
+  local id = tonumber(ref:match('^[#e]?(%d+)$') or '')
+  local out = {}
+  for _, p in ipairs(c.processes:list()) do
+    if p.status == 'running' and pred(p) and (ref == '' or p.id == ref or (id and p.exp_id == id)) then
+      table.insert(out, p)
+    end
+  end
+  return out
+end
+
+--- `/exp watch [id]`: hand a running `/exp run` process to the agent, which
+--- monitors it like its own runs (checkpoints, stop with a reason). A task.
+---@param c Coagent.Controller
+---@param ref string
+---@return boolean
+local function exp_watch(c, ref)
+  local Monitor = require('coagent.agent.monitor')
+  if not Monitor.enabled(c.config) then
+    c:notice('warn', '/exp watch: monitoring is off (experiments.monitor.enabled = false).')
+    return false
+  end
+  local list = exp_processes(c, ref, function(p)
+    return p.exp_id ~= nil
+  end)
+  if #list == 0 then
+    c:notice('error', '/exp watch: no running experiment run' .. (vim.trim(ref) ~= '' and (' matches "' .. vim.trim(ref) .. '"') or '') .. ' (start one with /exp run <command>).')
+    return false
+  elseif #list > 1 then
+    c:notice('error', '/exp watch: several runs are going (' .. table.concat(vim.tbl_map(function(p)
+      return '#' .. p.exp_id .. ' ' .. p.id
+    end, list), ', ') .. '); give an id.')
+    return false
+  end
+  local p = list[1]
+  if c:busy() or c:state() == 'PAUSED' then
+    c:notice('warn', '/exp watch: the agent is working on a task; let it finish (or end it) first. Stopping the agent would also stop background runs.')
+    return false
+  end
+  p.watched, p.released = true, nil
+  c.processes:ensure_series(p, c.config)
+  local text = string.format('Monitor the training run experiment #%d (background process %s), which the user started with /exp run: `%s`. '
+    .. 'Call wait_process with id "%s" and decide at every checkpoint whether it continues or stops, following the rules for '
+    .. 'experiment runs (stop_process with a reason when it should stop). Do not start other runs or change files. '
+    .. 'When it exits or you stop it, report the result in a few lines.', p.exp_id, p.id, util.ellipsize(p.command, 300), p.id)
+  local ok, err = c:submit(text, { source = c.source, skip_plan = true, input = '/exp watch ' .. vim.trim(ref) })
+  if not ok then
+    p.watched = nil
+    c:notice('warn', '/exp watch: ' .. tostring(err))
+    return false
+  end
+  c:notice('info', string.format('Experiment #%d (%s) is now monitored by the agent; /exp unwatch ends that without stopping the run.', p.exp_id, p.id))
+  return true
+end
+
+--- `/exp unwatch [id]`: end the agent's monitoring of runs (a waiting
+--- wait_process returns; the agent may no longer wait for or stop them). The
+--- processes keep running.
+---@param c Coagent.Controller
+---@param ref string
+---@return boolean
+local function exp_unwatch(c, ref)
+  local list = exp_processes(c, ref, function(p)
+    return not p.released and (p.watched or p.series ~= nil)
+  end)
+  if #list == 0 then
+    c:notice('warn', '/exp unwatch: no monitored run' .. (vim.trim(ref) ~= '' and (' matches "' .. vim.trim(ref) .. '"') or '') .. '.')
+    return false
+  end
+  for _, p in ipairs(list) do
+    p.watched, p.released = nil, true
+  end
+  c:notice('info', 'Monitoring ended (the run' .. (#list > 1 and 's keep' or ' keeps') .. ' going): ' .. table.concat(vim.tbl_map(function(p)
+    return (p.exp_id and ('#' .. p.exp_id .. ' ') or '') .. p.id
+  end, list), ', '))
   return true
 end
 
@@ -903,6 +988,10 @@ function M.exp(arg)
       return false
     end
     return exp_run(c, rest)
+  elseif verb == 'watch' then
+    return exp_watch(c, rest)
+  elseif verb == 'unwatch' then
+    return exp_unwatch(c, rest)
   end
   c:notice('error', '/exp: unknown argument "' .. arg .. '". Usage: ' .. M.EXP_USAGE)
   return false

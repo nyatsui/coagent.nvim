@@ -90,9 +90,9 @@ M.COMMANDS = {
   },
   {
     name = 'exp',
-    args = '[show|diff|note|compare|run ...]',
-    desc = 'Experiment log: table, details, diff, notes, Markdown comparison (local, no request)',
-    complete = { 'show', 'diff', 'note', 'compare', 'run' },
+    args = '[show|diff|note|compare|run|watch|unwatch ...]',
+    desc = 'Experiment log: table, details, diff, notes, Markdown comparison (local, no request); watch hands a run to the agent',
+    complete = { 'show', 'diff', 'note', 'compare', 'run', 'watch', 'unwatch' },
     run = function(arg)
       local ok = app().exp(arg)
       return ok

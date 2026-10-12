@@ -54,12 +54,14 @@ local defaults = {
 
   -- Get the user's attention when the agent needs it. on: 'approval' | 'done'
   -- | 'failed' | 'paused' | 'limit' (a step/tool-call/time limit paused the task)
-  -- | 'waiting' (the task delegated a subtask to another chat and waits for its result). bell: BEL to the terminal (tmux flags the window).
+  -- | 'waiting' (the task delegated a subtask to another chat and waits for its result)
+  -- | 'stopped' (the agent stopped a monitored training run).
+  -- bell: BEL to the terminal (tmux flags the window).
   -- desktop: notify-send (Linux) / osascript (macOS); generic text only, never
   -- prompt or code. only_when_unfocused: needs terminal focus reporting
   -- (tmux: `set -g focus-events on`), otherwise Neovim always counts as focused.
   notify = {
-    on = { 'approval', 'done', 'failed', 'limit', 'waiting' },
+    on = { 'approval', 'done', 'failed', 'limit', 'waiting', 'stopped' },
     bell = true,
     desktop = false,
     only_when_unfocused = true,
@@ -150,7 +152,9 @@ local defaults = {
   background = {
     max_processes = 3, -- concurrent background processes (start_process)
     max_output_bytes = 1024 * 1024, -- retained output per process (tail)
-    max_lifetime_ms = 2 * 60 * 60 * 1000, -- killed automatically after this (also the longest wait_process)
+    -- killed automatically after this (also the longest wait_process); not for
+    -- experiment runs while experiments.monitor is enabled (see max_hours there)
+    max_lifetime_ms = 2 * 60 * 60 * 1000,
   },
 
   auto = {
@@ -280,7 +284,7 @@ local defaults = {
     json_lines = true, -- numeric fields of output lines that are JSON objects
     log_files = {}, -- e.g. { 'lightning_logs/*/metrics.csv', 'outputs/**/metrics.json' }
     lower_is_better = { 'loss', 'mae', 'rmse', 'mse', 'error', 'err', 'perplexity', 'ppl', 'wer', 'cer' },
-    neutral = { 'epoch', 'lr', 'step', 'steps', 'iter', 'time', 'batch' }, -- no "best"
+    neutral = { 'epoch', 'lr', 'step', 'steps', 'iter', 'time', 'batch', 'learning_rate', 'grad_norm', 'global_step' }, -- no "best"
     columns = nil, -- metric columns of /exp (nil = automatic)
     max_columns = 5,
     primary = nil, -- metric that picks the best run for /exp compare (nil = first column)
@@ -288,6 +292,33 @@ local defaults = {
     max_diff_bytes = 100 * 1024,
     max_output_tail = 8 * 1024,
     max_entries = 500, -- per project; the oldest are dropped
+    -- Model-monitored runs. While an experiment run goes, its metrics are
+    -- kept as a per-step/epoch series. wait_process on the run returns to the
+    -- model only at checkpoints: every interval_ms once new metrics arrived,
+    -- and right away on an anomaly (NaN/Inf loss, loss above
+    -- divergence_factor x its recent minimum, CUDA out of memory, a Python
+    -- traceback, no output for stall_ms) or when the process exits. The model
+    -- then continues waiting or stops the run with a reason (recorded in /exp
+    -- and the ledger). No requests are made while waiting; each checkpoint is
+    -- one request (it resends the conversation, mostly from the cache) and the
+    -- requests of one wait chain count as a single step of limits.max_steps.
+    -- Experiment runs have no lifetime cap while monitoring is on
+    -- (background.max_lifetime_ms still applies to other processes).
+    monitor = {
+      enabled = true,
+      interval_ms = 20 * 60 * 1000, -- default check_every_ms of wait_process
+      stall_ms = 30 * 60 * 1000, -- no new output for this long is an anomaly
+      patience = 3, -- evaluations without improvement before the model should stop (prompt guidance)
+      divergence_factor = 3, -- loss (mean of the last 3 points) above factor x its recent minimum
+      divergence_window = 50, -- points that make up the "recent minimum"
+      min_points = 5, -- loss points needed before divergence is checked
+      worse_margin = 0.05, -- relative gap to the best run at the same epoch/step called "clearly worse"
+      max_hours = nil, -- optional absolute safety net for experiment runs (nil = none)
+      max_points = 100, -- points per metric stored in the experiment entry
+      trend_points = 5, -- last k points per metric in a checkpoint
+      tail_lines = 20, -- output lines in a checkpoint
+      max_keys = 8, -- metrics shown in a checkpoint
+    },
   },
 
   -- Project ledger: the single source of truth about the ongoing work, kept
