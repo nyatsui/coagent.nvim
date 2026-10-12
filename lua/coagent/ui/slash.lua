@@ -21,7 +21,7 @@ local ROLES = { 'builder', 'explorer', 'advisor' }
 ---@field name string
 ---@field args string? usage hint for the argument
 ---@field desc string
----@field complete string[]? argument candidates
+---@field complete (string[]|fun():string[])? argument candidates
 ---@field template boolean? a prompt template
 ---@field run fun(arg:string):boolean?, table?
 
@@ -65,6 +65,27 @@ M.COMMANDS = {
     desc = 'Run a task without the plan phase (with plan.default = true)',
     run = function(arg)
       return app().go(arg)
+    end,
+  },
+  {
+    name = 'skills',
+    args = '[enable|disable <name>|reload]',
+    desc = 'List Agent Skills (user / repo); enable or disable one for the session',
+    complete = { 'enable', 'disable', 'reload' },
+    run = function(arg)
+      return app().skills(arg)
+    end,
+  },
+  {
+    name = 'skill',
+    args = '<name> [task]',
+    desc = 'Use a skill for a task (its instructions are attached)',
+    complete = function()
+      local ok, c = pcall(app().controller)
+      return ok and c and c.skills and c.skills:names() or {}
+    end,
+    run = function(arg)
+      return app().use_skill(arg)
     end,
   },
   {
@@ -369,7 +390,8 @@ function M.complete(before)
   local cmd = name and M.get(name)
   if cmd and cmd.complete then
     local items = {}
-    for _, a in ipairs(cmd.complete) do
+    local cands = type(cmd.complete) == 'function' and cmd.complete() or cmd.complete
+    for _, a in ipairs(cands) do
       if vim.startswith(a, argp) then
         table.insert(items, { word = a, menu = '/' .. name })
       end

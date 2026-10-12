@@ -603,6 +603,115 @@ function M.go(arg)
   return ok
 end
 
+------------------------------------------------------------------------------
+-- Skills
+------------------------------------------------------------------------------
+
+--- Text of /skills: every discovered skill with its source and state, and
+--- the SKILL.md files that were skipped.
+---@param skills Coagent.Skills
+---@return string
+function M._skills_text(skills)
+  local all = skills:all()
+  local lines = {}
+  if skills.config.enabled == false then
+    return 'Skills are disabled (skills.enabled = false).'
+  end
+  if #all == 0 then
+    table.insert(lines, 'No skills found. Put skill folders (each with a SKILL.md) in '
+      .. table.concat(skills.config.paths or {}, ', ')
+      .. (skills.config.repo ~= false and ', or in .github/skills/, .claude/skills/, .agents/skills/ of the repository.' or '.'))
+  else
+    table.insert(lines, string.format('Skills (%d): /skills disable <name> hides one for this session; /skill <name> [task] uses one.', #all))
+    for _, s in ipairs(all) do
+      table.insert(lines, string.format('  %s %-24s %-4s %s%s', s.enabled and '[x]' or '[ ]', s.name, s.trusted and 'user' or 'repo',
+        vim.fn.fnamemodify(s.path, ':~:.'), s.trusted and '' or '  (untrusted)'))
+      table.insert(lines, '      ' .. util.ellipsize((s.description:gsub('%s+', ' ')), 110))
+      if #(s.unknown_tools or {}) > 0 then
+        table.insert(lines, '      allowed-tools not understood (ignored): ' .. table.concat(s.unknown_tools, ', '))
+      end
+    end
+  end
+  for _, p in ipairs(skills.problems) do
+    table.insert(lines, '  skipped ' .. vim.fn.fnamemodify(p.path, ':~:.') .. ': ' .. p.error)
+  end
+  return table.concat(lines, '\n')
+end
+
+--- `/skills [enable|disable <name>|reload]`. Without arguments: list them
+--- and pick one to enable/disable for this session. Changes apply from the
+--- next task (the skills list in the system prompt is fixed per task).
+---@param arg string?
+---@return boolean?
+function M.skills(arg)
+  local c = M.controller()
+  local skills = c.skills
+  if not skills then
+    c:notice('warn', 'Skills are not available.')
+    return false
+  end
+  arg = vim.trim(arg or '')
+  local verb, name = arg:match('^(%S+)%s*(.-)$')
+  if verb == 'reload' then
+    skills:refresh()
+    c:notice('info', M._skills_text(skills))
+    return
+  elseif verb == 'enable' or verb == 'disable' then
+    if name == '' then
+      c:notice('error', '/skills ' .. verb .. ': give a skill name')
+      return false
+    end
+    local ok, err = skills:set_enabled(name, verb == 'enable')
+    if not ok then
+      c:notice('error', '/skills: ' .. err)
+      return false
+    end
+    c:save(true)
+    c:notice('info', string.format('Skill %s %sd for this session (from the next task).', name, verb))
+    return
+  elseif arg ~= '' then
+    c:notice('error', '/skills: unknown argument "' .. arg .. '" (enable <name> | disable <name> | reload)')
+    return false
+  end
+  c:notice('info', M._skills_text(skills))
+  local all = skills:all()
+  if #all == 0 then
+    return
+  end
+  vim.ui.select(all, {
+    prompt = 'Enable / disable a skill for this session',
+    format_item = function(s)
+      return string.format('%s %s  [%s]  %s', s.enabled and '[x]' or '[ ]', s.name, s.trusted and 'user' or 'repo', vim.fn.fnamemodify(s.path, ':~:.'))
+    end,
+  }, function(s)
+    if s then
+      M.skills((s.enabled and 'disable ' or 'enable ') .. s.name)
+    end
+  end)
+end
+
+--- `/skill <name> [task]`: run a task with a skill loaded up front.
+---@param arg string?
+---@return boolean ok
+function M.use_skill(arg)
+  local c = M.controller()
+  local name, task = vim.trim(arg or ''):match('^(%S+)%s*(.-)$')
+  if not name then
+    local names = c.skills and c.skills:names() or {}
+    c:notice('error', '/skill: give a skill name' .. (#names > 0 and (' (' .. table.concat(names, ', ') .. ')') or ' (no skills found; see /skills)'))
+    return false
+  end
+  c.source = source()
+  local sel = state.selection
+  state.selection = nil
+  local text = task ~= '' and task or string.format('Use the "%s" skill.', name)
+  local ok, err = c:submit(text, { source = c.source, selection = sel, skill = name, input = '/skill ' .. vim.trim(arg) })
+  if not ok then
+    c:notice('warn', '/skill: ' .. tostring(err))
+  end
+  return ok
+end
+
 function M.new_session()
   local c = state.controller
   if c and c:busy() then

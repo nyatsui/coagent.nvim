@@ -107,6 +107,8 @@
 | `/compact summary` | 古いやり取りを現在のモデルで 1 回要約し、1 メッセージに置換（1 リクエスト。`<C-c>` で中止可） |
 | `/plan [task\|approve\|discard]` | 計画を先に確認（[計画を先に確認する](#計画を先に確認するplan--coagentplan)） |
 | `/go <task>` | 計画フェーズなしで実行（`plan.default = true` のとき） |
+| `/skills [enable\|disable <name>\|reload]` | Agent Skills の一覧 / このセッションだけ有効・無効（[Agent Skills](#agent-skills)） |
+| `/skill <name> [task]` | スキルを最初から読み込んでタスクを実行 |
 | `/new` `/sessions` `/model [role]` `/mode [mode]` `/roles [preset]` | 対応する `:Coagent*` コマンドと同じ |
 | `/usage [billing]` `/changes` `/diff` `/review` `/stop` `/processes` | 同上（`/usage billing` は GitHub の請求ページを開く） |
 | `/resume` | 一時停止したタスクを再開（`:CoagentResume` と同じ。上限による一時停止ならカウンタをリセット） |
@@ -145,6 +147,24 @@
 - `/review` は hunk レビューのまま。コードレビューは `/codereview`
 - 独自テンプレートは設定の `prompts = { Name = { prompt = '...', mode = 'readonly', description = '...' } }` のみ
   （リポジトリのファイルからは定義不可）。`Name = false` で組み込みを無効化
+
+### Agent Skills
+
+`SKILL.md` を含むフォルダ（Claude Code / VS Code Copilot と同じ形式）をスキルとして使います。
+
+- 置き場所: 自分のスキルは `~/.config/coagent/skills/<name>/SKILL.md`（`skills.paths`）。`skills.repo = true` なら
+  リポジトリの `.github/skills/`・`.claude/skills/`・`.agents/skills/` も読む
+- システムプロンプトには `- name: description` の一覧だけ（名前順・件数と長さに上限・タスク中は不変）。
+  リポジトリのスキルには `(repo)` が付く
+- モデルがタスクに合うスキルを `use_skill` で読み込むと、タイムラインに `skill: <name>` と表示。本文とファイル一覧が返り、
+  参考資料は `read_file` で読む。自分のスキルのファイルはワークスペース外でも承認なしで読める（読み取り専用）
+- リポジトリのスキルは `AGENTS.md` と同じく信頼しない参考情報。どのスキルも権限・モデル・モードを変えられない。
+  `allowed-tools` は読み込んだ後のファイル変更・コマンド系ツールを絞るだけ
+- スキル内のスクリプトは自動では実行しない。`run_command` の承認が必要（`auto` モードでもスキルのフォルダを参照する
+  コマンドは自動承認しない）
+- `/skills` で一覧（パス・user / repo・有効か・スキップした `SKILL.md`）を表示し、選んだスキルをこのセッションだけ有効 / 無効に
+  （次のタスクから反映）。`/skills reload` で再スキャン、`:CoagentSkills` も同じ
+- `/skill <name> [task]` はスキルを最初からメッセージに添付してタスクを実行（そのタスクのツールも `allowed-tools` で絞る）
 
 ### インライン編集（`:CoagentInline`）
 

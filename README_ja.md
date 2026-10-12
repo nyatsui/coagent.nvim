@@ -45,6 +45,9 @@ I'll find the `add` implementation and its tests.
   提示。承認・修正・破棄を選ぶまで何も変更しない。承認すると同じ会話のまま実行（キャッシュに優しい）。
   `plan.default = true` ですべてのタスクを計画から始める
 - **プロンプトテンプレート** — `/explain` `/codereview` `/fix` `/tests` `/commit` など（CopilotChat の定型プロンプト相当）と設定での独自定義。説明・レビューはそのタスクだけ読み取り専用
+- **Agent Skills** — コミュニティの `SKILL.md` スキル（Claude Code / VS Code Copilot と同じ形式）を自分のフォルダと
+  リポジトリの `.github/skills/`・`.claude/skills/`・`.agents/skills/` から読み込む。常に送るのは名前と説明だけで、
+  本文は必要になったときにモデルが読み込む（キャッシュに優しい）。リポジトリのスキルは `AGENTS.md` と同じく信頼しない
 - **`#url` / `#clipboard`** — 入力した URL のページ本文やクリップボードを添付
 - **インライン編集** — `:'<,'>CoagentInline 指示` で選択範囲だけを 1 リクエスト（ツールなし）で書き換え、
   バッファ内に diff プレビュー（`ga` 適用 / `gr` 破棄 / `gi` 追加指示）。適用した変更は巻き戻し可能
@@ -267,6 +270,8 @@ vim.keymap.set('x', '<leader>ai', ':CoagentInline<CR>', { desc = 'Coagent inline
 | `/compact summary` | 古いやり取りを現在のモデルに 1 回だけ要約させて 1 メッセージに置き換える（**1 リクエスト消費**） |
 | `/plan [task\|approve\|discard]` | 計画を先に確認: 読み取り専用で調査して計画を作成し、承認 / 修正 / 破棄（上記「計画を先に確認する」） |
 | `/go <task>` | 計画フェーズなしでタスクを実行（`plan.default = true` のとき） |
+| `/skills [enable\|disable <name>\|reload]` | Agent Skills の一覧（パス、user / repo）。このセッションだけ有効 / 無効を切替（下記「Agent Skills」） |
+| `/skill <name> [task]` | スキルを最初から読み込んだ状態でタスクを実行 |
 | `/new` / `/sessions` | 新規セッション / 保存済みセッション一覧 |
 | `/model [role]` | モデル選択（`builder` / `explorer` / `advisor`） |
 | `/mode [mode]` / `/roles [preset]` | 承認モード / 役割分担の切替 |
@@ -493,11 +498,64 @@ require('coagent').setup({
 （`/review` など）と同名のテンプレートは `:CoagentPrompt` からのみ使えます。`context = false` で `#selection` / `#buffer`
 の自動添付を止められます。
 
+### Agent Skills
+
+[Agent Skills](https://agentskills.io) を読み込めます。`SKILL.md`（YAML フロントマター + Markdown の手順）と参考資料や
+スクリプトを入れたフォルダで、Claude Code や VS Code Copilot と同じ形式です。コミュニティのスキルはフォルダを
+コピーするだけで使えます。
+
+```
+~/.config/coagent/skills/          自分のスキル（skills.paths）
+  commit-style/
+    SKILL.md
+    reference.md
+<repo>/.github/skills/ .claude/skills/ .agents/skills/   リポジトリのスキル（skills.repo = true）
+```
+
+```markdown
+---
+name: commit-style
+description: Write commit messages in this team's style. Use when asked to write or review a commit message.
+allowed-tools: Read, Grep, Bash   # 任意。ツールを「絞る」ことしかできない（下記）
+---
+# Commit style
+1. Read reference.md ...
+```
+
+仕組み（段階的な読み込み、キャッシュに優しい）:
+
+1. システムプロンプトには有効なスキルごとに `- name: description` だけを載せます（名前順、最大 `max_listed` 件、
+   説明は `max_description` バイトまで）。この一覧はタスクの間は変わらないので、毎ステップでプロンプトキャッシュが効きます
+2. タスクが説明に合うと、モデルが `use_skill(name)` を呼びます（タイムラインに `skill: <name>`）。SKILL.md の本文と、
+   スキル内のほかのファイル一覧が返ります
+3. 手順が必要とするときだけ、モデルが `read_file` でそれらのファイルを読みます。**自分の**スキルのファイルは
+   ワークスペース外でも承認なしで読めます（読み取り専用。`.env` などの保護対象は従来どおり確認）。書き込みは
+   ワークスペース外のパスと同じく拒否されます
+
+信頼と安全性:
+
+- **自分のスキル**（`skills.paths`）は設定と同じく信頼します。**リポジトリのスキル**は信頼しません。`AGENTS.md` と同じ
+  低優先度の参考情報で、権限・モデル・モードを変えられないことをモデルに伝えます（一覧では `(repo)`、読み込み時は
+  `UNTRUSTED`）。ワークスペース外へのシンボリックリンクになっているリポジトリのスキルは無視します
+- フロントマターで変えられるものはありません。読むのは `name`・`description`・`allowed-tools` だけです。`allowed-tools`
+  （`Read`・`Edit`・`Bash(git log:*)` など Claude Code の名前、または coagent のツール名）は、スキルを読み込んだ後の
+  そのタスクのファイル変更・コマンド系ツールを**絞る**だけです。読み取り・検索は使えたままで、事前承認にはなりません
+- スキル内のスクリプトを coagent が実行することはありません。モデルが `run_command` で実行する場合は、ほかのコマンドと
+  同じく承認が必要です。`auto` モードでも、スキルのフォルダを参照するコマンドは自動承認されません
+- 同じ名前のスキルがあるときは先に見つかったものが優先です（自分のフォルダ → `.github` → `.claude` → `.agents`）。
+  スキップしたものや壊れた `SKILL.md` は `/skills` に表示されます
+
+`/skills` はすべてのスキルを読み込み元のパスと `user` / `repo` 付きで表示し、選んだスキルをこのセッションだけ有効 /
+無効にします（セッションと一緒に保存。次のタスクから反映）。`/skills disable <name>`・`/skills enable <name>`・
+`/skills reload`（再スキャン）・`:CoagentSkills` も使えます。`/skill <name> [task]` はスキルを最初からタスクの
+メッセージに読み込みます（そのタスクのツール一覧も `allowed-tools` で絞られます）。
+
 ### エージェントが使うツール
 
 | 種類 | ツール | 承認（supervised） |
 |---|---|---|
 | 調査 | `list_dir`, `glob`, `search`, `read_file`, `git_status`, `git_diff`, `diagnostics` | 不要 |
+| スキル | `use_skill`（スキルの手順を読み込む。スキルがあるときだけ提供） | 不要 |
 | 言語サーバー | `lsp_definition`（定義）, `lsp_references`（参照）, `lsp_symbols`（アウトライン / シンボル検索）, `lsp_hover`（型・ドキュメント） | 不要 |
 | 編集 | `edit_file`, `write_file`, `delete_file` | 必要（diff 表示） |
 | コマンド | `run_command`（終了するコマンド） | 必要 |
@@ -516,6 +574,7 @@ require('coagent').setup({
 | `:Coagent [task]` | パネルを開く / タスク送信（範囲指定で選択範囲を添付）。`:Coagent /explain` でテンプレート実行 |
 | `:'<,'>CoagentInline [指示]` | 選択行をその場で書き換え（1 リクエスト、バッファ内 diff プレビュー。`ga` 適用 / `gr` 破棄 / `gi` 追加指示 / `gd` diff） |
 | `:CoagentPlan [task\|approve\|discard]` | タスクを計画から始める（`/plan` と同じ。範囲指定で選択範囲を添付） |
+| `:CoagentSkills [enable\|disable <name>\|reload]` | Agent Skills の一覧 / このセッションだけ有効・無効を切替（`/skills` と同じ） |
 | `:CoagentPrompt [name] [text]` | プロンプトテンプレートを実行（範囲指定で選択範囲。名前なしなら一覧から選択） |
 | `:CoagentToggle` / `Open` / `Close` | パネル開閉 |
 | `:CoagentStop` | 即時停止（リクエスト中断・実行中プロセスグループ kill・承認待ち破棄） |
@@ -584,7 +643,8 @@ require('coagent').setup({
   エージェントの後にユーザーが編集したファイルは確認なしには巻き戻しません。`/rewind` でプロンプト単位にも戻せます
 - 自動整形（`format_after_edit`）は既定で無効。有効にしても保護ファイル・ワークスペース外・未保存バッファのファイルは整形せず、
   整形結果も巻き戻せます
-- `AGENTS.md` などリポジトリ内の文書は「低優先度の参考情報」としてモデルに渡し、権限やルールを上書きできないことを明示しています
+- `AGENTS.md` などリポジトリ内の文書は「低優先度の参考情報」としてモデルに渡し、権限やルールを上書きできないことを明示しています。
+  リポジトリのスキル（`.github/skills/` など）も同じ扱いで、どのスキルのスクリプトも承認された `run_command` でしか実行されません
 - トークンらしき文字列は UI・保存履歴・モデルへのツール結果でマスクします
 - モデルが自分で URL を選んで取得するツールは提供していません（URL の取得は、ユーザーが入力した `#url:` だけ）
 
@@ -631,6 +691,8 @@ require('coagent').setup({
   session = { persist = true, save_tool_output = true },
   ui = { layout = 'vertical', width = 0.42, icons = 'unicode', show_reasoning = false },
   prompts = {}, -- 独自のプロンプトテンプレート（「プロンプトテンプレート」参照）
+  -- Agent Skills（「Agent Skills」参照）。paths は既定のリストを置き換える
+  skills = { enabled = true, paths = { '~/.config/coagent/skills' }, repo = true, max_listed = 50, max_description = 200 },
   references = { url = true, url_max_bytes = 32 * 1024, clipboard_max_bytes = 32 * 1024 },
   inline = { context_lines = 40, keymaps = { accept = 'ga', reject = 'gr', retry = 'gi', diff = 'gd' } },
   notify = { on = { 'approval', 'done', 'failed', 'limit' }, bell = true, desktop = false, only_when_unfocused = true },

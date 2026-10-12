@@ -5,6 +5,7 @@ local Session = require('coagent.agent.session')
 local Workspace = require('coagent.tools.workspace')
 local Emitter = require('coagent.core.events')
 local tools = require('coagent.tools')
+local Skills = require('coagent.agent.skills')
 
 local M = {}
 
@@ -22,7 +23,11 @@ function M.build(opts)
   if opts.session and opts.session.mode then
     perms:set_mode(opts.session.mode)
   end
+  session.skills_disabled = session.skills_disabled or {}
+  local skills = Skills.new(config, ws, session.skills_disabled)
+  perms.skills = skills
   local c = Controller.new({
+    skills = skills,
     config = config,
     backend = opts.backend,
     session = session,

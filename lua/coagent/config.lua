@@ -191,6 +191,25 @@ local defaults = {
   -- Repository instruction files injected as *untrusted, lower-priority* project notes.
   instruction_files = { 'AGENTS.md', '.github/copilot-instructions.md', 'CLAUDE.md' },
 
+  -- Agent Skills (SKILL.md folders, the format of Claude Code / VS Code
+  -- Copilot). Only `name: description` of each skill is in the system prompt
+  -- (sorted, capped, stable); the model loads a skill with use_skill and
+  -- reads its other files with read_file. Skills in `paths` are yours
+  -- (trusted; readable even outside the workspace, read-only). With repo =
+  -- true, .github/skills/, .claude/skills/ and .agents/skills/ are read too,
+  -- as UNTRUSTED lower-priority notes like AGENTS.md. No skill can change
+  -- permissions, models or modes; allowed-tools only narrows the write and
+  -- command tools; scripts run only through run_command (approval as usual).
+  -- /skills lists them and enables/disables one for the session;
+  -- /skill <name> [task] uses one for a task.
+  skills = {
+    enabled = true,
+    paths = { '~/.config/coagent/skills' },
+    repo = true,
+    max_listed = 50, -- skills listed in the system prompt
+    max_description = 200, -- bytes of each description in the system prompt
+  },
+
   -- Inline edit (:'<,'>CoagentInline [instruction]): one request with the
   -- builder model/effort, no tools; the reply is previewed in the buffer.
   inline = {
@@ -304,6 +323,9 @@ function M.setup(opts)
   end
   if opts and opts.notify and opts.notify.on then
     M.options.notify.on = opts.notify.on
+  end
+  if opts and opts.skills and opts.skills.paths then
+    M.options.skills.paths = opts.skills.paths
   end
   if opts and opts.auto and opts.auto.protected_globs then
     M.options.auto.protected_globs = opts.auto.protected_globs

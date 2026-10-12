@@ -52,6 +52,9 @@ I'll find the `add` implementation and its tests.
   `plan.default = true` plans every task
 - **Prompt templates** — `/explain` `/codereview` `/fix` `/tests` `/commit` and more (like CopilotChat's predefined prompts),
   plus your own. Explanations and reviews run read-only for that task
+- **Agent Skills** — community `SKILL.md` skills (the format of Claude Code and VS Code Copilot) from your own folder and
+  the repository's `.github/skills/`, `.claude/skills/`, `.agents/skills/`. Only names and descriptions are always sent;
+  the model loads a skill when it needs it (cache friendly). Repository skills are untrusted notes, like `AGENTS.md`
 - **`#url` / `#clipboard`** — attach the text of a web page you typed, or the clipboard
 - **Inline edit** — `:'<,'>CoagentInline <instruction>` rewrites just the selection with one request (no tools) and previews
   the diff in the buffer (`ga` apply / `gr` discard / `gi` follow-up). Applied edits can be rewound
@@ -277,6 +280,8 @@ input history (`<C-p>`/`<C-n>`) like normal prompts.
 | `/compact summary` | Have the current model summarize older turns once and replace them with one message (**costs one request**) |
 | `/plan [task\|approve\|discard]` | Plan first: investigate read-only and write a plan to approve / revise / discard (see "Plan first") |
 | `/go <task>` | Run a task without the plan phase (with `plan.default = true`) |
+| `/skills [enable\|disable <name>\|reload]` | List Agent Skills (source path, user / repo); enable or disable one for this session (see "Agent Skills") |
+| `/skill <name> [task]` | Run a task with a skill loaded up front |
 | `/new` / `/sessions` | New session / saved sessions |
 | `/model [role]` | Pick a model (`builder` / `explorer` / `advisor`) |
 | `/mode [mode]` / `/roles [preset]` | Switch approval mode / model roles |
@@ -509,11 +514,64 @@ Names are case-insensitive and become lowercase slash commands (`/summarize`). A
 slash command (`/review`, ...) is only available through `:CoagentPrompt`. `context = false` stops the automatic
 `#selection` / `#buffer` attachment.
 
+### Agent Skills
+
+coagent reads [Agent Skills](https://agentskills.io): folders with a `SKILL.md` (YAML front matter + Markdown
+instructions, plus any reference files or scripts), the format Claude Code and VS Code Copilot use. Community skills work
+by copying their folder.
+
+```
+~/.config/coagent/skills/          your skills (skills.paths)
+  commit-style/
+    SKILL.md
+    reference.md
+<repo>/.github/skills/ .claude/skills/ .agents/skills/   repository skills (skills.repo = true)
+```
+
+```markdown
+---
+name: commit-style
+description: Write commit messages in this team's style. Use when asked to write or review a commit message.
+allowed-tools: Read, Grep, Bash   # optional; can only NARROW the tools (see below)
+---
+# Commit style
+1. Read reference.md ...
+```
+
+How it works (progressive disclosure, cache friendly):
+
+1. The system prompt lists only `- name: description` for each enabled skill (sorted by name, at most `max_listed`
+   entries of `max_description` bytes). The list is fixed for a whole task, so every step reuses the prompt cache
+2. When a task matches a description, the model calls `use_skill(name)` (timeline: `skill: <name>`). It returns the
+   SKILL.md body and the list of the skill's other files
+3. The model reads those files with `read_file` when the instructions need them. Files of **your** skills can be read
+   even though they are outside the workspace — read-only, without approval (protected names such as `.env` still ask).
+   Writing to them is refused like any path outside the workspace
+
+Trust and safety:
+
+- **Your skills** (`skills.paths`) are trusted like your config. **Repository skills** are untrusted: the model is told they
+  are lower-priority notes like `AGENTS.md` that cannot grant permissions or change the model or mode (`(repo)` in the list,
+  `UNTRUSTED` when loaded). A repository skill folder that symlinks outside the workspace is ignored
+- Front matter cannot change anything: only `name`, `description` and `allowed-tools` are read. `allowed-tools` (Claude Code
+  names such as `Read`, `Edit`, `Bash(git log:*)`, or coagent tool names) only **narrows** file-change and command tools for
+  the rest of the task once the skill is loaded; reading and searching stay available, and nothing is ever pre-approved
+- Scripts inside skills are never run by coagent. The model can only run them with `run_command`, which asks for approval
+  like any command — even in `auto` mode a command that references a skill folder is not auto-approved
+- When two skills share a name, the first wins (your folders, then `.github`, `.claude`, `.agents`); `/skills` shows the
+  skipped ones and malformed `SKILL.md` files
+
+`/skills` lists every skill with its source path and `user` / `repo`, and picks one to enable or disable for this session
+(saved with the session; applies from the next task). `/skills disable <name>`, `/skills enable <name>`, `/skills reload`
+(re-scan) and `:CoagentSkills` work too. `/skill <name> [task]` loads a skill into the task message up front (its
+`allowed-tools` also shrink the tool list of that task).
+
 ### Tools the agent uses
 
 | Kind | Tools | Approval (supervised) |
 |---|---|---|
 | Investigation | `list_dir`, `glob`, `search`, `read_file`, `git_status`, `git_diff`, `diagnostics` | No |
+| Skills | `use_skill` (loads a skill's instructions; offered only when skills exist) | No |
 | Language server | `lsp_definition`, `lsp_references`, `lsp_symbols` (outline / symbol search), `lsp_hover` (types / docs) | No |
 | Editing | `edit_file`, `write_file`, `delete_file` | Yes (with diff) |
 | Commands | `run_command` (commands that exit) | Yes |
@@ -532,6 +590,7 @@ slash command (`/review`, ...) is only available through `:CoagentPrompt`. `cont
 | `:Coagent [task]` | Open the panel / send a task (a range attaches the selection). `:Coagent /explain` runs a template |
 | `:'<,'>CoagentInline [instruction]` | Rewrite the selected lines in place (one request, in-buffer diff preview; `ga` apply / `gr` discard / `gi` follow-up / `gd` diff) |
 | `:CoagentPlan [task\|approve\|discard]` | Plan a task first (same as `/plan`; a range attaches the selection) |
+| `:CoagentSkills [enable\|disable <name>\|reload]` | List Agent Skills / enable or disable one for this session (same as `/skills`) |
 | `:CoagentPrompt [name] [text]` | Run a prompt template (a range attaches the selection; no name = pick from a list) |
 | `:CoagentToggle` / `Open` / `Close` | Toggle / open / close the panel |
 | `:CoagentStop` | Stop now (abort the request, kill running process groups, drop pending approvals) |
@@ -604,7 +663,8 @@ Alt are not used as defaults.
 - Automatic formatting (`format_after_edit`) is off by default. Even when on, protected files, files outside the workspace and
   files with unsaved buffers are not formatted, and formatting is revertible
 - Repository documents such as `AGENTS.md` are given to the model as "lower-priority reference information", stating that
-  they cannot override permissions or rules
+  they cannot override permissions or rules. Repository skills (`.github/skills/` etc.) are treated the same way, and
+  scripts in any skill run only through an approved `run_command`
 - Token-like strings are masked in the UI, saved history, and tool results sent to the model
 - There is no tool that lets the model pick and fetch URLs itself (only `#url:` references you type are fetched)
 
@@ -651,6 +711,8 @@ require('coagent').setup({
   session = { persist = true, save_tool_output = true },
   ui = { layout = 'vertical', width = 0.42, icons = 'unicode', show_reasoning = false },
   prompts = {}, -- your own prompt templates (see "Prompt templates")
+  -- Agent Skills (see "Agent Skills"); paths replace the default list
+  skills = { enabled = true, paths = { '~/.config/coagent/skills' }, repo = true, max_listed = 50, max_description = 200 },
   references = { url = true, url_max_bytes = 32 * 1024, clipboard_max_bytes = 32 * 1024 },
   inline = { context_lines = 40, keymaps = { accept = 'ga', reject = 'gr', retry = 'gi', diff = 'gd' } },
   notify = { on = { 'approval', 'done', 'failed', 'limit' }, bell = true, desktop = false, only_when_unfocused = true },

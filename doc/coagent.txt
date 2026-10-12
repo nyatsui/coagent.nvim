@@ -11,6 +11,7 @@ CONTENTS                                              *coagent-contents*
      Inline edit ............................. |coagent-inline|
      Rewind .................................. |coagent-rewind|
      Formatting .............................. |coagent-format|
+     Skills .................................. |coagent-skills|
      Queue ................................... |coagent-queue|
      Notifications ........................... |coagent-notify|
      Limits .................................. |coagent-limits|
@@ -41,6 +42,9 @@ Check the setup with |:checkhealth| coagent.
                               (|coagent-plan|). With a range the selection
                               is attached; without a task the next message
                               starts in the plan phase.
+:CoagentSkills [enable|disable <name>|reload]
+                         List the Agent Skills, or enable / disable one
+                              for this session (|coagent-skills|).
 :CoagentPrompt [name] [text]
                          Run a prompt template (|coagent-templates|).
                               With a range the selection is attached;
@@ -221,6 +225,11 @@ Commands go into the input history like prompts.
                       "/plan discard" act on the plan waiting for
                       approval.
   /go <task>          Run a task without the plan phase (plan.default).
+  /skills [enable|disable <name>|reload]
+                      List the Agent Skills; enable or disable one for
+                      this session (|coagent-skills|).
+  /skill <name> [task]
+                      Run a task with a skill loaded up front.
   /new  /sessions  /model [role]  /mode [mode]  /roles [preset]
   /usage [billing]  /changes  /diff  /review  /stop  /processes
                       Same as the matching :Coagent* command.
@@ -461,6 +470,50 @@ Names are case-insensitive and become lower-case commands (/summarize).
 `mode` accepts only 'readonly'. `context = false` skips the automatic
 #selection/#buffer. A template named like a built-in command (/review)
 is reachable only through :CoagentPrompt.
+
+                                                        *coagent-skills*
+Agent Skills are folders with a SKILL.md (YAML front matter with `name`,
+`description` and optional `allowed-tools`, then Markdown instructions),
+plus any reference files or scripts: the format of Claude Code and VS Code
+Copilot, so community skills work by copying their folder.
+
+  skills.paths        Your skills (default ~/.config/coagent/skills):
+                      trusted like your config.
+  skills.repo = true  Also .github/skills/, .claude/skills/ and
+                      .agents/skills/ of the repository: UNTRUSTED,
+                      lower-priority notes like AGENTS.md.
+
+Progressive disclosure keeps requests small and the prompt cache warm:
+1. The system prompt lists only "- name: description" of each enabled
+   skill, sorted by name and capped (`max_listed`, `max_description`).
+   The list is fixed for the whole task.
+2. The model calls use_skill(name) when a task matches; the timeline
+   shows "skill: <name>". It returns the SKILL.md body and the list of
+   the skill's files.
+3. The model reads those files with read_file. Files of YOUR skills are
+   readable outside the workspace without approval, read-only (protected
+   names such as .env still ask; writes are refused).
+
+Nothing in a skill changes permissions, the model or the mode. Only name,
+description and allowed-tools are read from the front matter.
+`allowed-tools` (Claude Code names such as Read, Edit, Bash(git log:*), or
+coagent tool names) only NARROWS the file-change and command tools for the
+rest of the task; reading and searching stay available and nothing is
+pre-approved. Scripts in skills are never run by coagent: the model can
+only use run_command, which asks like any command (in auto mode a command
+that references a skill folder is never auto-approved). A repository skill
+folder that symlinks outside the workspace is ignored. With duplicate
+names the first wins: your folders, then .github, .claude, .agents.
+
+/skills lists every skill (source path, user/repo, enabled) and the
+skipped SKILL.md files, and picks one to enable/disable for this session
+(saved with the session; applies from the next task). "/skills reload"
+re-scans the folders. "/skill <name> [task]" attaches the skill to the
+task message up front; its allowed-tools also shrink that task's tool list.
+>lua
+  skills = { enabled = true, paths = { '~/.config/coagent/skills' },
+             repo = true, max_listed = 50, max_description = 200 }
+<
 
                                                          *coagent-queue*
 Messages sent while the agent is busy (responding, running a tool or waiting

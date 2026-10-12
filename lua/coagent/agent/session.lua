@@ -26,6 +26,7 @@ local M = {}
 ---@field usage_totals Coagent.UsageAcc? requests/tokens over the session's lifetime
 ---@field checkpoints Coagent.Checkpoint[] one per user prompt (/rewind)
 ---@field plan table? plan phase: {phase='planning'|'ready', start, item, reviewed, advice}
+---@field skills_disabled table<string,true> skills disabled for this session (/skills)
 ---@class Coagent.Checkpoint
 ---@field id integer
 ---@field text string the prompt as typed (put back into the input on rewind)
@@ -57,6 +58,7 @@ function M.new(opts)
     checkpoints = {},
     status = 'IDLE',
     next_item = 0,
+    skills_disabled = {}, -- skill names disabled with /skills
   }, Session)
 end
 
@@ -249,6 +251,7 @@ function Session:serialize(opts)
     usage_totals = self.usage_totals,
     rewind_note = self.rewind_note,
     plan = self.plan and vim.tbl_extend('force', self.plan, { advice = clean(self.plan.advice) }) or nil,
+    skills_disabled = next(self.skills_disabled or {}) and vim.tbl_keys(self.skills_disabled) or nil,
     checkpoints = vim.tbl_map(function(c)
       return vim.tbl_extend('force', c, { text = clean(c.text) })
     end, self.checkpoints),
@@ -279,6 +282,9 @@ function M.deserialize(data)
   s.checkpoints = data.checkpoints or {}
   s.rewind_note = data.rewind_note
   s.plan = data.plan
+  for _, name in ipairs(data.skills_disabled or {}) do
+    s.skills_disabled[name] = true
+  end
   s.changes = Changes.new(data.changes)
   return s
 end

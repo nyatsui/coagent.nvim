@@ -70,11 +70,14 @@ end
 
 --- Base agent config used by most specs.
 function M.config(root, extra)
-  return vim.tbl_deep_extend('force', require('coagent.config').defaults(), {
+  local cfg = vim.tbl_deep_extend('force', require('coagent.config').defaults(), {
     root = root,
     session = { persist = false },
     ui = { render_throttle_ms = 0 },
   }, extra or {})
+  -- never pick up the developer's own ~/.config/coagent/skills (lists replace)
+  cfg.skills.paths = extra and extra.skills and extra.skills.paths or {}
+  return cfg
 end
 
 return M

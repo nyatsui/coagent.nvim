@@ -80,7 +80,8 @@ The user approves, revises or discards the plan. Once approved you will execute 
 </plan_mode>
 ]]
 
----@param opts {root:string, mode:string, plan:boolean?, instruction_files:string[], tools:table[]}
+---@param opts {root:string, mode:string, plan:boolean?, instruction_files:string[], tools:table[], skills:string?}
+---  skills: the <skills> section (Skills:prompt_section), stable for a task
 ---@return string
 function M.build(opts)
   local parts = { vim.trim(BASE) }
@@ -107,6 +108,10 @@ function M.build(opts)
   table.insert(parts, table.concat(env, '\n'))
   if opts.plan then
     table.insert(parts, vim.trim(M.PLAN))
+  end
+
+  if opts.skills then
+    table.insert(parts, opts.skills)
   end
 
   local notes = M.project_notes(opts.root, opts.instruction_files)

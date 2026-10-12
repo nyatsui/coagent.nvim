@@ -108,6 +108,19 @@ local function decision(action, reason, extra)
   return vim.tbl_extend('force', { action = action, reason = reason, warnings = {}, sandbox = false, can_always = false }, extra or {})
 end
 
+--- A skill file matching auto.protected_globs (relative to the skill folder)
+--- still asks, like a protected workspace file.
+---@return boolean
+function Permissions:_skill_protected(skill, real)
+  local rel = real:sub(#skill.dir + 2)
+  for _, p in ipairs(self.ws.protected or {}) do
+    if p.lpeg:match(rel) then
+      return true
+    end
+  end
+  return false
+end
+
 ---@param tool table
 ---@param args table
 ---@param prepared table
@@ -118,6 +131,12 @@ function Permissions:decide(tool, args, prepared)
 
   if tool.kind == 'read' then
     local p = prepared.path
+    -- files of the user's own (enabled) skills: readable outside the workspace,
+    -- read-only (write tools refuse paths outside the workspace)
+    local skill = p and not p.inside and self.skills and self.skills:owner(p.real)
+    if skill and not self:_skill_protected(skill, p.real) then
+      return decision('allow', 'file of the user skill "' .. skill.name .. '" (read-only)')
+    end
     if p and not p.inside then
       if mode == 'readonly' then
         return decision('deny', 'reading outside the workspace is not allowed in read-only mode')
@@ -193,7 +212,11 @@ function Permissions:decide(tool, args, prepared)
     end
     if mode == 'auto' then
       local why
-      if not a.simple then
+      if self.skills and self.skills:in_command(prepared.command or args.command or '') then
+        -- skill scripts are never auto-run, even when the command looks allowlisted
+        why = 'runs or references a file from a skill folder'
+        table.insert(warnings, 'skill files: scripts in skills are never run without approval')
+      elseif not a.simple then
         why = 'not a simple command (' .. tostring(a.complex_reason) .. ')'
       elseif #a.outside_paths > 0 or #a.denied_flags > 0 or #(a.protected_paths or {}) > 0 then
         why = 'arguments need review'

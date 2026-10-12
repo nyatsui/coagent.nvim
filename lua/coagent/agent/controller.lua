@@ -30,6 +30,7 @@ local S = State
 ---@field permissions Coagent.Permissions
 ---@field events Coagent.Emitter
 ---@field store Coagent.SessionStore?
+---@field skills Coagent.Skills?
 ---@field machine Coagent.StateMachine
 local Controller = {}
 Controller.__index = Controller
@@ -44,6 +45,7 @@ function Controller.new(opts)
     permissions = opts.permissions,
     events = opts.events,
     store = opts.store,
+    skills = opts.skills,
     gen = 0,
     task = nil,
     pending_approval = nil,
@@ -247,6 +249,8 @@ end
 ---  input: the text as typed (e.g. "/fix x"), put back into the input by /rewind.
 ---  plan: start this task in the plan phase (/plan); skip_plan: not even with
 ---  plan.default (/go). While a plan waits for approval, any message revises it.
+---  skill: use this skill for the task (/skill): its instructions are attached
+---  to the message and its allowed-tools narrow the task's tools.
 ---@return boolean ok, string? err
 function Controller:submit(text, opts)
   opts = opts or {}
@@ -254,8 +258,19 @@ function Controller:submit(text, opts)
   if text == '' then
     return false, 'empty prompt'
   end
+  local skill_text, skill
+  if opts.skill then
+    if not self.skills then
+      return false, 'skills are not available'
+    end
+    local err
+    skill_text, err, skill = self.skills:load(opts.skill)
+    if not skill_text then
+      return false, err
+    end
+  end
   if self:busy() then
-    if opts.plan or opts.plan_approved then
+    if opts.plan or opts.plan_approved or opts.skill then
       return false, 'the agent is busy; wait for it or stop it first (<C-c>)'
     end
     -- Follow-up while the agent works: delivered at the next step boundary
@@ -315,6 +330,9 @@ function Controller:submit(text, opts)
     prefix = Controller.PLAN_PREFIX
   end
   self:_add({ type = 'user', text = text })
+  if skill then
+    self:_add({ type = 'tool', tool = 'use_skill', kind = 'read', title = 'skill: ' .. skill.name, status = 'done', summary = 'used for this task (/skill)', output = skill_text })
+  end
   if planning == 'start' and phase ~= 'planning' then
     self:notice('info', 'Plan phase: the agent only investigates (read/search tools) and writes a plan for you to approve, revise or discard.')
   elseif opts.readonly and self.permissions.mode ~= 'readonly' then
@@ -343,6 +361,9 @@ function Controller:submit(text, opts)
     if opts.extra then
       content = content .. '\n\n' .. opts.extra
     end
+    if skill_text then
+      content = string.format('[Use the skill "%s" for this task; it is loaded below.]\n\n', skill.name) .. content .. '\n\n' .. skill_text
+    end
     if #atts > 0 then
       content = content .. '\n\n' .. table.concat(atts, '\n\n')
       self.session.items[#self.session.items].attachments = #atts
@@ -354,6 +375,10 @@ function Controller:submit(text, opts)
     brief_from = brief_from,
     -- the advisor already reviewed the approved plan: no second PLAN checkpoint
     plan_reviewed = approved and approved.reviewed or nil,
+    -- a forced skill's allowed-tools also shrink the tool list (fixed for the task)
+    skill_tools = skill and skill.tools and vim.deepcopy(skill.tools) or nil,
+    skill_names = skill and skill.tools and { skill.name } or nil,
+    forced_tools = skill and skill.tools and vim.deepcopy(skill.tools) or nil,
   })
 end
 
@@ -902,7 +927,12 @@ function Controller:_compact_view(watermark)
   local model = self:active_model()
   local budget, max = self:_known_budget(model)
   local sp = (self.task and self.task.system_prompt)
-    or prompt.build({ root = self.ws.root, mode = self.permissions:effective_mode(), instruction_files = self.config.instruction_files })
+    or prompt.build({
+      root = self.ws.root,
+      mode = self.permissions:effective_mode(),
+      instruction_files = self.config.instruction_files,
+      skills = self.skills and self.skills:prompt_section() or nil,
+    })
   local sent = context.with_summary(self.session.messages, self.session.compact_summary)
   local _, cinfo = context.compact(sent, budget, { system_prompt = sp, watermark = watermark })
   return cinfo, { budget = budget, max = max, system_prompt = sp, sent = sent }
@@ -1057,6 +1087,8 @@ function Controller:_start(body, extra)
   for k, v in pairs(extra or {}) do
     self.task[k] = v
   end
+  -- the skills list is fixed for the whole task (system prompt cache)
+  self.task.skills_section = self.skills and self.skills:prompt_section() or nil
   self.task.advisor = Advisor.new(self)
   self.machine:to(S.THINKING)
   async.run(function()
@@ -1430,13 +1462,22 @@ function Controller:_request(gen)
       mode = mode,
       plan = planning,
       instruction_files = self.config.instruction_files,
+      skills = self.task.skills_section,
     })
     self.task.system_mode = key
   end
   local system_prompt = self.task.system_prompt
   local roles = self:roles()
+  local forced = self.task.forced_tools
   local tools = vim.tbl_filter(function(t)
-    return t.name ~= 'explore' or roles.explorer
+    if t.name == 'explore' and not roles.explorer then
+      return false
+    end
+    if t.name == 'use_skill' and not self.task.skills_section then
+      return false
+    end
+    local tool = self.registry:get(t.name)
+    return not (forced and tool and tool.kind ~= 'read' and not forced[t.name])
   end, self.registry:schemas(function(kind)
     return self.permissions:offers(kind)
   end))
@@ -1611,6 +1652,7 @@ function Controller:_tool_ctx(item, gen)
   return {
     ws = self.ws,
     config = self.config,
+    skills = self.skills,
     changes = self.session.changes,
     source = self.source,
     item = item,
@@ -1682,6 +1724,13 @@ function Controller:_execute(gen, tc)
   item.kind = tool.kind
   if not self.permissions:offers(tool.kind) then
     return fail('denied', 'DENIED: ' .. tc.name .. ' is not available in ' .. self.permissions:effective_mode() .. ' mode.')
+  end
+  local narrow = self.task.skill_tools
+  if narrow and tool.kind ~= 'read' and not narrow[tool.name] then
+    local allowed = vim.tbl_keys(narrow)
+    table.sort(allowed)
+    return fail('denied', string.format('DENIED: the skill %s limits file changes and commands in this task to: %s.',
+      table.concat(self.task.skill_names or {}, ', '), #allowed > 0 and table.concat(allowed, ', ') or '(none)'))
   end
 
   local ctx = self:_tool_ctx(item, gen)
@@ -1814,6 +1863,9 @@ function Controller:_execute(gen, tc)
   if tool.name == 'run_command' then
     table.insert(t.checks, { seq = t.seq, ok = res.ok, command = prepared.command, summary = res.summary })
   end
+  if tool.name == 'use_skill' and res.ok and prepared.skill then
+    self:_activate_skill(prepared.skill)
+  end
 
   local content = util.truncate_middle(util.redact(res.output or ''), self.config.limits.max_tool_output_bytes)
 
@@ -1839,6 +1891,31 @@ function Controller:_execute(gen, tc)
     end
   end
   return { content = content ~= '' and content or '(no output)' }
+end
+
+--- A loaded skill's allowed-tools narrow the write/command tools for the
+--- rest of the task (several skills: the intersection). It never adds tools,
+--- and the tool list sent to the model stays the same (prompt cache).
+---@param skill table
+function Controller:_activate_skill(skill)
+  if not skill.tools then
+    return
+  end
+  local t = self.task
+  t.skill_names = t.skill_names or {}
+  if vim.tbl_contains(t.skill_names, skill.name) then
+    return
+  end
+  table.insert(t.skill_names, skill.name)
+  if t.skill_tools then
+    for name in pairs(t.skill_tools) do
+      if not skill.tools[name] then
+        t.skill_tools[name] = nil
+      end
+    end
+  else
+    t.skill_tools = vim.deepcopy(skill.tools)
+  end
 end
 
 function Controller:_count_failure(name, args)

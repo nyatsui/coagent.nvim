@@ -46,6 +46,18 @@ end, {
     return { 'approve', 'discard' }
   end,
 })
+cmd('CoagentSkills', function(a)
+  agent().skills(a.args)
+end, {
+  nargs = '*',
+  desc = 'List Agent Skills; enable / disable one for the session, or reload',
+  complete = function(_, line)
+    if line:match('^%S+%s+%S+%s') then
+      return {}
+    end
+    return { 'enable', 'disable', 'reload' }
+  end,
+})
 cmd('CoagentInline', function(a)
   agent().inline(a.args, { range = a.range > 0 and { a.line1, a.line2 } or nil })
 end, { nargs = '*', range = true, desc = 'Inline edit of the selected lines (one request, previewed in place)' })

@@ -18,6 +18,7 @@ local builtin = {
   fs.search,
   fs.read_file,
   require('coagent.agent.subagent').tool,
+  require('coagent.agent.skills').tool,
   lsp.lsp_definition,
   lsp.lsp_references,
   lsp.lsp_symbols,
