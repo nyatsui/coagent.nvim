@@ -298,7 +298,7 @@ input history (`<C-p>`/`<C-n>`) like normal prompts.
 | Command | Description |
 |---|---|
 | `/compact` | Compact now: elide all long tool outputs older than the last 8 messages (local, no request) |
-| `/compact summary` | Have the current model summarize older turns once and replace them with one message (**costs one request**) |
+| `/compact summary` | Have the current model summarize older turns once and replace them with one message (calls the model once, so **its tokens are billed**) |
 | `/plan [task\|approve\|discard]` | Plan first: investigate read-only and write a plan to approve / revise / discard (see "Plan first") |
 | `/go <task>` | Run a task without the plan phase (with `plan.default = true`) |
 | `/skills [enable\|disable <name>\|reload]` | List Agent Skills (source path, user / repo); enable or disable one for this session (see "Agent Skills") |
@@ -905,7 +905,7 @@ delegate = {
 | `:CoagentFormat [changed\|file]` | Format files the AI changed (same as `/format`; default `changed`) |
 | `:CoagentOutput` | Show the latest command output in a bottom panel |
 | `:CoagentProcesses` | Show output of / stop background processes the agent started |
-| `:CoagentUsage [billing]` | Copilot usage and remaining quota (Premium requests / Chat / Completions and reset date), requests and tokens of the task and session. `billing` opens GitHub's billing page in the browser |
+| `:CoagentUsage [billing]` | Copilot usage and remaining quota as reported by Copilot (and the reset date), requests and tokens of the task and session. `billing` opens GitHub's billing page in the browser |
 | `:CoagentMode [supervised\|readonly\|auto\|judge]` | Switch the approval mode |
 | `:CoagentJudge [log [n]\|clear]` | Judge mode decision log / forget cached verdicts (same as `/judge`) |
 | `:CoagentModel` | Pick a model (tool-calling capable only; per role when roles are on). Models with `usage.rates` show their price (`$3/$15 per 1M`) |
@@ -1122,7 +1122,7 @@ CopilotChat.nvim is only used behind the scenes, as the provider of authenticati
   notifications)
 - Usage and remaining quota come from CopilotChat's info call (the same as its `gc` info view), shown in the winbar
   (e.g. `chat 197/200 left`) and in `:CoagentUsage`. Refreshed after every task (CopilotChat caches it for up to 5 minutes).
-  Quotas not included in your plan (e.g. Premium requests 0/0 on Free) are hidden
+  Quotas not included in your plan are hidden
 - With lazy.nvim, making CopilotChat a `lazy = true` dependency is enough; it loads when the agent starts
   (keep `cmd = 'CopilotChat'` if you also want `:CopilotChat`)
 
@@ -1180,7 +1180,7 @@ credits = ( (input − cached − cache_write) × input
 
 ### Legacy multiplier
 
-Copilot's model list API also returns the legacy (request-based Premium requests) `billing.multiplier`, which does not
+Copilot's model list API also returns the legacy (request-based billing) `billing.multiplier`, which does not
 describe token billing. It is hidden by default; on a plan still billed per request, `ui.show_multiplier = true` shows it as
 `(legacy x1)`.
 
@@ -1201,8 +1201,8 @@ By default (`single`) the one model you picked with `:CoagentModel` does everyth
   to find out" and return a summary with `path:line`; the advisor receives only summaries of the plan, diff and failing
   output (never the builder's whole history). Every history is append-only, so prompt caches keep hitting, and the builder's
   model never changes during a task
-- The trade-off: summaries lose detail and there are more requests (on Copilot Free the chat quota runs out faster; plans
-  with no Premium quota cannot use a strong model as the advisor)
+- The trade-off: summaries lose detail, and the explorers' and advisor's requests add token usage (their histories are
+  append-only, so prompt caches still apply)
 - `fallback_models = { 'auto' }` switches models only when the selected one is unavailable because of rate limits, exhausted
   quota or policy (never on 401)
 - Repository documents such as AGENTS.md cannot change models (that directly affects cost, so it is configuration only)
@@ -1237,8 +1237,7 @@ opts = {
 - The winbar model shows e.g. `gpt-5 effort:high`; `:CoagentUsage` shows the per-role settings and how often each effort was
   actually sent
 - **Higher effort means more reasoning tokens, so more cost / quota** (and slower answers)
-- Ignored with model `auto` (the server picks the model, so it is not sent). On Copilot Free you effectively only have
-  `auto`, so it has no effect there
+- Ignored with model `auto` (the server picks the model, so it is not sent)
 - Supported levels differ per model. With CopilotChat versions that expose them from the model list (`/models` API
   `capabilities.supports.reasoning_effort`), the level is clamped to the nearest one the model supports, with a notice
 - If a model rejects it with HTTP 400, the request is resent once without effort and the model is not sent effort again

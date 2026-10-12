@@ -287,7 +287,7 @@ vim.keymap.set('x', '<leader>ai', ':CoagentInline<CR>', { desc = 'Coagent inline
 | コマンド | 説明 |
 |---|---|
 | `/compact` | 今すぐ圧縮: 直近 8 メッセージより前の長いツール出力をすべて省略（ローカル処理、リクエストなし） |
-| `/compact summary` | 古いやり取りを現在のモデルに 1 回だけ要約させて 1 メッセージに置き換える（**1 リクエスト消費**） |
+| `/compact summary` | 古いやり取りを現在のモデルに 1 回だけ要約させて 1 メッセージに置き換える（モデルを 1 回呼ぶので、その**トークンを消費**） |
 | `/plan [task\|approve\|discard]` | 計画を先に確認: 読み取り専用で調査して計画を作成し、承認 / 修正 / 破棄（上記「計画を先に確認する」） |
 | `/go <task>` | 計画フェーズなしでタスクを実行（`plan.default = true` のとき） |
 | `/skills [enable\|disable <name>\|reload]` | Agent Skills の一覧（パス、user / repo）。このセッションだけ有効 / 無効を切替（下記「Agent Skills」） |
@@ -879,7 +879,7 @@ delegate = {
 | `:CoagentFormat [changed\|file]` | AI が変更したファイルを整形（`/format` と同じ。既定 `changed`） |
 | `:CoagentOutput` | 直近のコマンド出力を下部パネルに表示 |
 | `:CoagentProcesses` | エージェントが起動したバックグラウンドプロセスの出力表示・停止 |
-| `:CoagentUsage [billing]` | Copilot の利用量・残量（Premium requests / Chat / Completions とリセット日）、タスク・セッションのリクエスト数とトークン数。`billing` で GitHub の請求ページをブラウザで開く |
+| `:CoagentUsage [billing]` | Copilot が返す利用量・残量とリセット日、タスク・セッションのリクエスト数とトークン数。`billing` で GitHub の請求ページをブラウザで開く |
 | `:CoagentMode [supervised\|readonly\|auto\|judge]` | 承認モード切替 |
 | `:CoagentJudge [log [n]\|clear]` | judge モードの判定ログ / キャッシュ消去（`/judge` と同じ） |
 | `:CoagentModel` | モデル選択（tool calling 対応モデルのみ。役割分担中は役割ごと）。`usage.rates` を設定したモデルには単価（`$3/$15 per 1M`）を表示 |
@@ -1088,7 +1088,7 @@ CopilotChat.nvim は認証・通信の提供元として裏で使うだけです
 - エージェントの操作で CopilotChat のチャットウィンドウが開くことはありません（GitHub ログインのコードもエージェントのパネルと通知に表示）
 - 利用量・残量は CopilotChat の情報取得処理（`gc` の情報表示と同じ）を裏で呼び、winbar（例: `chat 197/200 left`）と
   `:CoagentUsage` に表示します。タスク完了ごとに更新（CopilotChat 側で最大 5 分キャッシュ）。
-  プランに含まれない枠（Free の Premium requests 0/0 など）は表示しません
+  プランに含まれない枠は表示しません
 - lazy.nvim では CopilotChat を `lazy = true` の依存にしておけば、エージェント起動時に読み込まれます
   （`:CopilotChat` も使いたい場合は `cmd = 'CopilotChat'` を残してください）
 
@@ -1143,7 +1143,7 @@ opts = {
 
 ### 旧方式の料金倍率（multiplier）
 
-Copilot のモデル一覧 API は旧方式（Premium requests の回数課金）の倍率 `billing.multiplier` も返しますが、現在のトークン課金とは対応しません。
+Copilot のモデル一覧 API は旧方式（リクエスト回数による課金）の倍率 `billing.multiplier` も返しますが、現在のトークン課金とは対応しません。
 既定では表示せず、旧方式の契約の場合だけ `ui.show_multiplier = true` で `(legacy x1)` のように表示できます。
 
 ## モデルの役割分担（任意）
@@ -1162,8 +1162,7 @@ Copilot のモデル一覧 API は旧方式（Premium requests の回数課金�
 - **役割ごとに別の会話履歴**を持ち、受け渡すのは要約だけです。調査担当は「調べる内容」だけを受け取り `path:line` 付きの要約を返し、
   アドバイザーは計画・差分・失敗出力の要約だけを受け取ります（作業担当の全履歴は送りません）。どの履歴も追記のみなので
   プロンプトキャッシュが効きやすく、作業担当のモデルはタスク中に変わりません
-- 代償として要約で細部が落ちる・リクエスト回数は増えます（Copilot Free ではチャット枠を早く消費。Premium が 0 のプランでは
-  強いモデルをアドバイザーに使えません）
+- 代償として要約で細部が落ち、調査担当・アドバイザーの分だけトークンの消費が増えます（それぞれの履歴は追記のみなのでキャッシュは効きます）
 - `fallback_models = { 'auto' }` のように指定すると、選んだモデルが利用制限・枠切れ・ポリシーで使えないときだけ切り替えます（401 は対象外）
 - AGENTS.md などリポジトリ内の文書からはモデルを変更できません（費用に直結するため設定でのみ指定）
 - winbar に実際に使われたモデル（`auto→gpt-4.1`）と `roles:…` を表示、`:CoagentUsage` に役割別のリクエスト数
@@ -1195,7 +1194,7 @@ opts = {
 - 優先順位: セッションの役割別 > セッション全体 > 設定の `roles.<role>_effort` > 設定の `reasoning_effort`
 - winbar のモデル表示に `gpt-5 effort:high` のように表示し、`:CoagentUsage` に役割ごとの設定と、実際に送った effort の回数を表示します
 - **effort を上げると推論トークンが増え、そのぶん費用・クォータを多く消費します**（応答も遅くなります）
-- モデル `auto` では無視されます（サーバーがモデルを選ぶため送りません）。Copilot Free では実質 `auto` しか使えないため、効果はありません
+- モデル `auto` では無視されます（サーバーがモデルを選ぶため送りません）
 - 対応レベルはモデルごとに異なります。CopilotChat がモデル一覧（Copilot の `/models` API の
   `capabilities.supports.reasoning_effort`）からレベルを取得できる版では、そのモデルが対応する最も近いレベルに丸め、通知を出します
 - 未対応のモデルが 400 エラーで拒否した場合は、effort なしで 1 回だけ再送し、このモデルには以後（Neovim を再起動するまで）送りません。

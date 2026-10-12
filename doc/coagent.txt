@@ -142,7 +142,7 @@ Missing prices fall back to `input`. Responses without a breakdown are priced
 at the input rate and labelled "rough estimate". Long-context surcharges are
 not modelled. The older `{ per_1k_tokens = n }` form still works.
 
-`ui.show_multiplier = true` shows the legacy premium-request multiplier
+`ui.show_multiplier = true` shows the legacy request-billing multiplier
 ("(legacy x1)") in the model picker; it does not describe token billing.
 
                                                         *coagent-effort*
@@ -164,8 +164,7 @@ The status bar shows "effort:high" next to the model and :CoagentUsage lists
 the effort of each role and how often each level was sent.
 
 Higher effort spends more reasoning tokens (cost / quota) and time. The
-"auto" model ignores it (the server picks the model); on Copilot Free, which
-effectively only allows "auto", it has no effect. When CopilotChat lists the
+"auto" model ignores it (the server picks the model). When CopilotChat lists the
 levels a model advertises (CopilotChat PR #1585), the nearest supported level
 is used, with a notice. A 400 that rejects the parameter is retried once
 without it and the model is not sent an effort again until Neovim restarts
@@ -237,7 +236,8 @@ Commands go into the input history like prompts.
   /compact            Elide every long tool output before the last 8
                       messages now. Local only: no request.
   /compact summary    Ask the current model ONCE to summarize the older
-                      turns into one message (costs one request; <C-c>
+                      turns into one message (one model call, billed by
+                      tokens; <C-c>
                       cancels it).
   /plan [task]        Plan first (|coagent-plan|). "/plan approve" and
                       "/plan discard" act on the plan waiting for
