@@ -27,6 +27,7 @@ local M = {}
 ---@field checkpoints Coagent.Checkpoint[] one per user prompt (/rewind)
 ---@field plan table? plan phase: {phase='planning'|'ready', start, item, reviewed, advice}
 ---@field skills_disabled table<string,true> skills disabled for this session (/skills)
+---@field judge_log table[]? judge mode: every judge verdict {at, item, tool, command, cwd, decision, risk, reason, model, cached, error, ms, outcome}
 ---@field waiting table? the task waits for a delegated subtask: {id, kind, call_id, results = {{call_id, content}}, since}
 ---@class Coagent.Checkpoint
 ---@field id integer
@@ -263,6 +264,9 @@ function Session:serialize(opts)
       end, self.waiting.results or {}),
     }) or nil,
     skills_disabled = next(self.skills_disabled or {}) and vim.tbl_keys(self.skills_disabled) or nil,
+    judge_log = self.judge_log and vim.tbl_map(function(e)
+      return vim.tbl_extend('force', e, { command = clean(e.command, 2000), reason = clean(e.reason) })
+    end, self.judge_log) or nil,
     checkpoints = vim.tbl_map(function(c)
       return vim.tbl_extend('force', c, { text = clean(c.text) })
     end, self.checkpoints),
@@ -294,6 +298,7 @@ function M.deserialize(data)
   s.rewind_note = data.rewind_note
   s.plan = data.plan
   s.waiting = data.waiting
+  s.judge_log = data.judge_log
   for _, name in ipairs(data.skills_disabled or {}) do
     s.skills_disabled[name] = true
   end

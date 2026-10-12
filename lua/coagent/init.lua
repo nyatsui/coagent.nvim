@@ -1355,7 +1355,17 @@ function M.set_mode(mode)
     end
   end
   local function choose(m)
-    if m == 'auto' and not (perms.auto_enabled or perms:auto_configured()) then
+    if m == 'judge' and not (perms.judge_enabled or perms:judge_configured()) then
+      local jmodel = (c.config.judge and c.config.judge.model) or c:model()
+      local msg = 'Enable JUDGE mode for ' .. c.ws.root .. '?\n'
+        .. 'Edits inside the workspace run without approval, and a judge model (' .. tostring(jmodel) .. ') decides whether\n'
+        .. 'other commands run without asking. Commands are NOT sandboxed (full user permissions, GPUs work).\n'
+        .. 'Dangerous commands, deletes, outside paths, network transfer and installs always ask.'
+      if vim.fn.confirm(msg, '&Enable\n&Cancel', 2) ~= 1 then
+        return
+      end
+      apply('judge', true)
+    elseif m == 'auto' and not (perms.auto_enabled or perms:auto_configured()) then
       local msg = 'Enable WORKSPACE AUTO mode for ' .. c.ws.root .. '?\n'
         .. 'Allowlisted commands and edits inside the workspace will run without approval'
         .. (require('coagent.tools.sandbox').backend() and ' (commands sandboxed).' or ' (no OS sandbox available!).')
@@ -1370,11 +1380,41 @@ function M.set_mode(mode)
   if mode and mode ~= '' then
     return choose(mode)
   end
-  vim.ui.select({ 'supervised', 'readonly', 'auto' }, { prompt = 'Permission mode (current: ' .. perms.mode .. ')' }, function(m)
+  vim.ui.select({ 'supervised', 'readonly', 'auto', 'judge' }, { prompt = 'Permission mode (current: ' .. perms.mode .. ')' }, function(m)
     if m then
       choose(m)
     end
   end)
+end
+
+--- `/judge [log [n]|clear]`: the judge's decisions in this session, or forget
+--- the cached verdicts.
+---@param arg string?
+---@return boolean? ok
+function M.judge(arg)
+  local c = M.controller()
+  arg = vim.trim(arg or '')
+  local verb, rest = arg:match('^(%S*)%s*(.-)$')
+  if verb == 'clear' then
+    local n = vim.tbl_count(c.judge_cache or {})
+    c.judge_cache = {}
+    c:notice('info', string.format('Judge: forgot %d cached verdict%s.', n, n == 1 and '' or 's'))
+    return true
+  elseif verb == '' or verb == 'log' then
+    local n = tonumber(rest)
+    if rest ~= '' and not n then
+      c:notice('error', '/judge log: expected a number, got "' .. rest .. '"')
+      return false
+    end
+    local text = require('coagent.agent.judge').log_text(c.session.judge_log, n)
+    if c.permissions.mode ~= 'judge' then
+      text = text .. '\n(judge mode is off: ' .. c.permissions.mode .. '; enable it with /mode judge)'
+    end
+    c:notice('info', text)
+    return true
+  end
+  c:notice('error', '/judge: unknown argument "' .. arg .. '" (log [n] | clear)')
+  return false
 end
 
 --- Pick a model. With a roles preset other than 'single' you first choose
@@ -1823,7 +1863,7 @@ function M.usage(arg)
     if stats and next(stats) then
       table.insert(lines, '')
       table.insert(lines, '  Requests by role (this session)')
-      for _, role in ipairs({ 'builder', 'explorer', 'advisor' }) do
+      for _, role in ipairs({ 'builder', 'explorer', 'advisor', 'judge', 'ledger' }) do
         local s = stats[role]
         if s then
           local models = {}

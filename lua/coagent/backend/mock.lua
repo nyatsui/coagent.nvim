@@ -97,6 +97,8 @@ Mock.ask = async.wrap(function(self, req, cb)
     model = req.model,
     headless = req.headless,
     effort = req.effort,
+    role = req.role,
+    temperature = req.temperature,
   })
   local step = next_step(self, req.messages, req)
   local finished = false

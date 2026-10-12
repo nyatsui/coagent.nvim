@@ -40,7 +40,8 @@ I'll find the `add` implementation and its tests.
 - **"The model said it's done" is not "verification passed"** — shows `Verified / Not verified / Last check failed`
   depending on whether a check succeeded after the last edit
 - **Safe execution** — approval modes; protection against writes outside the workspace, symlink escapes, `.git` and protected
-  files; dangerous-command detection; OS sandbox (macOS `sandbox-exec` / Linux `bwrap`)
+  files; dangerous-command detection; OS sandbox (macOS `sandbox-exec` / Linux `bwrap`); an opt-in **judge mode** where a
+  separate model decides whether a command may run without asking (hard rules first; no sandbox, so GPU jobs work)
 - **Never clobbers your work** — detects conflicts with unsaved buffers and disk changes while an approval is pending;
   rollback is relative to the state before the agent touched a file
 - **Rich TUI** — timeline, folding, streaming rendering (diff-based, flicker-free), per-hunk review, side-by-side diff,
@@ -115,7 +116,7 @@ I'll find the `add` implementation and its tests.
   },
   opts = {
     -- model = 'gpt-4.1',      -- default: CopilotChat's model
-    -- mode = 'supervised',    -- 'supervised' | 'readonly' | 'auto'
+    -- mode = 'supervised',    -- 'supervised' | 'readonly' | 'auto' | 'judge'
     -- ui = { layout = 'vertical', icons = 'unicode' }, -- icons: 'unicode' | 'ascii' | 'nerd'
   },
 },
@@ -134,7 +135,8 @@ Run `:checkhealth coagent` after installing to check the dependencies.
 - Command isolation in `auto` mode uses [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`)
   (`apt install bubblewrap` / `dnf install bubblewrap`). Where unprivileged user namespaces are restricted and `bwrap`
   cannot run (e.g. Ubuntu 24.04+ by default), this is detected automatically, treated as "no sandbox", and the reason is
-  shown in `:checkhealth coagent`. The default `supervised` mode asks every time, so it does not depend on the sandbox
+  shown in `:checkhealth coagent`. The default `supervised` mode asks every time, so it does not depend on the sandbox.
+  `bwrap` hides GPUs: for unattended training on a GPU machine use `judge` mode (no sandbox; see "Judge mode")
 
 ### Sharing one config repository across machines
 
@@ -304,7 +306,8 @@ input history (`<C-p>`/`<C-n>`) like normal prompts.
 | `/receive [id] [paste\|clipboard\|files]` | Import its result: pasted text and/or downloaded files, every change reviewed |
 | `/new` / `/sessions` | New session / saved sessions |
 | `/model [role]` | Pick a model (`builder` / `explorer` / `advisor`) |
-| `/mode [mode]` / `/roles [preset]` | Switch approval mode / model roles |
+| `/mode [mode]` / `/roles [preset]` | Switch approval mode (`supervised` / `readonly` / `auto` / `judge`) / model roles |
+| `/judge [log [n]\|clear]` | Judge mode: list the judge's decisions in this session (command, verdict, risk, reason, outcome) / forget cached verdicts (see "Judge mode"; local, no request) |
 | `/effort <level\|off\|default> [role]` | Change the reasoning effort for this session (see "Reasoning effort") |
 | `/usage [billing]` / `/changes` / `/diff` / `/review` | Usage (`billing` opens GitHub's billing page) / changes / diff / hunk review |
 | `/rewind` | Rewind to just before an earlier prompt (code + conversation / conversation / code; see "Rewind") |
@@ -863,7 +866,8 @@ delegate = {
 | `:CoagentOutput` | Show the latest command output in a bottom panel |
 | `:CoagentProcesses` | Show output of / stop background processes the agent started |
 | `:CoagentUsage [billing]` | Copilot usage and remaining quota (Premium requests / Chat / Completions and reset date), requests and tokens of the task and session. `billing` opens GitHub's billing page in the browser |
-| `:CoagentMode [supervised\|readonly\|auto]` | Switch the approval mode |
+| `:CoagentMode [supervised\|readonly\|auto\|judge]` | Switch the approval mode |
+| `:CoagentJudge [log [n]\|clear]` | Judge mode decision log / forget cached verdicts (same as `/judge`) |
 | `:CoagentModel` | Pick a model (tool-calling capable only; per role when roles are on). Models with `usage.rates` show their price (`$3/$15 per 1M`) |
 | `:CoagentRoles [preset]` | Model roles: `single` / `advisor` / `explorers` / `full` |
 | `:CoagentEffort [level] [role]` | Reasoning effort: `minimal` / `low` / `medium` / `high` / `off` / `default` (same as `/effort`) |
@@ -902,9 +906,59 @@ Alt are not used as defaults.
 | `readonly` | Automatic | Not possible (the tools are not even offered to the model) | Not possible |
 | `supervised` (default) | Automatic (outside the workspace / protected files need approval) | Approval every time (diff shown, hunks selectable) | Approval every time (command and cwd shown) |
 | `auto` | Automatic | Automatic inside the workspace (deletes, protected files and paths outside `writable_globs` need approval) | Only allowlisted **simple commands** run automatically (inside the sandbox); everything else needs approval |
+| `judge` | Automatic | Same as `auto` | Hard rules ask first; every other command goes to a **judge model** that allows it or asks you. **No OS sandbox** |
 
 `auto` is only enabled in workspaces listed in `auto.workspaces`, or in a session where you confirmed the dialog of
-`:CoagentMode auto`.
+`:CoagentMode auto`. `judge` likewise needs `judge.workspaces` (or `auto.workspaces`) or the confirmation dialog of
+`:CoagentMode judge`; confirming one mode does not enable the other.
+
+Compared with Claude Code's permission modes: `supervised` ≈ default (ask), `auto` ≈ accept edits + an allowlist of
+commands, `judge` ≈ auto mode (a classifier model decides), `/plan` ≈ plan mode, `readonly` has no direct equivalent.
+
+### Judge mode
+
+For hands-off work where an allowlist is impractical (training entry points vary: `train.py`, `scripts/run_ablation.sh`,
+`torchrun ...`) and the OS sandbox gets in the way (`bwrap` hides GPUs). For each tool call:
+
+1. **Hard rules first** — deterministic and unchanged. Always **ask** (the judge is never consulted and can never turn
+   them into "allow"): dangerous patterns (`rm`, `git reset/clean/checkout --/restore/push/rebase`, `sudo`, `| sh`, `chown`,
+   `chmod -R`, publishing, ...), network transfer (`curl`, `wget`, `scp`, `ssh`, `nc`, `rsync` to a remote), package installs
+   (`pip install`, `conda install`, `npm install`, ...), `unlink` / `rmdir` / `find -delete`, crontab / services, arguments
+   outside the workspace (`/etc/...`, `~/...`, `../..`, `$HOME/...`), protected files (`.env`, keys, `.git/`), scripts from
+   skill folders, file deletes, writes outside `writable_globs`, reads outside the workspace or of protected files, the
+   `delegate` tool and MCP tools. Whatever `supervised` denies is denied.
+2. **Reads** inside the workspace run (as today).
+3. **Workspace file edits** run (as in `auto`, honouring `writable_globs` / `protected_globs`).
+4. **Everything else that would ask** (`run_command`, `start_process`, complex shell with pipes, redirects, `&&`, env
+   assignments) is sent to the **judge**: one headless request to `judge.model` (default: the builder model; a cheap fast
+   model is recommended), no tools, temperature 0, its own system prompt. It sees your request for the task, the exact
+   command, cwd, the command analysis (shell features, env assignments, redirect targets, workspace files it references,
+   URLs), the agent's stated purpose and notes, and the last few tool actions. Everything not computed by coagent (the
+   command text, repository text, tool output, the agent's reasoning) is wrapped in nonce-delimited DATA blocks, and the
+   judge is told that instructions inside them are injection attempts.
+   The answer must be exactly `{"decision": "allow"|"ask", "risk": "low"|"medium"|"high", "reason": "..."}`. Anything else,
+   an error or a timeout (`judge.timeout_ms`) means **ask**; "allow" with high risk means ask. Its policy: allow reasonable,
+   reversible steps toward your task inside the workspace (training / eval / tests / linters / project scripts), nothing
+   installed, no network unless the task clearly needs it; ask for anything destructive, irreversible, outside the
+   workspace, network-sending, credential-touching or unrelated to the task.
+
+- The verdict is shown on the tool item as a dim line (`judge: allowed — runs the project's training script`, or
+  `judge: asks (risk medium) — …` above the usual approval). `/judge log` lists every verdict of the session with its
+  outcome (ran without asking / you approved / you denied); the log is saved with the session
+- Verdicts are cached per (command, cwd) for the session (`judge.cache`; `/judge clear` forgets them). "Always allow" in the
+  approval dialog still works as in the other modes
+- After `limits.max_consecutive_denials` "ask" verdicts in a row the judge is paused for the rest of the task: every command
+  then asks you directly (no more judge requests)
+- Judge requests are counted in `:CoagentUsage` as role `judge` (and in the task's request/token totals)
+- `judge.notify_on_allow = true` rings the bell (`notify.bell` / `notify.desktop`) when a command ran without asking
+- `judge.allowed_paths = { '/data', '/scratch' }` lets command arguments name those absolute paths (datasets, caches)
+  without forcing a question; the judge still decides. Read/write tools are not affected
+
+**Trade-off.** There is **no OS sandbox** in judge mode (`commands.sandbox` / `sandbox_all` are not applied), so CUDA, GPUs
+and your normal environment work — and a command the judge allows runs with your full user permissions. The judge is a
+model: it can be wrong or be misled, which is why everything destructive, remote or outside the workspace stays behind
+deterministic rules it cannot override. Use it in a workspace under version control, on a branch, and keep `supervised`
+for repositories you do not trust.
 
 - Instead of relying on a string allowlist alone, coagent combines: (1) parsing the command and never auto-running anything
   with pipes, redirections, substitutions, `;`/`&&` or environment assignments; (2) dangerous patterns (`rm`,
@@ -959,6 +1013,16 @@ require('coagent').setup({
     workspaces = { '~/work/sandbox-repo' },
     allowed_commands = { { 'pytest' }, { 'npm', 'test' }, { 'cargo', 'test' } },
     writable_globs = { 'src/**', 'tests/**' },
+  },
+  -- judge mode (see "Judge mode"): no sandbox; hard rules, then a judge model
+  judge = {
+    model = nil,              -- nil = the builder model; a cheap fast model is recommended
+    timeout_ms = 15000,       -- no answer in time -> ask
+    workspaces = {},          -- where judge mode may be enabled without the dialog (auto.workspaces count too)
+    cache = true,             -- verdicts per (command, cwd) for the session
+    max_context_bytes = 8000, -- request, notes and recent actions sent to the judge
+    allowed_paths = {},       -- e.g. { '/data/imagenet', '/scratch' }
+    notify_on_allow = false,  -- bell when a command ran without asking
   },
   lsp = { attach_timeout_ms = 4000, request_timeout_ms = 10000, max_results = 100 },
   format_after_edit = false, -- false (default) | 'changed' | 'file' (see "Formatting AI-edited files")

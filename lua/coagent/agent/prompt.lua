@@ -91,6 +91,9 @@ function M.build(opts)
     supervised = 'SUPERVISED: file changes and commands are shown to the user for approval before they run.',
     auto = 'WORKSPACE AUTO: allowlisted commands and workspace edits run without per-action approval; '
       .. 'anything else still asks the user.',
+    judge = 'JUDGE: workspace edits run without per-action approval; each command is reviewed by a separate judge model '
+      .. 'that lets routine project commands run and asks the user about anything risky (destructive, remote, outside the '
+      .. 'workspace, installs). Give every command a short, honest `purpose`.',
   })[opts.mode] or opts.mode
 
   local env = {

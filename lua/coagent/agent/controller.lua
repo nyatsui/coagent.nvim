@@ -17,6 +17,7 @@ local Background = require('coagent.tools.background')
 local Roles = require('coagent.agent.roles')
 local subagent = require('coagent.agent.subagent')
 local Advisor = require('coagent.agent.advisor')
+local Judge = require('coagent.agent.judge')
 local Usage = require('coagent.agent.usage')
 local Delegate = require('coagent.agent.delegate')
 
@@ -1855,6 +1856,14 @@ function Controller:_execute(gen, tc)
     -- imported results of a delegated subtask are always reviewed (delegate.review_imports)
     decision = vim.tbl_extend('force', decision, { action = 'ask', reason = 'imported from another chat', can_always = false })
   end
+  -- judge mode: a separate model may turn this 'ask' into 'allow' (never a hard rule)
+  local jlog = nil
+  if decision.action == 'ask' and decision.judge then
+    decision, jlog = self:_judge(gen, tool, args, prepared, decision, item)
+    if not decision then
+      return nil
+    end
+  end
   item.decision = { action = decision.action, reason = decision.reason, warnings = decision.warnings, can_always = decision.can_always, sandbox = decision.sandbox }
 
   if decision.action == 'deny' then
@@ -1879,6 +1888,9 @@ function Controller:_execute(gen, tc)
       return nil
     end
     item.approval = { action = d.action, reason = d.reason, partial = d.content ~= nil and d.content ~= prepared.new }
+    if jlog then
+      jlog.outcome = d.action:match('^deny') and 'user denied' or 'user approved'
+    end
     if d.action == 'deny' or d.action == 'deny_stop' then
       self.task.denials = self.task.denials + 1
       local msg = 'DENIED by the user.' .. (d.reason and d.reason ~= '' and (' Reason: ' .. d.reason) or '')
@@ -1967,6 +1979,56 @@ function Controller:_execute(gen, tc)
     end
   end
   return { content = content ~= '' and content or '(no output)', item = item, wait = res.ok and res.wait_external or nil }
+end
+
+--- Judge mode: ask the judge model about a command the policy left at 'ask'.
+--- After limits.max_consecutive_denials 'ask' verdicts in a row the judge is
+--- paused for the rest of the task (everything asks the user directly).
+---@return Coagent.Decision? decision (nil: the task was stopped), table? log entry
+function Controller:_judge(gen, tool, args, prepared, decision, item)
+  local t = self.task
+  self.session.judge_log = self.session.judge_log or {}
+  local entry = {
+    at = os.time(),
+    item = item.id,
+    tool = tool.name,
+    command = util.clip(util.redact(prepared.command or ''), 500),
+    cwd = prepared.cwd_rel,
+  }
+  if t.judge_paused then
+    item.judge = { decision = 'ask', paused = true, reason = string.format('it asked %d times in a row; asking you for the rest of this task', t.judge_asks or 0) }
+    return decision
+  end
+  item.judge = { pending = true }
+  self:_update(item)
+  local v = Judge.check({ ctrl = self, gen = gen, tool = tool, args = args, prepared = prepared, decision = decision, item = item })
+  if self.gen ~= gen then
+    return nil
+  end
+  item.judge = { decision = v.decision, risk = v.risk, reason = v.reason, cached = v.cached, error = v.error, model = v.model }
+  entry = vim.tbl_extend('force', entry, { decision = v.decision, risk = v.risk, reason = v.reason, model = v.model, cached = v.cached, error = v.error, ms = v.ms })
+  table.insert(self.session.judge_log, entry)
+  while #self.session.judge_log > 500 do
+    table.remove(self.session.judge_log, 1)
+  end
+  if not v.error and not v.cancelled then
+    if v.decision == 'allow' then
+      t.judge_asks = 0
+    else
+      t.judge_asks = (t.judge_asks or 0) + 1
+      local limit = self.config.limits.max_consecutive_denials
+      if t.judge_asks >= limit then
+        t.judge_paused = true
+        self:notice('warn', string.format('The judge asked about %d commands in a row; it is paused for the rest of this task (every command asks you).', t.judge_asks))
+      end
+    end
+  end
+  if v.decision == 'allow' and not v.error then
+    entry.outcome = 'ran without asking'
+    self.events:emit('judge_allowed', item)
+    return vim.tbl_extend('force', decision, { action = 'allow', reason = 'judge: ' .. v.reason, sandbox = false, judge = false }), entry
+  end
+  return vim.tbl_extend('force', decision, { reason = 'judge: ' .. tostring(v.reason) }), entry
 end
 
 --- A loaded skill's allowed-tools narrow the write/command tools for the

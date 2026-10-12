@@ -23,7 +23,8 @@ lua/coagent/
     init.lua                     controller の組み立て（UI 非依存）
     controller.lua               Agent Loop・状態遷移・承認待ち・停止・上限・検証判定
     state.lua                    状態機械（遷移表）
-    permissions.lua              承認ポリシー（readonly / supervised / auto）
+    permissions.lua              承認ポリシー（readonly / supervised / auto / judge）
+    judge.lua                    judge モードの判定モデル（入力の組み立て・DATA 区切り・厳格な JSON の解釈・キャッシュ）
     cmdparse.lua                 コマンド構文解析・危険パターン・パス検査
     context.lua                  #参照の解決・コンテキスト圧縮
     prompt.lua                   システムプロンプト（プロジェクト文書は低優先度で同梱）
@@ -226,11 +227,49 @@ ledger.bundle(opts) ──> 全体の Markdown（ログは直近 N 件 + 古い�
 | 脅威 | 対策 |
 |---|---|
 | ワークスペース外の変更 | 書込みツールは realpath（最も近い既存祖先の realpath + 残り）でワークスペース内か判定。symlink 脱出・`..`・絶対パス・`~` を拒否。`.git/` も拒否 |
-| ワークスペース外の読込 | supervised は承認、readonly は拒否 |
+| ワークスペース外の読込 | supervised / auto / judge は承認、readonly は拒否 |
 | 秘密情報の送信 | `protected_globs`（`.env`, `*.pem`, `*.key`, `.ssh/**` 等）の読込は承認制、search は除外、auto のコマンド引数に含まれれば承認 |
-| 破壊的コマンド | 危険パターンは常に個別承認・「常に許可」不可。auto は単純コマンド + 許可リスト + サンドボックスのみ自動 |
+| 破壊的コマンド | 危険パターンは常に個別承認・「常に許可」不可。auto は単純コマンド + 許可リスト + サンドボックスのみ自動。judge は下記 |
 | 既存変更の破棄 | 未保存バッファ競合・承認待ち中のディスク変更を検出。巻き戻しは作業開始前の内容が基準で、エージェント後のユーザー編集は確認が必要 |
 | 暴走 | ステップ・ツール回数・時間・重複失敗・同一呼び出し反復・連続拒否の上限。停止は即時 |
 | プロンプトインジェクション | ツール結果・リポジトリ文書は「データ」とシステムプロンプトで明示。権限判定はモデルの出力に依存しない。プロジェクト台帳（モデルが書いた文を含む）も低優先度のデータとして渡し、権限・モード・モデルには影響しない |
 | プロセスリーク | detached 起動したプロセスグループに SIGTERM → 2 秒後 SIGKILL。VimLeavePre で全 kill。バックグラウンドプロセスは同時数・寿命・保持出力に上限があり、stop / セッション切替で kill |
 | トークン漏洩 | UI・保存・ツール結果でマスク。認証は CopilotChat 内で完結し本プラグインはトークンに触れない |
+
+### judge モード（モデルによる承認判定）
+
+Claude Code の auto モードに相当します（supervised ≈ default、auto ≈ accept edits + 許可リスト、judge ≈ auto、`/plan` ≈ plan）。
+OS サンドボックスは使いません（`bwrap` は GPU を隠すため）。安全性は「決定的な固定ルール」と「judge モデル」の二段で、
+judge は「確認が必要（ask）」を「許可（allow）」に変えることしかできません。
+
+```
+ツール呼び出し
+  └ Permissions:decide（決定的）
+      ├ deny（readonly / supervised で拒否されるもの）            → 拒否
+      ├ ask + hard（危険パターン・削除・外部/保護パス・通信・install・
+      │             スキルのスクリプト・delegate・MCP・外部読込）  → ユーザー承認（judge に送らない）
+      ├ allow（ワークスペース内の読込・編集、「常に許可」済み）       → 実行
+      └ ask + judge（それ以外のコマンド）
+          └ Controller:_judge → judge.lua（ヘッドレス 1 リクエスト、ツールなし、temperature 0）
+              ├ {"decision":"allow", risk low/medium}              → 確認なしで実行（サンドボックスなし）
+              └ ask / 不正な JSON / エラー / タイムアウト / high      → ユーザー承認
+```
+
+- 固定ルールは `cmdparse.analyze`（従来の危険パターン）と `cmdparse.inspect`（複雑なコマンドも緩く単語分割し、
+  ワークスペース外・保護パス・`~`・`$HOME`、リダイレクト先、環境変数代入、URL、judge 用の追加ルール
+  ＝ `curl`/`wget`/`scp`/`ssh`/`nc`/リモート `rsync`・パッケージの install / publish・`unlink`/`rmdir`/`shred`・crontab/サービス・
+  `git config --global` を検出）。`judge.allowed_paths` の絶対パスだけは外部パスとして止めず judge に回す
+- judge の入力: ユーザーが入力した依頼文（添付や台帳ダイジェストを含まない）、coagent が計算した事実（ツール・cwd・
+  コマンド解析）、DATA ブロック（コマンド文字列・エージェントの purpose・メモ・直近のツール操作）。DATA はリクエストごとの
+  ノンスで区切り、中の `<<<` / `>>>` は無害化。システムプロンプトは DATA 内の指示をインジェクションとして扱い、
+  その場合は ask・risk high と答えるよう指示する。全体は `judge.max_context_bytes` で上限
+- 出力は `decision` / `risk` / `reason` の 3 キーだけを持つ JSON オブジェクトのみ受理（```json フェンスのみ許容）。
+  それ以外は ask。`allow` + `high` も ask
+- 判定は `session.judge_log` に記録して保存（コマンド・cwd・判定・リスク・理由・モデル・キャッシュ・エラー・所要時間・
+  結果＝確認なしで実行 / 承認 / 拒否）。`/judge log` で一覧。ツール項目には `item.judge` を保存し 1 行で表示
+- キャッシュは Controller のメモリ上（セッション単位、(ツール, コマンド, cwd) がキー、エラーはキャッシュしない）
+- 連続 ask が `limits.max_consecutive_denials` に達したら、そのタスクの残りは judge を止めて直接ユーザーに確認
+  （judge が渋るのに承認し続けるユーザーのためにタスクを止めるのではなく、無駄なリクエストを止める）
+- 判定中の `stop` は judge の待ちを即座に解除（`cancel_fn`）。遅れて届いた応答もトークンは役割 `judge` として計上
+- トレードオフ: judge が許可したコマンドはユーザー権限のすべてで動く。モデルは誤り得るので、破壊的・リモート・
+  ワークスペース外の操作は judge が覆せない固定ルール側に置いている

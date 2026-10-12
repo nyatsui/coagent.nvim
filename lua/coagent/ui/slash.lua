@@ -155,10 +155,19 @@ M.COMMANDS = {
   {
     name = 'mode',
     args = '[mode]',
-    desc = 'Permission mode: supervised | readonly | auto',
-    complete = { 'supervised', 'readonly', 'auto' },
+    desc = 'Permission mode: supervised | readonly | auto | judge',
+    complete = { 'supervised', 'readonly', 'auto', 'judge' },
     run = function(arg)
       app().set_mode(arg)
+    end,
+  },
+  {
+    name = 'judge',
+    args = '[log [n]|clear]',
+    desc = 'Judge mode: list the judge\'s decisions (log) or forget cached verdicts (clear)',
+    complete = { 'log', 'clear' },
+    run = function(arg)
+      return app().judge(arg)
     end,
   },
   {

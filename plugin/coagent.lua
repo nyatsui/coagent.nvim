@@ -141,7 +141,16 @@ cmd('CoagentMode', function(a)
 end, {
   nargs = '?',
   complete = function()
-    return { 'supervised', 'readonly', 'auto' }
+    return { 'supervised', 'readonly', 'auto', 'judge' }
+  end,
+})
+cmd('CoagentJudge', function(a)
+  agent().judge(a.args)
+end, {
+  nargs = '*',
+  desc = 'Judge mode: list the judge decisions (log [n]) or forget cached verdicts (clear)',
+  complete = function()
+    return { 'log', 'clear' }
   end,
 })
 cmd('CoagentModel', function()

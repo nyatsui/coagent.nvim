@@ -51,7 +51,7 @@ conda の場合は `conda activate <env>` の後に起動します。`/delegate`
 
 ```lua
 opts = {
-  mode = 'supervised',          -- 編集・コマンドは毎回承認
+  mode = 'supervised',          -- 編集・コマンドは毎回承認（任せきりにするなら 'judge'。下記「5.」参照）
   model = 'auto',               -- 実行や小さな修正は auto / 安いモデルで十分
   plan = { default = false },   -- 大きな変更の前だけ /plan を使う
   diagnostics_after_edit = { enabled = true }, -- pyright などのエラーを編集結果に付ける
@@ -86,6 +86,54 @@ coagent はユーザーの変更を壊さず、AI の変更は `/rewind` や `:C
 git switch -c exp/improve-accuracy
 ```
 
+### 5. GPU で学習を任せきりにする（judge モード）
+
+`supervised` ではコマンドのたびに承認が要るため、学習を回しながら席を外すことができません。`auto` モードは許可リストに
+載った単純なコマンドしか自動実行せず（学習の入口は `train.py`・`scripts/*.sh`・`torchrun ...` などまちまちで、リストに
+しきれない）、Linux のサンドボックス（`bwrap`）は GPU を隠すので学習が動きません。
+
+GPU マシンで手を離して回すなら **judge モード** を使います。Claude Code の auto モードに相当し、別のモデル（judge）が
+「このコマンドは確認なしで実行してよいか」を判定します。
+
+```lua
+opts = {
+  mode = 'judge',
+  judge = {
+    workspaces = { '~/work/my-ml-project' }, -- ここでだけ judge モードを許可（登録しない場合は :CoagentMode judge で確認ダイアログ）
+    model = nil,              -- nil = ビルダーと同じモデル。:CoagentModel の一覧にある安くて速いモデル名を指定すると費用を抑えられる
+    allowed_paths = { '/data/imagenet', '/scratch/me' }, -- データセットやキャッシュの絶対パス（引数に使っても止めない）
+    notify_on_allow = false,  -- true にすると確認なしで実行したときにベル
+  },
+  background = { max_lifetime_ms = 12 * 60 * 60 * 1000 },
+},
+```
+
+- **常に確認が出るもの（固定ルール。judge は覆せない）**: `rm` などの削除、`git reset/clean/push/rebase` などの危険な git 操作、
+  `sudo`、`| sh`、`curl`/`wget`/`scp`/`ssh`/リモートへの `rsync`、`pip install` などのインストール、ワークスペース外のパス
+  （`allowed_paths` を除く）や `.env`・鍵などの保護ファイル、`/delegate`、ワークスペース外の読込
+- **自動**: ワークスペース内の読込と編集（`auto` と同じ）
+- **judge が判定**: それ以外のコマンド。`CUDA_VISIBLE_DEVICES=0 python train.py --config configs/a.yaml 2>&1 | tee runs/a.log` の
+  ような、依頼に沿ったプロジェクト内の学習・評価・テストは許可され、そのまま実行されます。依頼と関係ない・破壊的・
+  外部送信などは確認待ちになります。応答が不正・タイムアウト（既定 15 秒）でも確認待ち
+- ツール項目に `judge: allowed — runs the project's training script` のような 1 行が付きます。`/judge log` で全判定と結果を確認できます
+- 同じコマンド（同じ cwd）は 2 回目から判定を再利用します。judge が 3 回続けて確認を求めたら（`limits.max_consecutive_denials`）、
+  そのタスクの残りは judge を止めて直接確認します
+- judge のリクエストは `:CoagentUsage` に役割 `judge` として表示されます
+
+**注意（トレードオフ）**: judge モードでは OS サンドボックスを使いません。GPU・CUDA・普段の環境がそのまま使える代わりに、
+judge が許可したコマンドはあなたのユーザー権限のすべてで動きます。judge はモデルなので誤ることがあります。必ず作業ブランチ
+（上の 4.）で使い、信頼できないリポジトリ（他人のコードを試すだけ、など）では `supervised` に戻してください（`gm` / `/mode supervised`）。
+
+使い方の例:
+
+```text
+configs/a.yaml と configs/b.yaml で 1 エポックずつ学習し、val_acc を比べて良い方の設定で 5 エポック回して。結果は /exp に残して。
+```
+
+エージェントが `start_process` で学習を起動し、judge が許可すれば確認なしで進みます。長い学習は `background.max_lifetime_ms` まで
+動き、指標は `/exp` に記録されます。なお `/exp run` はあなたが入力するコマンドなので、judge を通さず確認が出ます
+（supervised と同じ）。
+
 ---
 
 ## A. 既存の機械学習リポジトリに適用する
@@ -119,7 +167,7 @@ val_acc ≥ 0.80（現状 0.71 前後で頭打ち）。推論は 1 枚 20ms 以�
 /exp run python train.py --config configs/base.yaml
 ```
 
-- 実行には承認が必要です（supervised）。終了すると指標（`val_acc=0.712` など）が記録され、パネルに通知されます
+- 実行には承認が必要です（supervised。judge モードでも `/exp run` は確認が出ます）。終了すると指標（`val_acc=0.712` など）が記録され、パネルに通知されます
 - `/exp note 1 ベースライン（現状の設定）` でメモを付ける
 - 学習コードが指標を出力していない場合は、まず coagent に頼みます:
   「各エポックの終わりに `epoch=3 loss=0.41 val_loss=0.52 val_acc=0.71` の形式で 1 行出力するようにして」
@@ -316,11 +364,13 @@ data/train.csv の顧客データから解約（churn 列）を予測する二�
 - **コードの断片しか返ってこなかった場合**（「…既存のコード…」の省略など）、coagent のエージェントが 1 回で対象ファイルに
   適用します（承認あり）。全文で返すよう依頼し直しても構いません
 - **coagent のモデルは軽いもので十分。** 実行・確認・小さな修正が中心なら `auto` や安いモデルで足ります。重い検討は別のチャットへ
+- **席を外して GPU で回すなら judge モード。** 固定ルールで危険な操作は止め、残りは judge が判定します（[5.](#5-gpu-で学習を任せきりにするjudge-モード)）。
+  judge のモデルは安いもので十分です
 - **エージェントから外部に任せることもある。** 作業中に重い検討が必要になると、エージェントが `delegate` を提案します（承認制）。
   承認すると `waiting: analyze #3` の状態で待つので、別のチャットで処理して `/receive 3` で続けます。待たずに他の作業をするなら `/delegate detach`
 - **貼り付けてよい情報は組織のルールに従ってください。** `.env` や鍵ファイルなどの保護ファイルは自動で除外されます
 
 ## 関連
 
-- [README_ja.md](../README_ja.md) の「実験ログ」「プロジェクト台帳」「サブタスクを別のチャットに任せる」
+- [README_ja.md](../README_ja.md) の「実験ログ」「プロジェクト台帳」「サブタスクを別のチャットに任せる」「judge モード」
 - [manual.md](manual.md) — 操作マニュアル

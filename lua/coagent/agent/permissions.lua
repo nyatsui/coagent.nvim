@@ -11,6 +11,13 @@
 ---               confined by the OS write sandbox when available. Everything
 ---               else still asks. Dangerous commands ALWAYS ask and can never be
 ---               "always allowed".
+---   judge       like auto for reads and workspace edits, but NO OS sandbox
+---               (GPU training works) and commands are not allowlisted: hard
+---               rules decide first (dangerous patterns, deletes, protected or
+---               outside paths, network transfer, installs, delegate and MCP
+---               tools always ask); what remains asks a separate judge model
+---               (agent/judge.lua), which can only turn "ask" into "allow".
+---               Only in workspaces the user explicitly enabled.
 local cmdparse = require('coagent.agent.cmdparse')
 local sandbox = require('coagent.tools.sandbox')
 
@@ -21,17 +28,20 @@ local sandbox = require('coagent.tools.sandbox')
 ---@field sandbox boolean
 ---@field can_always boolean
 ---@field grant_key string?
+---@field judge boolean? judge mode: the judge model may turn this 'ask' into 'allow'
+---@field hard boolean? a hard rule asked (never sent to the judge)
+---@field inspection Coagent.CommandInspection? judge mode: command description
 
 ---@class Coagent.Permissions
 local Permissions = {}
 Permissions.__index = Permissions
 
-Permissions.MODES = { 'supervised', 'readonly', 'auto' }
+Permissions.MODES = { 'supervised', 'readonly', 'auto', 'judge' }
 
 ---@param config table
 ---@param ws Coagent.Workspace
 function Permissions.new(config, ws)
-  local self = setmetatable({ config = config, ws = ws, grants = {}, auto_enabled = false, task_readonly = false }, Permissions)
+  local self = setmetatable({ config = config, ws = ws, grants = {}, auto_enabled = false, judge_enabled = false, task_readonly = false }, Permissions)
   self.mode = 'supervised'
   self:set_mode(config.mode or 'supervised')
   return self
@@ -49,7 +59,23 @@ function Permissions:auto_configured()
   return false
 end
 
---- Change mode. Auto requires that the workspace is listed in config or that
+--- Is judge mode pre-authorized for this workspace (judge.workspaces or
+--- auto.workspaces)?
+---@return boolean
+function Permissions:judge_configured()
+  local lists = { (self.config.judge or {}).workspaces or {}, self.config.auto.workspaces or {} }
+  for _, list in ipairs(lists) do
+    for _, p in ipairs(list) do
+      local real = vim.uv.fs_realpath(vim.fs.normalize(p))
+      if real and real == self.ws.root then
+        return true
+      end
+    end
+  end
+  return false
+end
+
+--- Change mode. Auto and judge require that the workspace is listed in config or that
 --- the caller passes `explicit = true` after confirming with the user.
 ---@param mode string
 ---@param explicit boolean?
@@ -68,6 +94,15 @@ function Permissions:set_mode(mode, explicit)
     if not (self.auto_enabled or self:auto_configured()) then
       self.mode = self.mode or 'supervised'
       return false, 'auto mode is not enabled for this workspace (add it to auto.workspaces or enable it explicitly)'
+    end
+  end
+  if mode == 'judge' then
+    if explicit then
+      self.judge_enabled = true
+    end
+    if not (self.judge_enabled or self:judge_configured()) then
+      self.mode = self.mode or 'supervised'
+      return false, 'judge mode is not enabled for this workspace (add it to judge.workspaces or auto.workspaces, or enable it explicitly)'
     end
   end
   self.mode = mode
@@ -129,12 +164,13 @@ function Permissions:decide(tool, args, prepared)
   local mode = self:effective_mode()
   prepared = prepared or {}
 
-  -- tools that always need the user (delegate: content leaves for another chat)
-  if tool.always_ask then
+  -- tools that always need the user (delegate: content leaves for another
+  -- chat; MCP tools: unknown side effects)
+  if tool.always_ask or tool.mcp then
     if mode == 'readonly' then
       return decision('deny', 'read-only mode: ' .. tool.name .. ' is disabled')
     end
-    return decision('ask', tool.ask_reason or (tool.name .. ' always needs approval'), { warnings = prepared.warnings or {} })
+    return decision('ask', tool.ask_reason or (tool.name .. ' always needs approval'), { warnings = prepared.warnings or {}, hard = true })
   end
 
   if tool.kind == 'read' then
@@ -153,14 +189,14 @@ function Permissions:decide(tool, args, prepared)
       if self.grants[key] then
         return decision('allow', 'previously approved')
       end
-      return decision('ask', 'reads a file outside the workspace', { warnings = { 'outside workspace: ' .. p.real }, can_always = true, grant_key = key })
+      return decision('ask', 'reads a file outside the workspace', { warnings = { 'outside workspace: ' .. p.real }, can_always = true, grant_key = key, hard = true })
     end
     if p and p.protected then
       local key = 'read:' .. p.real
       if self.grants[key] then
         return decision('allow', 'previously approved')
       end
-      return decision('ask', 'reads a protected file (may contain secrets)', { warnings = { 'protected: ' .. p.protected }, can_always = true, grant_key = key })
+      return decision('ask', 'reads a protected file (may contain secrets)', { warnings = { 'protected: ' .. p.protected }, can_always = true, grant_key = key, hard = true })
     end
     return decision('allow', 'read-only tool')
   end
@@ -178,19 +214,19 @@ function Permissions:decide(tool, args, prepared)
     end
     if p and p.protected then
       table.insert(warnings, 'protected path: ' .. p.protected)
-      return decision('ask', 'modifies a protected file', { warnings = warnings })
+      return decision('ask', 'modifies a protected file', { warnings = warnings, hard = true })
     end
     if self.grants[key] then
       return decision('allow', 'previously approved for this file')
     end
-    if mode == 'auto' then
+    if mode == 'auto' or mode == 'judge' then
       if p and p.writable and prepared.op ~= 'delete' then
-        return decision('allow', 'auto mode: workspace file')
+        return decision('allow', mode .. ' mode: workspace file')
       end
       if prepared.op == 'delete' then
-        return decision('ask', 'auto mode never deletes without approval', { warnings = warnings, grant_key = key, can_always = true })
+        return decision('ask', mode .. ' mode never deletes without approval', { warnings = warnings, grant_key = key, can_always = true, hard = true })
       end
-      return decision('ask', 'outside writable_globs', { warnings = warnings, grant_key = key, can_always = true })
+      return decision('ask', 'outside writable_globs', { warnings = warnings, grant_key = key, can_always = true, hard = true })
     end
     return decision('ask', 'file change', { warnings = warnings, grant_key = key, can_always = true })
   end
@@ -211,12 +247,16 @@ function Permissions:decide(tool, args, prepared)
     for _, p in ipairs(a.protected_paths or {}) do
       table.insert(warnings, 'touches a protected file: ' .. p)
     end
-    local sandbox_all = self.config.commands.sandbox_all and self.config.commands.sandbox ~= 'off' and sandbox.backend() ~= nil
+    -- judge mode never sandboxes (GPU access); its safety is the hard rules + judge
+    local sandbox_all = mode ~= 'judge' and self.config.commands.sandbox_all and self.config.commands.sandbox ~= 'off' and sandbox.backend() ~= nil
     if #a.dangerous > 0 then
-      return decision('ask', 'potentially destructive command', { warnings = warnings, can_always = false, sandbox = sandbox_all })
+      return decision('ask', 'potentially destructive command', { warnings = warnings, can_always = false, sandbox = sandbox_all, hard = true })
     end
     if self.grants[key] then
       return decision('allow', 'previously approved command', { sandbox = sandbox_all })
+    end
+    if mode == 'judge' then
+      return self:_judge_exec(prepared, args, a, key)
     end
     if mode == 'auto' then
       local why
@@ -241,6 +281,44 @@ function Permissions:decide(tool, args, prepared)
   end
 
   return decision('ask', 'unknown tool kind')
+end
+
+--- Judge mode, a command that is not dangerous and not previously approved:
+--- the judge-mode hard rules ask; anything else is left to the judge model.
+---@return Coagent.Decision
+function Permissions:_judge_exec(prepared, args, a, key)
+  local command = prepared.command or args.command or ''
+  local jcfg = self.config.judge or {}
+  local insp = cmdparse.inspect(command, prepared.cwd or self.ws.root, self.ws, { allowed_paths = jcfg.allowed_paths })
+  local hard, warnings = {}, {}
+  for _, h in ipairs(insp.hard) do
+    table.insert(hard, h)
+    table.insert(warnings, 'judge mode always asks: ' .. h)
+  end
+  for _, p in ipairs(insp.outside_paths) do
+    table.insert(warnings, 'path outside workspace: ' .. p)
+  end
+  if #insp.outside_paths > 0 then
+    table.insert(hard, 'touches a path outside the workspace')
+  end
+  for _, p in ipairs(insp.protected_paths) do
+    table.insert(warnings, 'touches a protected file: ' .. p)
+  end
+  if #insp.protected_paths > 0 then
+    table.insert(hard, 'touches a protected file')
+  end
+  if self.skills and self.skills:in_command(command) then
+    table.insert(hard, 'runs or references a file from a skill folder')
+    table.insert(warnings, 'skill files: scripts in skills are never run without approval')
+  end
+  -- shown to the user and the judge, not a hard rule (`--output runs/x` is common)
+  for _, f in ipairs(a.denied_flags) do
+    table.insert(warnings, 'flag can run programs or write files: ' .. f)
+  end
+  if #hard > 0 then
+    return decision('ask', 'judge mode: ' .. hard[1], { warnings = warnings, grant_key = key, can_always = true, hard = true, inspection = insp })
+  end
+  return decision('ask', 'command execution', { warnings = warnings, grant_key = key, can_always = true, judge = true, inspection = insp })
 end
 
 return Permissions

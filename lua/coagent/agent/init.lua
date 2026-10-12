@@ -46,6 +46,8 @@ function M.build(opts)
   c.ledger = Ledger.new(config, ws, { experiments = experiments, ctrl = c })
   if config.mode == 'auto' and perms.mode ~= 'auto' then
     c:notice('warn', 'mode = "auto" is not enabled for ' .. ws.root .. ' (not in auto.workspaces); using supervised. Enable it with :CoagentMode auto.')
+  elseif config.mode == 'judge' and perms.mode ~= 'judge' then
+    c:notice('warn', 'mode = "judge" is not enabled for ' .. ws.root .. ' (not in judge.workspaces or auto.workspaces); using supervised. Enable it with :CoagentMode judge.')
   end
   if opts.session then
     -- Restored session: never re-run calls that did not complete.

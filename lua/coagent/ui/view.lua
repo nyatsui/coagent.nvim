@@ -299,7 +299,7 @@ function View:bar()
     return (tostring(s or ''):gsub('%%', '%%%%'))
   end
   local mode = c.permissions.mode
-  local mode_short = ({ supervised = 'supervised', readonly = 'read-only', auto = 'AUTO' })[mode] or mode
+  local mode_short = ({ supervised = 'supervised', readonly = 'read-only', auto = 'AUTO', judge = 'JUDGE' })[mode] or mode
   local plan = c:plan_phase()
   if plan == 'planning' then
     mode_short = 'plan'

@@ -76,7 +76,7 @@ describe('slash completion', function()
       return i.word
     end, items))
     local _, modes = slash.complete('/mode ')
-    assert.are.equal(3, #modes)
+    assert.are.equal(4, #modes) -- supervised readonly auto judge
     assert.is_nil((slash.complete('hello /c')))
     assert.is_nil((slash.complete('//c')))
     assert.is_nil((slash.complete('/new x')))

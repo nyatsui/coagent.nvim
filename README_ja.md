@@ -37,7 +37,8 @@ I'll find the `add` implementation and its tests.
   （既存 CopilotChat の自動継続は 1 回のみ。`tests/upstream/existing_loop_spec.lua` で確認済み）
 - **明示的な状態機械** — `IDLE / THINKING / STREAMING / EXECUTING_TOOL / WAITING_APPROVAL / WAITING_EXTERNAL / PAUSED / COMPLETED / FAILED / CANCELLED`
 - **「モデルが完了と言った」と「検証で成功した」を区別** — 最後の編集以降に成功したチェックがあるかで `Verified / Not verified / Last check failed` を表示
-- **安全な実行** — 承認モード、ワークスペース外・シンボリックリンク脱出・`.git`・保護ファイルの防御、危険コマンド検出、OS サンドボックス（macOS `sandbox-exec` / Linux `bwrap`）
+- **安全な実行** — 承認モード、ワークスペース外・シンボリックリンク脱出・`.git`・保護ファイルの防御、危険コマンド検出、OS サンドボックス（macOS `sandbox-exec` / Linux `bwrap`）。
+  オプトインの **judge モード**では、別のモデルがコマンドを確認なしで実行してよいか判定します（固定ルールが先。サンドボックスなしなので GPU ジョブも動く）
 - **ユーザーの変更を壊さない** — 未保存バッファとの競合検出、承認待ち中のディスク変更検出、作業開始前の状態を基準にしたロールバック
 - **リッチな TUI** — タイムライン、折りたたみ、ストリーミング描画（ちらつき防止の差分更新）、hunk 単位レビュー、side-by-side diff、コマンド出力パネル、変更一覧
 - **ターミナル適応** — 80×24 で動作、tmux、256 色/true color、Unicode/ASCII/Nerd Font アイコン、split/float 切替、リサイズ追従
@@ -104,7 +105,7 @@ I'll find the `add` implementation and its tests.
   },
   opts = {
     -- model = 'gpt-4.1',      -- 省略時は CopilotChat の model
-    -- mode = 'supervised',    -- 'supervised' | 'readonly' | 'auto'
+    -- mode = 'supervised',    -- 'supervised' | 'readonly' | 'auto' | 'judge'
     -- ui = { layout = 'vertical', icons = 'unicode' }, -- icons: 'unicode' | 'ascii' | 'nerd'
   },
 },
@@ -123,7 +124,8 @@ I'll find the `add` implementation and its tests.
 - `auto` モードのコマンド隔離には [bubblewrap](https://github.com/containers/bubblewrap)（`bwrap`）を使います
   （`apt install bubblewrap` / `dnf install bubblewrap`）。Ubuntu 24.04 以降など、非特権ユーザー名前空間が制限されていて
   `bwrap` が動かない環境では自動的に「サンドボックスなし」と判定し、`:checkhealth coagent` に理由を表示します。
-  既定の `supervised` モードは毎回承認するため、サンドボックスの有無に影響されません
+  既定の `supervised` モードは毎回承認するため、サンドボックスの有無に影響されません。
+  `bwrap` は GPU を隠します。GPU マシンで学習を任せきりにするなら `judge` モード（サンドボックスなし。「judge モード」参照）を使ってください
 
 ### 複数マシンで設定リポジトリを共有する場合
 
@@ -293,7 +295,8 @@ vim.keymap.set('x', '<leader>ai', ':CoagentInline<CR>', { desc = 'Coagent inline
 | `/receive [id] [paste\|clipboard\|files]` | 結果を取り込む: 貼り付けたテキストやダウンロードしたファイル。変更はすべてレビュー付き |
 | `/new` / `/sessions` | 新規セッション / 保存済みセッション一覧 |
 | `/model [role]` | モデル選択（`builder` / `explorer` / `advisor`） |
-| `/mode [mode]` / `/roles [preset]` | 承認モード / 役割分担の切替 |
+| `/mode [mode]` / `/roles [preset]` | 承認モード（`supervised` / `readonly` / `auto` / `judge`）/ 役割分担の切替 |
+| `/judge [log [n]\|clear]` | judge モード: このセッションの判定一覧（コマンド・判定・リスク・理由・結果）/ キャッシュした判定を忘れる（「judge モード」参照。ローカル処理、リクエストなし） |
 | `/effort <level\|off\|default> [role]` | 推論の強さ（reasoning effort）をこのセッションだけ変更（下記「推論の強さ」） |
 | `/usage [billing]` / `/changes` / `/diff` / `/review` | 利用量（`billing` で GitHub の請求ページ） / 変更一覧 / diff / hunk レビュー |
 | `/rewind` | 過去のプロンプトの直前まで巻き戻す（コード + 会話 / 会話のみ / コードのみ。下記「巻き戻し」） |
@@ -838,7 +841,8 @@ delegate = {
 | `:CoagentOutput` | 直近のコマンド出力を下部パネルに表示 |
 | `:CoagentProcesses` | エージェントが起動したバックグラウンドプロセスの出力表示・停止 |
 | `:CoagentUsage [billing]` | Copilot の利用量・残量（Premium requests / Chat / Completions とリセット日）、タスク・セッションのリクエスト数とトークン数。`billing` で GitHub の請求ページをブラウザで開く |
-| `:CoagentMode [supervised\|readonly\|auto]` | 承認モード切替 |
+| `:CoagentMode [supervised\|readonly\|auto\|judge]` | 承認モード切替 |
+| `:CoagentJudge [log [n]\|clear]` | judge モードの判定ログ / キャッシュ消去（`/judge` と同じ） |
 | `:CoagentModel` | モデル選択（tool calling 対応モデルのみ。役割分担中は役割ごと）。`usage.rates` を設定したモデルには単価（`$3/$15 per 1M`）を表示 |
 | `:CoagentRoles [preset]` | モデルの役割分担: `single` / `advisor` / `explorers` / `full` |
 | `:CoagentEffort [level] [role]` | 推論の強さ: `minimal` / `low` / `medium` / `high` / `off` / `default`（`/effort` と同じ） |
@@ -876,9 +880,56 @@ delegate = {
 | `readonly` | 自動 | 不可（ツール自体をモデルに渡さない） | 不可 |
 | `supervised`（既定） | 自動（ワークスペース外・保護ファイルは承認） | 毎回承認（diff 表示・hunk 選択可） | 毎回承認（コマンドと cwd を表示） |
 | `auto` | 自動 | ワークスペース内は自動（削除・保護ファイル・`writable_globs` 外は承認） | 許可リストの**単純コマンド**のみ自動（サンドボックス内）。それ以外は承認 |
+| `judge` | 自動 | `auto` と同じ | 固定ルールに当たるものは承認。それ以外は **judge モデル**が許可するか承認に回すかを判定。**OS サンドボックスなし** |
 
 `auto` は `auto.workspaces` に登録したワークスペース、または `:CoagentMode auto` で確認ダイアログに同意した
-セッションでのみ有効になります。
+セッションでのみ有効になります。`judge` も同様に `judge.workspaces`（または `auto.workspaces`）への登録か、
+`:CoagentMode judge` の確認ダイアログへの同意が必要です。一方を有効にしても他方は有効になりません。
+
+Claude Code の権限モードとの対応: `supervised` ≈ default（毎回確認）、`auto` ≈ accept edits + コマンドの許可リスト、
+`judge` ≈ auto モード（分類モデルが判定）、`/plan` ≈ plan モード。`readonly` に直接の対応はありません。
+
+### judge モード
+
+許可リストが現実的でない（学習の入口が `train.py`・`scripts/run_ablation.sh`・`torchrun ...` などまちまち）、かつ
+OS サンドボックスが邪魔になる（`bwrap` は GPU を隠す）場面で、確認なしに進めるためのモードです。ツール呼び出しごとに:
+
+1. **固定ルールが先**（決定的で従来どおり）。次は**必ず承認**で、judge には送らず、judge が「許可」に変えることもできません:
+   危険パターン（`rm`、`git reset/clean/checkout --/restore/push/rebase`、`sudo`、`| sh`、`chown`、`chmod -R`、パッケージ公開など）、
+   ネットワーク転送（`curl`・`wget`・`scp`・`ssh`・`nc`・リモートへの `rsync`）、パッケージのインストール（`pip install`・
+   `conda install`・`npm install` など）、`unlink` / `rmdir` / `find -delete`、crontab・サービス操作、ワークスペース外の引数
+   （`/etc/...`・`~/...`・`../..`・`$HOME/...`）、保護ファイル（`.env`・鍵・`.git/`）、スキルフォルダのスクリプト、ファイル削除、
+   `writable_globs` 外への書込み、ワークスペース外や保護ファイルの読込、`delegate` ツール、MCP ツール。`supervised` で拒否されるものは拒否。
+2. ワークスペース内の**読込**はそのまま実行（従来どおり）。
+3. ワークスペース内の**ファイル編集**は実行（`auto` と同じく `writable_globs` / `protected_globs` に従う）。
+4. **それ以外で承認が必要になるもの**（`run_command`・`start_process`、パイプ・リダイレクト・`&&`・環境変数代入を含む複雑なシェル）を
+   **judge** に問い合わせます。`judge.model`（既定はビルダーのモデル。安くて速いモデルを推奨）へのヘッドレスな 1 リクエストで、
+   ツールなし・temperature 0・専用のシステムプロンプト。渡すのは、タスクについてのユーザーの依頼文、コマンドそのもの、cwd、
+   コマンド解析（シェル機能・環境変数代入・リダイレクト先・参照するワークスペース内ファイル・URL）、エージェントが述べた目的とメモ、
+   直近のツール操作です。coagent が計算したもの以外（コマンド文字列・リポジトリの文章・ツール出力・モデルの推論）はすべて
+   ノンス付きの DATA ブロックで囲み、その中の指示はインジェクションの試みとして扱うよう judge に指示しています。
+   応答は `{"decision": "allow"|"ask", "risk": "low"|"medium"|"high", "reason": "..."}` だけを受け付けます。それ以外の形式・エラー・
+   タイムアウト（`judge.timeout_ms`）はすべて**承認**、リスク high の allow も承認に回します。判定方針は、ワークスペース内で依頼に沿った
+   取り消し可能な手順（学習・評価・テスト・リンター・プロジェクトのスクリプト実行）で、何もインストールせず、依頼が明らかに必要と
+   しない限り通信もしないものは許可。破壊的・取り消し不能・ワークスペース外・外部送信・認証情報に触れる・依頼と無関係なものは承認です。
+
+- 判定はツール項目に薄い 1 行で表示します（`judge: allowed — runs the project's training script`、または通常の承認の上に
+  `judge: asks (risk medium) — …`）。`/judge log` でセッション中の全判定と結果（確認なしで実行 / 承認 / 拒否）を一覧でき、
+  ログはセッションと一緒に保存されます
+- 判定はセッション中 (コマンド, cwd) ごとにキャッシュします（`judge.cache`。`/judge clear` で消去）。承認ダイアログの
+  「常に許可」も他のモードと同じく使えます
+- judge が `limits.max_consecutive_denials` 回続けて「承認」と判定すると、そのタスクの残りでは judge を止め、
+  以後のコマンドはすべて直接ユーザーに確認します（judge へのリクエストもしない）
+- judge のリクエストは `:CoagentUsage` に役割 `judge` として計上されます（タスクのリクエスト数・トークン数にも含む）
+- `judge.notify_on_allow = true` にすると、確認なしで実行したときにベル（`notify.bell` / `notify.desktop`）を鳴らします
+- `judge.allowed_paths = { '/data', '/scratch' }` で、コマンド引数がそれらの絶対パス（データセットやキャッシュ）を指しても
+  固定ルールでは止めず judge の判定に回します。読込・書込ツールには影響しません
+
+**トレードオフ**: judge モードには **OS サンドボックスがありません**（`commands.sandbox` / `sandbox_all` は適用しない）。
+そのため CUDA・GPU・普段の環境がそのまま使えますが、judge が許可したコマンドはユーザー権限のすべてで動きます。judge は
+モデルなので、誤ったり誘導されたりすることがあります。だからこそ破壊的・リモート・ワークスペース外の操作は、judge が
+覆せない決定的なルールの側に置いています。バージョン管理下のワークスペースで、作業ブランチを切って使い、信頼できない
+リポジトリでは `supervised` を使ってください。
 
 - 文字列の許可リストだけに頼らず、①コマンドを構文解析し、パイプ・リダイレクト・置換・`;`/`&&`・環境変数代入を含むものは自動実行しない、
   ②危険パターン（`rm`, `git reset/clean/checkout --/restore/push/rebase`, `sudo`, `| sh` など）は**常に個別承認**で「常に許可」も不可、
@@ -930,6 +981,16 @@ require('coagent').setup({
     workspaces = { '~/work/sandbox-repo' },
     allowed_commands = { { 'pytest' }, { 'npm', 'test' }, { 'cargo', 'test' } },
     writable_globs = { 'src/**', 'tests/**' },
+  },
+  -- judge モード（「judge モード」参照）: サンドボックスなし。固定ルールの後に judge モデル
+  judge = {
+    model = nil,              -- nil = ビルダーのモデル。安くて速いモデルを推奨
+    timeout_ms = 15000,       -- 時間内に応答がなければ承認に回す
+    workspaces = {},          -- ダイアログなしで judge モードにできる場所（auto.workspaces も有効）
+    cache = true,             -- セッション中 (コマンド, cwd) ごとに判定を再利用
+    max_context_bytes = 8000, -- judge に送る依頼文・メモ・直近の操作の上限
+    allowed_paths = {},       -- 例: { '/data/imagenet', '/scratch' }
+    notify_on_allow = false,  -- 確認なしで実行したらベル
   },
   lsp = { attach_timeout_ms = 4000, request_timeout_ms = 10000, max_results = 100 },
   format_after_edit = false, -- false（既定）| 'changed' | 'file'（「AI が編集したファイルの整形」参照）

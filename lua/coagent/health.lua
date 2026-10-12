@@ -52,6 +52,7 @@ function M.check()
   else
     h.warn('no command sandbox: ' .. sb_mod.unavailable_reason() .. '. Auto mode then runs allowlisted commands unconfined (supervised mode is unaffected).')
   end
+  h.info('judge mode never uses the command sandbox (GPUs work): hard rules, then a judge model decide (:help coagent-judge)')
 
   if pcall(vim.treesitter.language.add, 'markdown') then
     h.ok('treesitter markdown parser available')

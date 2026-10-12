@@ -175,6 +175,11 @@ local function tool(b, item, o)
     local r = b.line('  ' .. item.summary)
     b.hl(r, 2, -1, grp)
   end
+  -- judge mode: the judge's verdict ("judge: allowed — runs the training script")
+  if item.judge then
+    local r = b.line('  ' .. require('coagent.agent.judge').label(item.judge))
+    b.hl(r, 2, -1, (item.judge.decision == 'ask' and not item.judge.pending) and 'CoagentWarn' or 'CoagentDim')
+  end
 
   -- explorer subagent lookups (nested, compact)
   if item.children and #item.children > 0 then

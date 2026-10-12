@@ -11,7 +11,7 @@
 --- with focus reporting enabled (tmux: `set -g focus-events on`).
 local M = {}
 
-M.KINDS = { 'approval', 'done', 'failed', 'paused', 'limit', 'waiting' }
+M.KINDS = { 'approval', 'done', 'failed', 'paused', 'limit', 'waiting', 'judge' }
 
 -- true until the terminal reports FocusLost
 M.focused = true
@@ -77,6 +77,7 @@ local LABEL = {
   paused = 'paused',
   limit = 'limit reached, paused',
   waiting = 'waiting for an external result',
+  judge = 'ran without asking (judge)',
 }
 
 --- Generic message for a notification kind. `detail` must be a tool name or
@@ -122,6 +123,13 @@ function M.attach(c, get_cfg)
   local subs = {
     c.events:on('approval_request', function(item)
       M.signal(get_cfg(), 'approval', item and item.tool)
+    end),
+    c.events:on('judge_allowed', function(item)
+      -- judge.notify_on_allow: a command ran without asking
+      local cfg = get_cfg()
+      if cfg and c.config.judge and c.config.judge.notify_on_allow then
+        M.signal(vim.tbl_extend('force', cfg, { on = { 'judge' } }), 'judge', item and item.tool)
+      end
     end),
     c.events:on('plan_ready', function()
       M.signal(get_cfg(), 'approval', 'plan')

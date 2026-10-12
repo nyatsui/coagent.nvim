@@ -69,6 +69,9 @@ local defaults = {
   -- 'readonly': only read/search tools are offered to and executable by the model.
   -- 'auto': workspace auto mode, only usable in workspaces listed in `auto.workspaces`
   --         (or enabled explicitly for the session with `:CoagentMode auto`).
+  -- 'judge': a judge model decides whether commands run without asking (see `judge`);
+  --          only in workspaces listed in `judge.workspaces` / `auto.workspaces` (or
+  --          enabled explicitly with `:CoagentMode judge`).
   mode = 'supervised',
 
   -- Plan phase (/plan <task>, :CoagentPlan): the agent first investigates with
@@ -171,6 +174,29 @@ local defaults = {
     writable_globs = {},
     -- Never auto-approved, even inside the workspace.
     protected_globs = { '.git/**', '.env', '.env.*', '**/*.pem', '**/*.key', '**/id_rsa*', '**/.ssh/**' },
+  },
+
+  -- Judge mode (:CoagentMode judge, like Claude Code's "auto" permission mode).
+  -- Reads and workspace edits behave as in auto mode. Commands run WITHOUT the
+  -- OS sandbox (GPUs, CUDA and your normal environment work) and without an
+  -- allowlist: deterministic hard rules always ask first (dangerous patterns,
+  -- deletes, outside / protected paths, curl/wget/scp/ssh/rsync, package
+  -- installs, delegate); every other command is shown to a separate judge
+  -- model that answers allow (run now) or ask (you decide). The judge can
+  -- never override a hard rule, and any failure, timeout or malformed answer
+  -- means ask. Trade-off: a command the judge allows runs with your full user
+  -- permissions; the judge is a model and can be wrong.
+  judge = {
+    model = nil, -- nil = the builder model; a cheap fast model is recommended
+    timeout_ms = 15000, -- no answer in time -> ask
+    workspaces = {}, -- absolute paths where judge mode may be enabled (auto.workspaces count too)
+    cache = true, -- remember verdicts per (command, cwd) for the session
+    max_context_bytes = 8000, -- request, notes and recent actions sent to the judge
+    -- Absolute paths that command arguments may name without forcing a
+    -- question (datasets, caches, scratch dirs: { '/data', '/scratch' }).
+    -- The judge still sees and judges them. Read/write tools are unaffected.
+    allowed_paths = {},
+    notify_on_allow = false, -- bell (notify.bell / notify.desktop) when a command ran without asking
   },
 
   -- Prompt templates, usable as /name in the input or :CoagentPrompt Name [text].
@@ -446,6 +472,9 @@ function M.setup(opts)
   end
   if opts and opts.skills and opts.skills.paths then
     M.options.skills.paths = opts.skills.paths
+  end
+  if opts and opts.judge and opts.judge.allowed_paths then
+    M.options.judge.allowed_paths = opts.judge.allowed_paths
   end
   if opts and opts.auto and opts.auto.protected_globs then
     M.options.auto.protected_globs = opts.auto.protected_globs

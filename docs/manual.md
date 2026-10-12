@@ -113,6 +113,7 @@
 | `/ledger [init\|refresh[!]\|note\|decision\|update\|review\|log\|open\|bundle\|info ...]` | プロジェクト台帳（[プロジェクト台帳](#プロジェクト台帳ledger)。リクエストを送るのは init / refresh / update だけ） |
 | `/delegate <種類> [指示]\|list\|open\|cancel\|detach` / `/receive [id]` | 別のチャットに任せる / 結果を取り込む（[サブタスクを別のチャットに任せる](#サブタスクを別のチャットに任せるdelegate--receive)。ローカルのみ） |
 | `/new` `/sessions` `/model [role]` `/mode [mode]` `/roles [preset]` | 対応する `:Coagent*` コマンドと同じ |
+| `/judge [log [n]\|clear]` | judge モードの判定一覧 / キャッシュした判定を忘れる（`:CoagentJudge` と同じ。[6. モードとモデル](#6-モードとモデル)。ローカルのみ） |
 | `/usage [billing]` `/changes` `/diff` `/review` `/stop` `/processes` | 同上（`/usage billing` は GitHub の請求ページを開く） |
 | `/resume` | 一時停止したタスクを再開（`:CoagentResume` と同じ。上限による一時停止ならカウンタをリセット） |
 | `/effort <level\|off\|default> [role]` | 推論の強さをこのセッションだけ変更（`:CoagentEffort` と同じ。[6. モードとモデル](#6-モードとモデル)） |
@@ -287,6 +288,9 @@ warmup 付き cosine LR を追加 @train.py @configs/base.yaml` → ダウンロ
 |---|---|
 | `a` | 承認 |
 | `A` | このセッション中、同じ操作（同じファイルへの変更 / 同じコマンド+cwd）を常に承認。危険操作には表示されません |
+
+judge モードで judge が「確認が必要」と判定したコマンドは、項目に `judge: asks (risk medium) — 理由` の行が付いた
+通常の承認待ちになります（操作は上と同じ）。
 | `d` | 拒否。理由を入力するとモデルに伝わり、別の手段を検討させます（`<Esc>` で取消） |
 | `D` | 拒否してタスクを停止 |
 | `r` | hunk 単位レビュー（下記） |
@@ -427,8 +431,23 @@ Neovim にフォーカスが無いとき、承認待ち・完了・失敗・上�
 
 ## 6. モードとモデル
 
-- `gm` / `:CoagentMode` — `supervised` / `readonly` / `auto`
+- `gm` / `:CoagentMode` — `supervised` / `readonly` / `auto` / `judge`
   - `auto` は `auto.workspaces` に登録済みでなければ確認ダイアログが出ます。サンドボックスの有無も表示されます
+  - `judge` は `judge.workspaces`（または `auto.workspaces`）に登録済みでなければ確認ダイアログが出ます（`auto` の同意とは別）。
+    winbar は `JUDGE`
+  - Claude Code との対応: `supervised` ≈ default、`auto` ≈ accept edits + 許可リスト、`judge` ≈ auto モード、`/plan` ≈ plan モード
+- **judge モード**（GPU での学習などを任せきりにする用。OS サンドボックスなし）
+  - 固定ルールが先: 危険パターン・削除・ワークスペース外や保護ファイルのパス・`curl`/`wget`/`scp`/`ssh`/リモートへの `rsync`・
+    パッケージのインストール・`delegate` などは必ず承認待ち（judge には送らず、judge が覆すこともない）
+  - 読込とワークスペース内の編集は自動（`auto` と同じ）
+  - それ以外のコマンドは judge モデル（`judge.model`、既定はビルダーのモデル）に 1 回問い合わせ、`allow` なら確認なしで実行、
+    `ask`・不正な応答・エラー・タイムアウト（`judge.timeout_ms`）なら通常の承認待ち
+  - ツール項目に `judge: allowed — 理由` の薄い行。`/judge log`（`:CoagentJudge`）で全判定と結果を一覧、`/judge clear` でキャッシュ消去
+  - 同じ (コマンド, cwd) の判定はセッション中キャッシュ。`limits.max_consecutive_denials` 回続けて `ask` なら、そのタスクの残りは
+    judge を止めて直接確認
+  - `judge.allowed_paths = { '/data' }` でデータセットなどの絶対パスを引数に使えます（判定は judge）。
+    `judge.notify_on_allow = true` で確認なしの実行時にベル
+  - 判定のリクエストは `gu` / `:CoagentUsage` に役割 `judge` として表示
   - モード変更は次のツール実行から有効（実行時にも再判定されます）
 - `:CoagentModel` — tool calling 対応モデルから選択（セッションごとに保持）。`usage.rates` を設定したモデルには単価を表示
   （旧方式の料金倍率は `ui.show_multiplier = true` のときだけ `(legacy x1)` と表示。現在のトークン課金とは対応しません）

@@ -19,6 +19,7 @@ CONTENTS                                              *coagent-contents*
      Notifications ........................... |coagent-notify|
      Limits .................................. |coagent-limits|
   5. Modes ................................... |coagent-modes|
+     Judge mode .............................. |coagent-judge|
   6. Lua API ................................. |coagent-api|
 
 ==============================================================================
@@ -89,7 +90,10 @@ Check the setup with |:checkhealth| coagent.
                               session: changed (default, only the agent's
                               lines) | file. See |coagent-format|.
 :CoagentOutput           Show the last command output.
-:CoagentMode [mode]      supervised | readonly | auto
+:CoagentMode [mode]      supervised | readonly | auto | judge
+:CoagentJudge [log [n]|clear]
+                         Judge mode: list the judge's decisions / forget
+                              cached verdicts. See |coagent-judge|.
 :CoagentModel            Pick a tool-calling capable model (per role when roles are on).
                          Models with `usage.rates` show their price per 1M tokens.
 :CoagentRoles [preset]   Model roles: single (default) | advisor | explorers | full
@@ -260,6 +264,9 @@ Commands go into the input history like prompts.
                       Same as the matching :Coagent* command.
   /effort <level> [role]
                       Same as :CoagentEffort (|coagent-effort|).
+  /judge [log [n]|clear]
+                      Judge decisions of this session / forget cached
+                      verdicts (|coagent-judge|; local).
   /rewind             Same as :CoagentRewind (|coagent-rewind|).
   /format [mode]      Same as :CoagentFormat (|coagent-format|).
   /resume             Same as :CoagentResume (|coagent-limits|).
@@ -864,6 +871,62 @@ auto        Only for workspaces in `auto.workspaces` or explicitly enabled.
             Workspace edits and allowlisted simple commands run without
             approval (sandboxed when sandbox-exec/bwrap exists). Dangerous
             commands always ask.
+judge       Only for workspaces in `judge.workspaces` / `auto.workspaces`
+            or explicitly enabled (a separate confirmation from auto).
+            Reads and workspace edits as in auto; commands are NOT
+            sandboxed and are decided by hard rules, then a judge model.
+            See |coagent-judge|.
+
+Claude Code equivalents: supervised = default (ask), auto = accept edits +
+a command allowlist, judge = auto mode (a model decides), /plan = plan mode.
+
+                                                         *coagent-judge*
+Judge mode ~
+
+For hands-off runs where an allowlist is impractical (training entry points
+vary) and the OS sandbox gets in the way (bwrap hides GPUs). Per tool call:
+
+1. Hard rules, deterministic, never sent to the judge and never turned into
+   "allow" by it. Always ask: dangerous patterns (rm, git reset / clean /
+   checkout -- / restore / push / rebase, sudo, | sh, chown, chmod -R,
+   publishing), network transfer (curl, wget, scp, ssh, nc, rsync to a
+   remote), package installs (pip / conda / npm install, ...), unlink /
+   rmdir / find -delete, crontab and services, arguments outside the
+   workspace (/etc/..., ~/..., ../.., $HOME/...), protected files, skill
+   scripts, deletes, writes outside `writable_globs`, reads outside the
+   workspace or of protected files, the delegate tool and MCP tools.
+   Whatever supervised denies is denied.
+2. Reads inside the workspace run.
+3. Workspace edits run (as in auto).
+4. Any other command (run_command, start_process, complex shell) is sent
+   to the judge: one headless request to `judge.model` (default: the
+   builder model; a cheap model is recommended), no tools, temperature 0.
+   It gets your request, the exact command, cwd, a command analysis, the
+   agent's purpose / notes and the last tool actions. Everything not
+   computed by coagent is wrapped in nonce-delimited DATA blocks that the
+   judge must never take instructions from. The answer must be exactly
+   {"decision": "allow"|"ask", "risk": "low"|"medium"|"high",
+   "reason": "..."}; anything else, an error or a timeout asks you.
+
+The verdict is a dim line on the tool item ("judge: allowed — runs the
+project's training script"). Verdicts are cached per (command, cwd) for the
+session. After `limits.max_consecutive_denials` "ask" verdicts in a row the
+judge is paused for the rest of the task (every command asks you). Judge
+requests count as role "judge" in :CoagentUsage. /judge log lists every
+verdict with its outcome; the log is saved with the session.
+
+Options: >lua
+  judge = {
+    model = nil, timeout_ms = 15000, workspaces = {}, cache = true,
+    max_context_bytes = 8000,
+    allowed_paths = {},       -- absolute paths args may name (datasets)
+    notify_on_allow = false,  -- bell when a command ran without asking
+  }
+<
+Trade-off: no OS sandbox (`commands.sandbox` is not applied), so GPUs work,
+and an allowed command runs with your full user permissions. The judge can
+be wrong; destructive, remote and outside actions stay behind rules it
+cannot override. Use a version-controlled workspace and a branch.
 
 ==============================================================================
 6. LUA API                                                 *coagent-api*
