@@ -69,7 +69,9 @@ M.run_command = {
   kind = 'exec',
   description = 'Run a shell command in the workspace and return its exit code and output (stdout+stderr). '
     .. 'Use it for tests, builds, linters, formatters and read-only inspection (git status, ls). '
-    .. 'Commands run non-interactively (no stdin) with a timeout. Do not run destructive git commands.',
+    .. 'Commands run non-interactively (no stdin) with a timeout (max commands.max_timeout_ms). Do not run destructive git commands. '
+    .. 'Set experiment = true for a training / evaluation run (any script or launcher) to record it in the experiment log; '
+    .. 'for runs that may take more than a few minutes use start_process + wait_process instead.',
   schema = {
     type = 'object',
     required = { 'command' },
@@ -78,6 +80,8 @@ M.run_command = {
       cwd = { type = 'string', description = 'Working directory relative to the workspace root (default root).' },
       timeout_ms = { type = 'integer', description = 'Timeout in milliseconds (default 120000).' },
       purpose = { type = 'string', description = 'One short sentence explaining why the command is needed.' },
+      experiment = { type = 'boolean', description = 'true for a training / evaluation run: record it in the experiment log.' },
+      name = { type = 'string', description = 'Short name of the experiment run (with experiment = true), e.g. "baseline-seed1".' },
     },
   },
   title = function(args)
@@ -104,7 +108,7 @@ M.run_command = {
       analysis = cmdparse.analyze(args.command, info.real, ctx.ws),
     }
   end,
-  run = function(_, ctx, prepared)
+  run = function(args, ctx, prepared)
     local cfg = ctx.config.commands
     local shell = process.shell(cfg.shell)
     local argv = { shell, '-c', prepared.command }
@@ -119,8 +123,9 @@ M.run_command = {
     if ctx.on_output then
       ctx.on_output(string.format('$ %s\n# cwd: %s%s\n', prepared.command, prepared.cwd_rel, sandboxed and ('  [sandbox: ' .. sandboxed .. ']') or ''))
     end
-    -- training / evaluation runs go to the experiment log
-    local exp = ctx.experiments and ctx.experiments:begin(prepared.command, prepared.cwd, { source = 'agent' })
+    -- training / evaluation runs go to the experiment log (experiment = true:
+    -- the model says it is one, whatever the file names)
+    local exp = ctx.experiments and ctx.experiments:begin(prepared.command, prepared.cwd, { source = 'agent', force = args.experiment == true, name = args.name })
     local res = run_process({
       argv = argv,
       cwd = prepared.cwd,

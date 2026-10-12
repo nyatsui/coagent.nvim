@@ -49,10 +49,13 @@ I'll find the `add` implementation and its tests.
 - **Agent Skills** — コミュニティの `SKILL.md` スキル（Claude Code / VS Code Copilot と同じ形式）を自分のフォルダと
   リポジトリの `.github/skills/`・`.claude/skills/`・`.agents/skills/` から読み込む。常に送るのは名前と説明だけで、
   本文は必要になったときにモデルが読み込む（キャッシュに優しい）。リポジトリのスキルは `AGENTS.md` と同じく信頼しない
-- **実験ログ（ML 向け）** — 学習・評価の実行（`python train.py`・`eval.py` など）を、コマンド・git HEAD と差分の
-  ハッシュ・実行時間・終了コード・出力から読み取ったメトリクス（`val_acc=0.91`、JSON 行、メトリクスの CSV/JSON
-  ファイル）と一緒にローカルへ記録。`/exp` で前回・ベストとの差分つきの表、`/exp compare` で Web チャットに貼る
-  Markdown の比較をコピー。エージェントは `experiments` ツールで読める。リクエストは使わない
+- **実験ログ（ML 向け）** — 学習・評価の実行を、入口のファイル名に関係なく（エージェントが `experiment = true` を付ける。
+  台帳の「How to run」のコマンドや `torchrun`・`accelerate launch`・`python -m pkg.train` などのランチャーも認識）、
+  コマンド・git HEAD と差分のハッシュ・実行時間・終了コード・出力から読み取ったメトリクス（`val_acc=0.91`、JSON 行、
+  メトリクスの CSV/JSON ファイル）と一緒にローカルへ記録。長い実行は放っておける: エージェントがバックグラウンドで
+  起動し、`wait_process` が終わるまでモデルへのリクエストなしで待ちます。`/exp` で前回・ベストとの差分つきの表、
+  `/exp compare` で Web チャットに貼る Markdown の比較をコピー。エージェントは `experiments` ツールで読める。
+  リクエストは使わない
 - **プロジェクト台帳（ledger）** — プロジェクトごとに 1 つの Markdown の記録（概要・目標・状況・決定・サブタスク）を
   coagent がセッションをまたいで保ちます。`/ledger init` で概要を 1 リクエストで作成し、タスク完了・外部結果の取り込み・
   実験のたびに小さな 1 リクエストで更新。ローカルのタスクには要約（digest）を渡し、`ledger.bundle()` で全体像を他の
@@ -333,7 +336,7 @@ Copilot はトークン単位で課金され、エージェントは**リクエ�
 |---|---|---|
 | `max_steps` | 40 | モデルへのリクエスト数。**一時停止**（再開可能） |
 | `max_tool_calls` | 120 | ツール実行回数。**一時停止**（再開可能） |
-| `max_duration_ms` | 30 分 | 実働時間（承認待ちの時間は含まない）。**一時停止**（再開可能） |
+| `max_duration_ms` | 30 分 | 実働時間（承認待ちと `wait_process` の待ち時間は含まない）。**一時停止**（再開可能） |
 | `max_consecutive_denials` | 3 | 連続で拒否された回数。タスクを**終了**（ユーザーが「やめて」と言っているため） |
 | `max_identical_calls` / `max_identical_failures` | 4 / 3 | 変更なしの同一呼び出し・同一失敗の繰り返し。タスクを**終了**（ループしているため） |
 
@@ -577,11 +580,24 @@ allowed-tools: Read, Grep, Bash   # 任意。ツールを「絞る」ことし�
 ML の作業（PyTorch の学習・評価、データ分析）向けに、実行とメトリクスをローカルに記録します。リクエストを使わずに
 実行どうしを比べたり、Web チャットやエージェントに渡したりできます。
 
-**記録されるもの。** `run_command` / `start_process` で実行されたコマンドのうち `experiments.commands`（Lua パターン。
-既定は `python … *train*.py`・`*eval*.py`・`*test*.py`・`torchrun …`・`accelerate launch …`。`pytest` は除外）に
-合うもの、または `/exp run <command>` で自分で実行したものを記録します。1 回の実行ごとに:
+**記録されるもの。** `run_command` / `start_process` で実行されたコマンドは、次のいずれかで記録します。
 
-- id・時刻・コマンド・cwd・実行元（`agent`・`agent:bg`・`user`）
+1. **エージェントが印を付けた**: 両ツールは `experiment = true`（と任意の短い `name`）を受け取り、システムプロンプトは
+   学習・評価の実行には必ず付けるよう指示します。`bash scripts/run.sh`・`python -m pkg.train`・`make sweep`・Hydra の
+   ランチャーなど、入口の名前は問いません
+2. **プロジェクト台帳の入口コマンドで始まる**: `overview.md` の「How to run」にあるバッククォートのコマンド（`/ledger init`
+   が書き、自分で編集もできます）を前方一致のパターンにします。プログラムと入口のスクリプトまたはモジュール
+   （`bash scripts/run.sh`・`python -m vision.train`・`torchrun … -m vision.train`・`accelerate launch finetune.py`）
+   で照合するので、ほかの引数が違っても一致します。セットアップ・テスト・ツールのコマンド（`pip install`・`pytest`・
+   `make test`・`tensorboard`）は除きます。台帳が変わるたびに読み直します（`experiments.from_ledger`）
+3. **`experiments.commands` に合う**（Lua パターン、追加分。既定は `python … *train*.py`・`*eval*.py`・`*test*.py`・
+   `python -m …train` / `…eval`、ランチャーの `torchrun`・`accelerate launch`・`deepspeed`・
+   `python -m torch.distributed.run` / `accelerate.commands.launch`）
+
+`experiments.exclude`（`pytest`・`unittest`）に合うものは、エージェントが印を付けない限り記録しません。
+`/exp run <command>` で自分で実行したものは常に記録します。1 回の実行ごとに:
+
+- id・時刻・コマンド・cwd・実行元（`agent`・`agent:bg`・`user`）、実行名と認識した方法
 - git の HEAD とブランチ、`git diff HEAD` の短いハッシュ（差分本体は `max_diff_bytes` まで）、変更ファイル
   （`+追加 -削除`）、未追跡ファイル名
 - 実行時間・終了コード（`ok` / `exit N` / `killed` / `timeout`）・出力の末尾
@@ -597,6 +613,22 @@ ML の作業（PyTorch の学習・評価、データ分析）向けに、実行
 フォアグラウンドの実行はコマンド終了時に記録します（モデルが受け取る結果の末尾に
 `[experiment #12 recorded: val_acc=0.912 (best 0.921 #9), loss=0.31 (best)]` が付きます）。バックグラウンドの実行
 （`start_process`・`/exp run`）はプロセス終了時に記録し、パネルにお知らせを出します。
+
+**長い実行は放っておける。** `run_command` は `commands.max_timeout_ms`（15 分）で打ち切られます。それより長くかかり
+うる学習・評価では、エージェントは `start_process`（`experiment = true`）のあとに `wait_process(id, until, timeout_ms)`
+を呼びます。これは**ツールの中で**、プロセスが終わるまで（`until = "exit"`、既定）または新しい出力に Lua パターン
+（`"Epoch 5/"`）が現れるまで、最大 `background.max_lifetime_ms`（2 時間）待ちます。待っている間は:
+
+- モデルへのリクエストは発生しません（`read_process_output` でのポーリングはプロンプトで禁止）。2 時間の実行も
+  2 秒の実行と同じコストです
+- タイムラインの項目に経過時間と最後の出力行を表示します（`12m03s · Epoch 7/50 loss=0.41`。`\r` の進捗バーも可）
+- 待ち時間は `limits.max_duration_ms` に数えません（承認待ちと同じ）
+- `<C-c>` / `:CoagentStop` はタスクと実行を止めます。`p` / `:CoagentPause` は待つのをやめるだけで、実行は続き、
+  タスクは一時停止します（`/resume` で再開するとエージェントがまた `wait_process` を呼びます）
+
+結果には終了コード、新しい出力の末尾、実験のメトリクス行が入るので、エージェントはすぐに報告・比較できます。
+承認は変わりません: `start_process` は supervised では `run_command` と同じく確認し、`wait_process` は何も変えないので
+確認しません。
 
 **保存先。** `stdpath('state')/coagent/experiments/<project>-<hash>.jsonl`。リポジトリの外で、ディレクトリ 0700・
 ファイル 0600、秘密情報はセッションファイルと同じくマスクします。追記型のファイルで（自動で詰め直し）、最大
@@ -751,7 +783,12 @@ coagent は司令塔のままです。重いサブタスク（結果の分析と
   （auto モードでも。`delegate.review_imports`）、保護パスと未保存バッファの確認、変更の追跡、`:CoagentRevert`、`/rewind`（取り込みは
   チェックポイントになります）、`format_after_edit`、新しい診断
 - そのあと、結果の要約とファイルを台帳に記録し（`ledger.auto_update` なら小さなリクエスト 1 回、そうでなければ素のエントリ）、ローカルの
-  続きのタスクを提案します: 検証コマンドの実行、分析にある実験の実行（`python train.py --lr 0.01 ...`）、計画の実行、レビュー指摘の修正
+  続きのタスクを提案します: 検証コマンドの実行、分析にある実験の実行（1 つまたは全部。`bash scripts/run.sh --lr 0.01 ...`）、
+  計画の実行、レビュー指摘の修正。続きのプロンプトは、長いコマンドを `start_process`（`experiment = true`）+ `wait_process`
+  で実行してメトリクスを報告するよう指示します。`delegate.auto_followup`（`'verify'`・`'experiments'`・`'first'`）を
+  設定すると、取り込みが問題なく終わったとき（全ファイル適用、拒否なし）に該当する続きを自動で始めるので、`/receive`
+  のあと追加のコマンドなしで実行が進みます。承認は現在のモードのままです。該当するものがない、またはファイルを拒否した
+  ときは従来どおり選択肢を出します（既定の `false`）
 
 **エージェントが任せる場合.** builder は重い作業のために `delegate(kind, instruction, files?, attachments?)` ツールを持っています。
 **必ず**承認を求め（auto モードでも。read-only モードでは提供しません）、承認画面にはバンドルの概要（ソース、添付、サイズ、警告）が出ます。
@@ -776,7 +813,8 @@ coagent は司令塔のままです。重いサブタスク（結果の分析と
 /delegate analyze val_acc が頭打ちになる理由は? @runs/metrics.csv @plots/loss.png
     -> 00_prompt.md を別のチャットに貼り、01_ledger.md 02_sources.md 03_context.md metrics.csv loss.png を添付
 /receive 4                             レポートを貼る。台帳に分析と計画が記録される
-    -> 続き「Run experiment: python train.py --lr 3e-4 --warmup 500」（ローカル、承認あり）
+    -> 続き「Run experiment: bash scripts/run.sh --lr 3e-4 --warmup 500」（ローカル、承認あり。
+       delegate.auto_followup = 'experiments' なら自動で開始。start_process + wait_process でメトリクスを報告）
 /delegate implement #4 の計画どおり warmup 付き cosine LR スケジュールを追加 @train.py @configs/base.yaml
     -> 別のチャットが train.py と configs/base.yaml をダウンロードファイルで返す
 /receive 5                             ~/Downloads から対応付け、hunk ごとにレビューして適用
@@ -790,6 +828,7 @@ delegate = {
   dir = nil,                  -- nil = stdpath('state')/coagent/delegate
   clipboard = true, open_folder = true,
   review_imports = true,      -- 取り込むファイルは auto モードでも必ず承認
+  auto_followup = false,      -- 'verify' | 'experiments' | 'first': /receive のあとその続きを自動で開始
   sources = { changed = true, core = true },
   max_source_bytes = 2 * 1024 * 1024, recent_commands = 3,
   kinds = { profile = { output = 'text', description = 'ボトルネックを探す', contract = '## Hotspots ...' } },
@@ -808,8 +847,8 @@ delegate = {
 | 言語サーバー | `lsp_definition`（定義）, `lsp_references`（参照）, `lsp_symbols`（アウトライン / シンボル検索）, `lsp_hover`（型・ドキュメント） | 不要 |
 | 編集 | `edit_file`, `write_file`, `delete_file` | 必要（diff 表示） |
 | コマンド | `run_command`（終了するコマンド） | 必要 |
-| バックグラウンド | `start_process`（開発サーバー等を起動したまま継続） | 必要 |
-| | `read_process_output`, `list_processes`, `stop_process` | 不要（自分が起動したプロセスのみ対象） |
+| バックグラウンド | `start_process`（開発サーバー、長い学習・評価。`experiment = true` で実験として記録） | 必要 |
+| | `wait_process`（終了・パターンまで待つ。モデルへのリクエストなし）, `read_process_output`, `list_processes`, `stop_process` | 不要（自分が起動したプロセスのみ対象） |
 
 - LSP ツールは Neovim に設定済みの言語サーバーをそのまま使います（未読込のファイルは表示せずに読み込み、自動起動を待ちます）。
   サーバーが無いファイルではエラーを返し、モデルは `search` に切り替えます
@@ -970,7 +1009,7 @@ require('coagent').setup({
   limits = { -- 暴走ループの歯止め（「タスクごとの上限」参照）
     max_steps = 40,               -- 1 タスクあたりのモデル要求数（到達で一時停止、/resume で続行）
     max_tool_calls = 120,         -- 同上（ツール実行回数）
-    max_duration_ms = 30 * 60 * 1000, -- 同上（実働時間。承認待ち時間は含まない）
+    max_duration_ms = 30 * 60 * 1000, -- 同上（実働時間。承認待ちと wait_process の待ち時間は含まない）
     max_identical_failures = 3,   -- 同一ツール呼び出しの連続失敗で停止
     max_identical_calls = 4,      -- 変更なしで同一呼び出しを繰り返したら停止
     max_consecutive_denials = 3,
@@ -997,6 +1036,7 @@ require('coagent').setup({
   format = { timeout_ms = 2000, filetypes = nil },
   -- 書込み/編集の結果に付ける新しい LSP 診断（「編集後の新しい診断」参照）
   diagnostics_after_edit = { enabled = true, min_severity = 'error', timeout_ms = 1500, max_items = 10 },
+  -- max_lifetime_ms: バックグラウンドのプロセスはこの時間で終了。wait_process の最長の待ち時間でもある
   background = { max_processes = 3, max_output_bytes = 1024 * 1024, max_lifetime_ms = 2 * 60 * 60 * 1000 },
   session = { persist = true, save_tool_output = true },
   ui = { layout = 'vertical', width = 0.42, icons = 'unicode', show_reasoning = false },
@@ -1006,7 +1046,8 @@ require('coagent').setup({
   -- 実験ログ（「実験ログ」参照）。リストの設定は既定値を置き換える
   experiments = {
     enabled = true,
-    commands = { 'python[%d%.]*%s.-train[%w_%-%.]*%.py', 'python[%d%.]*%s.-eval[%w_%-%.]*%.py' }, -- Lua パターン
+    from_ledger = true, -- 台帳の「How to run」の入口コマンドを実験として記録
+    commands = { 'python[%d%.]*%s.-train[%w_%-%.]*%.py', 'torchrun%s', 'accelerate%s+launch%s' }, -- 追加の Lua パターン
     exclude = { 'pytest', '%-m%s+unittest' },
     metrics = { 'loss', 'val_loss', 'acc', 'accuracy', 'f1', 'auc', 'mae', 'rmse', 'epoch', 'lr' },
     patterns = { { pattern = 'Top%-1 acc ([%d%.]+)', key = 'top1' } }, -- 追加のメトリクス
@@ -1025,7 +1066,7 @@ require('coagent').setup({
   references = { url = true, url_max_bytes = 32 * 1024, clipboard_max_bytes = 32 * 1024 },
   inline = { context_lines = 40, keymaps = { accept = 'ga', reject = 'gr', retry = 'gi', diff = 'gd' } },
   -- サブタスクを別のチャットに任せる（「サブタスクを別のチャットに任せる」参照）
-  delegate = { language = 'en', download_dir = nil, review_imports = true, max_source_bytes = 2 * 1024 * 1024, kinds = {} },
+  delegate = { language = 'en', download_dir = nil, review_imports = true, auto_followup = false, max_source_bytes = 2 * 1024 * 1024, kinds = {} },
   notify = { on = { 'approval', 'done', 'failed', 'limit', 'waiting' }, bell = true, desktop = false, only_when_unfocused = true },
 })
 ```

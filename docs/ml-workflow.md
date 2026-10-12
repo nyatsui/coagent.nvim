@@ -57,26 +57,50 @@ opts = {
   diagnostics_after_edit = { enabled = true }, -- pyright などのエラーを編集結果に付ける
   format_after_edit = false,    -- 整形は /format で手動（ruff を使う場合）
   experiments = {
-    -- 学習・評価を起動するコマンドに合わせる（Lua パターン。既定は python …train*.py / eval*.py / test*.py、torchrun、accelerate launch）
-    commands = {
-      'python[%d%.]*%s.-train[%w_%-%.]*%.py',
-      'python[%d%.]*%s.-eval[%w_%-%.]*%.py',
-      'bash%s+scripts/train[%w_%-]*%.sh', -- シェルスクリプトから起動する場合は追加
-    },
-    -- 出力に出る指標名（key=value / key: value / JSON 行から取得）
+    -- どの実行を記録するかはファイル名に依存しません（下の「学習の記録と長い実行」参照）。
+    -- commands は追加の Lua パターンで、通常は既定のままで構いません
+    -- 指標名（key=value / key: value / JSON 行から取得）
     metrics = { 'loss', 'val_loss', 'acc', 'val_acc', 'f1', 'auc', 'rmse', 'epoch', 'lr' },
     -- 学習が書き出す指標ファイル（実行中に更新されたものだけ読む）
     log_files = { 'outputs/**/metrics.csv', 'lightning_logs/*/metrics.csv' },
   },
-  background = { max_lifetime_ms = 12 * 60 * 60 * 1000 }, -- 長い学習をバックグラウンドで回す場合（既定 2 時間）
-  delegate = { language = 'ja' }, -- 別のチャットへの指示を日本語で
+  background = { max_lifetime_ms = 12 * 60 * 60 * 1000 }, -- 長い学習の上限（既定 2 時間）。wait_process の最長の待ち時間でもある
+  delegate = {
+    language = 'ja',            -- 別のチャットへの指示を日本語で
+    auto_followup = 'experiments', -- /receive のあと、提案された実験を自動で始める（既定 false = 選択肢を出す）
+  },
 },
 ```
 
-- `run_command`（終了を待つコマンド）は最長 15 分（`commands.max_timeout_ms`）です。長い学習は `start_process` /
-  `/exp run`（バックグラウンド）で実行され、`background.max_lifetime_ms` まで動きます
 - 学習を coagent の外（別の tmux ウィンドウなど）で実行した場合、`/exp` には記録されません。記録したい学習は
-  `/exp run <コマンド>` で起動してください
+  coagent に実行させるか、`/exp run <コマンド>` で起動してください
+
+### 学習の記録と長い実行
+
+**記録はファイル名に依存しません。** 学習の入口が `train.py` である必要はありません。`bash scripts/run.sh`・
+`python -m mypkg.train`・`make sweep`・Hydra や `accelerate launch`・`torchrun` 経由など、どんな起動方法でも次のいずれかで記録されます。
+
+1. **エージェントが印を付ける**: エージェントは学習・評価を実行するとき `run_command` / `start_process` に
+   `experiment = true`（と短い実行名 `name`）を付けます（システムプロンプトで指示済み）
+2. **台帳の「How to run」**: `/ledger init` で作られる `overview.md` の「How to run」にバッククォートで書かれたコマンド
+   （`bash scripts/run.sh configs/base.yaml` など）を、プログラムと入口のスクリプト・モジュールの前方一致として使います。
+   引数が違っても一致し、`pip install`・`pytest` などのセットアップ・テストは除きます。入口が足りなければ
+   `/ledger open overview` で書き足してください（保存すると次の実行から反映）
+3. **`experiments.commands`**: 追加の Lua パターン。既定で `python …train*.py`・`python -m …train`、`torchrun`・
+   `accelerate launch`・`deepspeed`・`python -m torch.distributed.run` などのランチャーを含みます
+
+`/exp show <id>` に、どの方法で記録したか（`marked by the agent` / `ledger entry command` / `experiments.commands` / `/exp run`）が出ます。
+
+**長い学習は放っておける。** `run_command`（終了を待つコマンド）は最長 15 分（`commands.max_timeout_ms`）です。
+それより長くかかりうる学習・評価では、エージェントは `start_process`（`experiment = true`）で起動し、続けて `wait_process` を呼びます。
+
+- `wait_process` はプロセスの終了（または `until` に指定した `"Epoch 5/"` のようなパターン）まで **ツールの中で** 待ちます。
+  待っている間はモデルへのリクエストが発生しないので、2 時間の学習でもリクエスト数は増えません
+  （`read_process_output` を繰り返す「ポーリング」はしないよう指示しています）
+- 待ち時間は `limits.max_duration_ms`（タスクの時間制限）に数えません。上限は `background.max_lifetime_ms`
+- パネルのツール項目に経過時間と最後の出力行（`12m03s · Epoch 7/50 loss=0.41`）が表示されます
+- 終わると終了コード・出力の末尾・`/exp` に記録された指標がエージェントに返り、そのまま結果を報告・比較します
+- `p`（`:CoagentPause`）は待つのをやめるだけで、学習は続きます（`/resume` で再び待ちます）。`<C-c>` は学習ごと止めます
 
 ### 4. 作業ブランチ
 
@@ -130,7 +154,8 @@ judge が許可したコマンドはあなたのユーザー権限のすべて�
 configs/a.yaml と configs/b.yaml で 1 エポックずつ学習し、val_acc を比べて良い方の設定で 5 エポック回して。結果は /exp に残して。
 ```
 
-エージェントが `start_process` で学習を起動し、judge が許可すれば確認なしで進みます。長い学習は `background.max_lifetime_ms` まで
+エージェントが `start_process`（`experiment = true`）で学習を起動し、judge が許可すれば確認なしで進みます。終了は
+`wait_process` でリクエストなしに待つので、席を外している間も費用は増えません。長い学習は `background.max_lifetime_ms` まで
 動き、指標は `/exp` に記録されます。なお `/exp run` はあなたが入力するコマンドなので、judge を通さず確認が出ます
 （supervised と同じ）。
 
@@ -141,8 +166,10 @@ configs/a.yaml と configs/b.yaml で 1 エポックずつ学習し、val_acc �
 ### A-1. 台帳を作る（プロジェクトの全体像）
 
 1. リポジトリのルートで Neovim を起動し、`:Coagent`（`<leader>aa`）でパネルを開く
-2. `/ledger init` を実行（1 リクエスト）。coagent が README・依存関係・`train*.py`・データセット・モデル・設定ファイルなどを
+2. `/ledger init` を実行（1 リクエスト）。coagent が README・依存関係・学習や評価の入口・データセット・モデル・設定ファイルなどを
    読み、`overview.md`（目的、構成、各ファイルの役割、データの流れ、設定、実行方法、指標）を作ります
+   - 「How to run」の学習・評価コマンドは、実験の自動記録にも使われます。入口のスクリプト（`scripts/run.sh` など）が
+     正しく書かれているか確認してください
 3. `/ledger open overview` で内容を確認し、間違いや足りない点を直接直す（あなたの修正は上書きされません）
 4. `/ledger open goals` で **目標** を書く。良い回答を得るために、具体的に書くのが大事です
 
@@ -203,7 +230,9 @@ val_acc ≥ 0.80（現状 0.71 前後で頭打ち）。推論は 1 枚 20ms 以�
    - `03_context.md`（環境、git の差分、直近の実行出力とトレースバック）
    - 添付ファイル（`metrics.csv`、`loss.png` など。`@` で指定したもの）
 3. 回答（所見 / 仮説 / 方針 / 実験とコマンド）をコピーし、`/receive` で取り込みます（貼り付け用のバッファが開くので `:w`）
-4. 台帳に分析結果と方針が記録され、「実験を実行する」などの続きの作業が提案されます
+4. 台帳に分析結果と方針が記録され、「実験を実行する」などの続きの作業が提案されます。
+   `delegate.auto_followup = 'experiments'` なら、取り込みのあと提案された実験が自動で始まります（承認は現在のモードどおり）。
+   エージェントは実験を `start_process` + `wait_process` で実行し、終わったら指標を報告します
 
 `@` でファイルを指定しないと、データや結果のファイルは添付されません。見てほしいファイル（CSV、ログ、プロット画像）は
 すべて `@` で指定してください。`/delegate analyze all …` とすると、すべてのソースファイルを含めます。
@@ -222,7 +251,7 @@ val_acc ≥ 0.80（現状 0.71 前後で頭打ち）。推論は 1 枚 20ms 以�
 4. `/receive` を実行。貼り付け用のバッファに本文が入るので `:w`。coagent は本文の Manifest と送ったファイルの一覧を使って、
    ダウンロードしたファイルを元の場所に対応付け、ファイルごとに差分を表示します。hunk 単位で確認し、承認すると適用されます
    （`/rewind` で戻せます）。ダウンロードだけで取り込むなら `/receive files`
-5. 回答に確認コマンドがあれば、「確認コマンドを実行する」を選ぶ
+5. 回答に確認コマンドがあれば、「確認コマンドを実行する」を選ぶ（`delegate.auto_followup = 'verify'` なら自動で始まります）
 
 小さな変更や、方針がはっきりしている変更は coagent に直接頼みます。
 
@@ -238,6 +267,8 @@ val_acc ≥ 0.80（現状 0.71 前後で頭打ち）。推論は 1 枚 20ms 以�
 /exp run python train.py --config configs/base.yaml --lr 3e-4 --warmup 500
 ```
 
+- coagent に頼んでも構いません:「configs/base.yaml の lr を 3e-4、warmup 500 にして学習して、終わったら結果を報告して」。
+  長い学習はバックグラウンドで起動して終わるまで待つので、そのまま席を外せます
 - エラーが出たら、そのまま coagent に「エラーを直して」と頼みます（トレースバックはツール結果としてモデルに渡っています）。
   難しいエラーは `/delegate fix …`（トレースバックの全文が `03_context.md` に入ります）
 - 引数を変えて複数回試すのは coagent に任せます: 「lr を 1e-4, 3e-4, 1e-3 で順に学習して、結果を比較して」
@@ -363,6 +394,8 @@ data/train.csv の顧客データから解約（churn 列）を予測する二�
 - **`/receive` の前に手元で同じファイルを編集した場合**、coagent は上書きせずに知らせ、エージェントによるマージを提案します
 - **コードの断片しか返ってこなかった場合**（「…既存のコード…」の省略など）、coagent のエージェントが 1 回で対象ファイルに
   適用します（承認あり）。全文で返すよう依頼し直しても構いません
+- **学習の入口の名前は自由。** `train.py` でなくても、エージェントの印・台帳の「How to run」・ランチャーで記録されます
+- **長い学習は待たせておく。** エージェントは `wait_process` でリクエストなしに終了を待ちます。待つのをやめたいときは `p`（学習は続く）
 - **coagent のモデルは軽いもので十分。** 実行・確認・小さな修正が中心なら `auto` や安いモデルで足ります。重い検討は別のチャットへ
 - **席を外して GPU で回すなら judge モード。** 固定ルールで危険な操作は止め、残りは judge が判定します（[5.](#5-gpu-で学習を任せきりにするjudge-モード)）。
   judge のモデルは安いもので十分です

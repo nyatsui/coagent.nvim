@@ -1734,6 +1734,21 @@ function Controller:_tool_ctx(item, gen)
     set_cancel = function(fn)
       self.cancel_fn = fn
     end,
+    -- long waits (wait_process): stopped / superseded, or the user asked to pause
+    cancelled = function()
+      return self.gen ~= gen
+    end,
+    pause_requested = function()
+      return self.pause_requested == true
+    end,
+    -- live progress of a long wait, shown as the item's summary
+    on_progress = function(text)
+      if self.gen ~= gen or item.status ~= 'running' then
+        return
+      end
+      item.summary = text
+      self:_update(item)
+    end,
     explore = self:roles().explorer and function(args)
       return subagent.run(self, gen, args, item)
     end or nil,
@@ -1923,6 +1938,11 @@ function Controller:_execute(gen, tc)
     res = { ok = false, output = 'Error: ' .. tostring(res) }
   end
   item.duration_ms = util.now() - item.started_at
+  local waited = res.meta and tonumber(res.meta.waited_ms)
+  if waited and self.task then
+    -- wait_process: like approval waiting, not part of the task time limit
+    self.task.waiting_ms = self.task.waiting_ms + waited
+  end
   item.status = res.ok and 'done' or 'failed'
   item.summary = res.summary
   item.output = util.redact(res.display or res.output or '')
@@ -1938,7 +1958,8 @@ function Controller:_execute(gen, tc)
   if tool.kind == 'write' and res.ok then
     t.edit_seq = t.seq
     t.fail_counts, t.call_counts = {}, {}
-  else
+  elseif not (res.meta and res.meta.waiting) then
+    -- (waiting for a running process again is progress, not a loop)
     local key = util.call_key(tc.name, args)
     t.call_counts[key] = (t.call_counts[key] or 0) + 1
     if not res.ok then
@@ -2354,6 +2375,7 @@ end
 ---@param sub Coagent.Subtask
 ---@param R Coagent.Received
 ---@param opts {drift:table<string,string>?, input:string?, on_done:fun(info:table)?}?
+---  on_done({sub, R, summary = the task summary (or the import summary of a report), imported = Delegate.result_summary})
 ---@return boolean ok, string? err
 function Controller:receive(sub, R, opts)
   opts = opts or {}
@@ -2383,8 +2405,10 @@ function Controller:receive(sub, R, opts)
   for _, n in ipairs(R.notes or {}) do
     self:notice('info', n)
   end
+  local imported -- Delegate.result_summary of this import (for on_done)
   local function finalize(applied, merges)
     local summary = Delegate.result_summary(sub, R, applied, merges)
+    imported = summary
     Delegate.save_received(sub, R, summary)
     sub.state = 'received'
     sub.received = os.time()
@@ -2401,7 +2425,7 @@ function Controller:receive(sub, R, opts)
     self:save(true)
     if opts.on_done then
       vim.schedule(function()
-        opts.on_done({ sub = sub, R = R, summary = summary })
+        opts.on_done({ sub = sub, R = R, summary = summary, imported = summary })
       end)
     end
     return true
@@ -2484,7 +2508,7 @@ function Controller:receive(sub, R, opts)
     review_writes = review,
     receive = (not resume) and sub.id or nil,
     on_done = opts.on_done and function(s)
-      opts.on_done({ sub = sub, R = R, summary = s })
+      opts.on_done({ sub = sub, R = R, summary = s, imported = imported })
     end or nil,
   })
 end

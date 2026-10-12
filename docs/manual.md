@@ -174,12 +174,20 @@
 
 ML の学習・評価の実行とメトリクスをプロジェクトごとにローカルへ記録します（モデルへのリクエストなし）。
 
-- 記録対象: `run_command` / `start_process` のうち `experiments.commands` に合うコマンド（既定は `python … train*.py`・
-  `eval*.py`・`test*.py`・`torchrun`・`accelerate launch`。`pytest` は除外）と、`/exp run <command>` で実行したもの
+- 記録対象（入口のファイル名は問わない）: `run_command` / `start_process` のうち、(1) エージェントが `experiment = true`
+  （任意で `name`）を付けたもの、(2) 台帳の `overview.md`「How to run」にあるバッククォートのコマンドで始まるもの（プログラムと
+  入口のスクリプト・モジュールの前方一致。セットアップ・テストは除外、台帳が変わると読み直す。`experiments.from_ledger`）、
+  (3) `experiments.commands` に合うもの（追加の Lua パターン。既定は `python … train*.py`・`eval*.py`・`test*.py`・
+  `python -m …train`・`torchrun`・`accelerate launch`・`deepspeed`・`python -m torch.distributed.run` など）。
+  `exclude`（`pytest` など）は印がない限り除外。`/exp run <command>` で実行したものは常に記録
 - 内容: コマンド・cwd・git HEAD・`git diff HEAD` のハッシュと差分（上限あり）・変更ファイル・実行時間・終了コード・
   出力の末尾・コマンドラインの設定値・メトリクス（`val_acc=0.91` / `loss: 0.3`、JSON 行、`patterns`、`log_files` の
   CSV/JSON。キーごとに最後の値）
 - バックグラウンドの実行はプロセス終了時に記録され、パネルにお知らせが出る
+- 長い実行: `run_command` は最長 15 分。それより長い学習・評価はエージェントが `start_process`（`experiment = true`）で起動し、
+  `wait_process(id, until, timeout_ms)` で終了（または `until` のパターン）まで**ツールの中で**待つ。待っている間はモデルへの
+  リクエストなし、`limits.max_duration_ms` に数えない、上限は `background.max_lifetime_ms`。ツール項目に経過時間と最後の出力行。
+  結果は終了コード・出力の末尾・実験のメトリクス行。`p` は待つのをやめるだけ（実行は続く）、`<C-c>` は実行ごと停止
 - 保存先: `stdpath('state')/coagent/experiments/<project>-<hash>.jsonl`（0600、リポジトリ外、秘密情報はマスク）
 - `/exp` — 表（`値 Δ前回/Δベスト`、`*` がベスト）。`<CR>` 詳細、`D` 前回との差分、`c` 比較をコピー、`R` 再表示、`q` 閉じる
 - `/exp show <id>` 詳細、`/exp diff <a> [b]` 記録した差分どうしの違い、`/exp note <id> <text>` メモ
@@ -240,7 +248,10 @@ Web チャット。社内の Microsoft 365 Copilot など）に任せ、結果�
 4. 変更はすべて通常の承認付き編集（diff・hunk レビュー・保護/未保存チェック・変更追跡・`/rewind`・整形・診断）。auto モードでも
    承認を求めます（`delegate.review_imports`）。ローカルで変わったファイル（ベースのずれ）は差分を表示して「エージェントでマージ /
    上書き（diff 確認）/ スキップ」を選択。置き場所が決まらない断片は 1 回のエージェントの手順（編集ツールのみ）で適用
-5. 結果は台帳に記録され、検証コマンドの実行・分析にある実験の実行などの続きのタスクを提案します
+5. 結果は台帳に記録され、検証コマンドの実行・分析にある実験の実行（1 つ / 全部）などの続きのタスクを提案します。続きのプロンプトは
+   長いコマンドを `start_process`（`experiment = true`）+ `wait_process` で実行してメトリクスを報告するよう指示します。
+   `delegate.auto_followup = 'verify' | 'experiments' | 'first'` なら、問題なく取り込めたとき（全ファイル適用・拒否なし）に該当する
+   続きを自動で開始（承認は現在のモードどおり。既定 `false` は選択肢を出す）
 
 エージェント自身も `delegate` ツールで任せられます（**常に承認が必要**。承認画面にバンドルの概要）。承認後のタスクは
 `WAITING_EXTERNAL`（winbar `waiting: analyze #3`、通知、セッションに保存）になり、新しいメッセージは受け付けません。
@@ -248,7 +259,7 @@ Web チャット。社内の Microsoft 365 Copilot など）に任せ、結果�
 `/delegate cancel 3` / `/stop` で終了。`/delegate list`・`/delegate open <id>` で一覧とフォルダ。`:CoagentDelegate`・`:CoagentReceive` も同じ。
 
 ML の流れの例: `/exp` で頭打ちを確認 → `/delegate analyze 頭打ちの理由は? @runs/metrics.csv @plots/loss.png` → 回答を
-`/receive` → 提案された実験 `python train.py --lr 3e-4 --warmup 500` をローカルで実行 → `/delegate implement 計画どおり
+`/receive` → 提案された実験 `bash scripts/run.sh --lr 3e-4 --warmup 500` をローカルで実行（`start_process` + `wait_process`）→ `/delegate implement 計画どおり
 warmup 付き cosine LR を追加 @train.py @configs/base.yaml` → ダウンロードしたファイルを `/receive` でレビューして適用 →
 検証コマンドを実行し、引数を変えて再実行。
 
@@ -399,7 +410,7 @@ app/models.py:42:12 [Pyright] "user_id" is not defined
 |---|---|
 | `<C-c>`（パネル/入力欄） | キューがあればまずそれを入力欄に戻す（停止しない）。キューが空なら `:CoagentStop` と同じ |
 | `:CoagentStop` / `/stop` | 即時停止（キューは入力欄へ戻す）。HTTP ストリーム中断、実行中コマンドのプロセスグループを kill、承認待ちを破棄。表示済みの部分応答は残る |
-| `p` / `:CoagentPause` | 現在のステップ完了後に一時停止 |
+| `p` / `:CoagentPause` | 現在のステップ完了後に一時停止（`wait_process` で待っているときは待つのをやめて一時停止。実行中の学習は続く） |
 | `R` / `:CoagentResume` / `/resume` | 一時停止・外部割り込み・上限による一時停止・復元したセッションを再開 |
 | `/receive [id]` / `/delegate detach` | 別のチャットの結果待ち（`WAITING_EXTERNAL`）を、結果を取り込んで再開 / 待たずに終了 |
 
@@ -408,7 +419,7 @@ app/models.py:42:12 [Pyright] "user_id" is not defined
 エージェントはリクエストのたびに履歴全体を送り直すため、ループが暴走するとトークン（費用・クォータ）を消費し続けます。
 `limits` はその歯止めです。
 
-- `max_steps`（既定 40 リクエスト）、`max_tool_calls`（120 回）、`max_duration_ms`（30 分。承認待ちは含まない）に達すると、
+- `max_steps`（既定 40 リクエスト）、`max_tool_calls`（120 回）、`max_duration_ms`（30 分。承認待ちと `wait_process` の待ち時間は含まない）に達すると、
   タスクは**一時停止（PAUSED、reason `limit`）**します。パネルにどの上限か・使用量・続け方が表示され、winbar は `paused (limit)`
 - `R` / `:CoagentResume` / `/resume` で、同じタスク・同じ履歴のままカウンタをリセットして続行。止まるのはステップの切れ目
   （直前のツール結果はすべて記録済み）なので、再実行される呼び出しはありません。完了時のサマリーは全区間の合計を表示します

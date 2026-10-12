@@ -33,6 +33,7 @@ local builtin = {
   fs.delete_file,
   shell.run_command,
   background.start_process,
+  background.wait_process,
   background.read_process_output,
   background.list_processes,
   background.stop_process,

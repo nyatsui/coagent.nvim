@@ -56,9 +56,12 @@ I'll find the `add` implementation and its tests.
 - **Agent Skills** — community `SKILL.md` skills (the format of Claude Code and VS Code Copilot) from your own folder and
   the repository's `.github/skills/`, `.claude/skills/`, `.agents/skills/`. Only names and descriptions are always sent;
   the model loads a skill when it needs it (cache friendly). Repository skills are untrusted notes, like `AGENTS.md`
-- **Experiment log (ML)** — training / evaluation runs (`python train.py`, `eval.py`, ...) are recorded locally with the
-  command, git HEAD + diff hash, duration, exit code and metrics parsed from the output (`val_acc=0.91`, JSON lines,
-  metrics CSV/JSON files). `/exp` shows a table with deltas vs the previous and the best run, `/exp compare` copies a
+- **Experiment log (ML)** — training / evaluation runs are recorded locally whatever the entry point is called (the
+  agent marks them with `experiment = true`; the "How to run" commands of the project ledger and launchers such as
+  `torchrun`, `accelerate launch`, `python -m pkg.train` are recognized too) with the command, git HEAD + diff hash,
+  duration, exit code and metrics parsed from the output (`val_acc=0.91`, JSON lines, metrics CSV/JSON files). Long
+  runs are hands-off: the agent starts them in the background and `wait_process` blocks until they finish, without
+  model requests. `/exp` shows a table with deltas vs the previous and the best run, `/exp compare` copies a
   Markdown comparison for a web chat, and the agent reads the log with the `experiments` tool. No requests are made
 - **Project ledger** — one Markdown record per project (overview, goals, status, decisions, subtasks) that coagent keeps
   across sessions: `/ledger init` writes the overview with one request, each finished task / imported result /
@@ -345,7 +348,7 @@ repeating the same investigation or fix can burn a lot of tokens (money / quota)
 |---|---|---|
 | `max_steps` | 40 | Model requests. **Pauses** (resumable) |
 | `max_tool_calls` | 120 | Tool calls. **Pauses** (resumable) |
-| `max_duration_ms` | 30 min | Active time (time waiting for approval is not counted). **Pauses** (resumable) |
+| `max_duration_ms` | 30 min | Active time (time waiting for approval or in `wait_process` is not counted). **Pauses** (resumable) |
 | `max_consecutive_denials` | 3 | Denials in a row. **Ends** the task (you are saying "stop") |
 | `max_identical_calls` / `max_identical_failures` | 4 / 3 | Repeating the same call with no change / the same failure. **Ends** the task (it is looping) |
 
@@ -594,11 +597,24 @@ Trust and safety:
 For ML work (PyTorch training, evaluation, data analysis) coagent keeps a local log of runs and their metrics, so you can
 compare runs and hand them to a web chat or to the agent without spending requests.
 
-**What is recorded.** A command is recorded when it runs through `run_command` or `start_process` and matches
-`experiments.commands` (Lua patterns; by default `python … *train*.py`, `*eval*.py`, `*test*.py`, `torchrun …`,
-`accelerate launch …`, but not `pytest`), or when you run it yourself with `/exp run <command>`. Each run stores:
+**What is recorded.** A command that runs through `run_command` or `start_process` is recorded when
 
-- id, time, command, cwd, source (`agent`, `agent:bg`, `user`)
+1. **the agent marks it**: both tools take `experiment = true` (and an optional short `name`), and the system prompt
+   tells the model to set it for every training / evaluation run — `bash scripts/run.sh`, `python -m pkg.train`,
+   `make sweep`, a Hydra launcher, whatever the entry point is called;
+2. **it starts like an entry command of the project ledger**: the commands in backticks under "How to run" in
+   `overview.md` (`/ledger init` writes it; you can edit it) become prefix matches — the program and its entry script
+   or module (`bash scripts/run.sh`, `python -m vision.train`, `torchrun … -m vision.train`, `accelerate launch
+   finetune.py`), so other arguments still match. Setup, test and tool commands there (`pip install`, `pytest`,
+   `make test`, `tensorboard`) are skipped. They are re-read whenever the ledger changes (`experiments.from_ledger`);
+3. **it matches `experiments.commands`** (Lua patterns, an extra; by default `python … *train*.py`, `*eval*.py`,
+   `*test*.py`, `python -m …train` / `…eval`, and the launchers `torchrun`, `accelerate launch`, `deepspeed`,
+   `python -m torch.distributed.run` / `accelerate.commands.launch`);
+
+never when it matches `experiments.exclude` (`pytest`, `unittest`), unless the agent marked it. `/exp run <command>`
+records any command you run yourself. Each run stores:
+
+- id, time, command, cwd, source (`agent`, `agent:bg`, `user`), the run name and how it was recognized
 - git HEAD and branch, a short hash of `git diff HEAD` (the diff itself up to `max_diff_bytes`), the changed files
   (`+added -removed`) and untracked file names
 - duration, exit code (`ok` / `exit N` / `killed` / `timeout`), the output tail
@@ -614,6 +630,23 @@ compare runs and hand them to a web chat or to the agent without spending reques
 Foreground runs are recorded when the command exits (the result the model sees ends with
 `[experiment #12 recorded: val_acc=0.912 (best 0.921 #9), loss=0.31 (best)]`). Background runs (`start_process`,
 `/exp run`) are recorded when the process exits, with a notice in the panel.
+
+**Long runs are hands-off.** `run_command` stops at `commands.max_timeout_ms` (15 minutes). For training / evaluation
+that may take longer the agent calls `start_process` (with `experiment = true`) and then `wait_process(id, until,
+timeout_ms)`, which blocks **inside the tool** until the process exits (`until = "exit"`, the default) or a Lua pattern
+appears in its new output (`"Epoch 5/"`), at most `background.max_lifetime_ms` (2 hours). While it waits:
+
+- no model request is made (no polling with `read_process_output`, which the prompt forbids), so a two-hour run costs
+  the same as a two-second one;
+- the timeline item shows the runtime and the last output line (`12m03s · Epoch 7/50 loss=0.41`, also for `\r`
+  progress bars);
+- the wait does not count toward `limits.max_duration_ms` (like waiting for an approval);
+- `<C-c>` / `:CoagentStop` stops the task and the run; `p` / `:CoagentPause` only stops waiting — the run keeps going,
+  the task pauses, and `/resume` continues it (the agent calls `wait_process` again).
+
+The result has the exit code, the tail of the new output and the experiment's metrics line, so the agent can report
+or compare the run right away. Approvals are unchanged: `start_process` asks like `run_command` in supervised mode,
+`wait_process` changes nothing and never asks.
 
 **Storage.** `stdpath('state')/coagent/experiments/<project>-<hash>.jsonl` — outside the repository, directory 0700, file
 0600, secrets masked like session files. The file is append-only (compacted automatically), at most `max_entries` runs.
@@ -774,8 +807,13 @@ there, copy it (or download the files it returns).
   per-hunk review, approval (also in auto mode: `delegate.review_imports`), protected-path and unsaved-buffer checks,
   change tracking, `:CoagentRevert`, `/rewind` (the import is a checkpoint), `format_after_edit` and new diagnostics
 - Then the result summary and the files are recorded in the ledger (one small request with `ledger.auto_update`, a
-  plain entry otherwise), and coagent offers a local follow-up: run the verification commands, run an experiment
-  from the analysis (`python train.py --lr 0.01 ...`), carry out the plan, or fix the review findings
+  plain entry otherwise), and coagent offers a local follow-up: run the verification commands, run one or all
+  experiments from the analysis (`bash scripts/run.sh --lr 0.01 ...`), carry out the plan, or fix the review findings.
+  The follow-up prompts tell the agent to run long commands with `start_process` (`experiment = true`) +
+  `wait_process` and to report the metrics. With `delegate.auto_followup` (`'verify'`, `'experiments'` or `'first'`)
+  the matching follow-up starts by itself after a clean import (every file applied, nothing denied), so a run proceeds
+  after `/receive` without another command; approvals still follow the current mode. When nothing matches, or a file
+  was denied, the selection is offered as before (`false`, the default)
 
 **When the agent delegates.** The builder has a `delegate(kind, instruction, files?, attachments?)` tool for heavy work.
 It **always** asks for approval (also in auto mode; not offered in read-only mode) and the approval shows the bundle
@@ -801,7 +839,8 @@ as a manual result), `/delegate cancel 3` or `/stop` end the task.
 /delegate analyze why does val_acc plateau? @runs/metrics.csv @plots/loss.png
     -> paste 00_prompt.md into the other chat, attach 01_ledger.md 02_sources.md 03_context.md metrics.csv loss.png
 /receive 4                             paste the report; the ledger records findings and plan
-    -> follow-up "Run experiment: python train.py --lr 3e-4 --warmup 500"   (local, with approval)
+    -> follow-up "Run experiment: bash scripts/run.sh --lr 3e-4 --warmup 500"   (local, with approval;
+       started by itself with delegate.auto_followup = 'experiments'; start_process + wait_process, metrics reported)
 /delegate implement add cosine LR schedule with warmup as in the plan of #4 @train.py @configs/base.yaml
     -> the other chat returns train.py and configs/base.yaml as downloads
 /receive 5                             files mapped from ~/Downloads, reviewed hunk by hunk, applied
@@ -815,6 +854,7 @@ delegate = {
   dir = nil,                  -- nil = stdpath('state')/coagent/delegate
   clipboard = true, open_folder = true,
   review_imports = true,      -- imported files always ask, even in auto mode
+  auto_followup = false,      -- 'verify' | 'experiments' | 'first': start that follow-up after /receive
   sources = { changed = true, core = true },
   max_source_bytes = 2 * 1024 * 1024, recent_commands = 3,
   kinds = { profile = { output = 'text', description = 'find the bottleneck', contract = '## Hotspots ...' } },
@@ -833,8 +873,8 @@ delegate = {
 | Language server | `lsp_definition`, `lsp_references`, `lsp_symbols` (outline / symbol search), `lsp_hover` (types / docs) | No |
 | Editing | `edit_file`, `write_file`, `delete_file` | Yes (with diff) |
 | Commands | `run_command` (commands that exit) | Yes |
-| Background | `start_process` (keeps dev servers etc. running) | Yes |
-| | `read_process_output`, `list_processes`, `stop_process` | No (only processes the agent started) |
+| Background | `start_process` (dev servers, long training / evaluation runs; `experiment = true` records a run) | Yes |
+| | `wait_process` (blocks until exit / a pattern, no model requests), `read_process_output`, `list_processes`, `stop_process` | No (only processes the agent started) |
 
 - LSP tools use the language servers configured in your Neovim (files not yet loaded are loaded invisibly and the server is
   awaited). Files without a server return an error and the model falls back to `search`
@@ -1002,7 +1042,7 @@ require('coagent').setup({
   limits = { -- brakes for runaway loops (see "Per-task limits")
     max_steps = 40,               -- model requests per task (pauses when reached; /resume continues)
     max_tool_calls = 120,         -- same, for tool calls
-    max_duration_ms = 30 * 60 * 1000, -- same, for active time (excluding time waiting for approval)
+    max_duration_ms = 30 * 60 * 1000, -- same, for active time (excluding approval waits and wait_process)
     max_identical_failures = 3,   -- stop after the same tool call fails repeatedly
     max_identical_calls = 4,      -- stop after repeating the same call with no change
     max_consecutive_denials = 3,
@@ -1029,6 +1069,7 @@ require('coagent').setup({
   format = { timeout_ms = 2000, filetypes = nil },
   -- new LSP diagnostics appended to write/edit results (see "New diagnostics after edits")
   diagnostics_after_edit = { enabled = true, min_severity = 'error', timeout_ms = 1500, max_items = 10 },
+  -- max_lifetime_ms: background processes are killed after it; also the longest wait_process
   background = { max_processes = 3, max_output_bytes = 1024 * 1024, max_lifetime_ms = 2 * 60 * 60 * 1000 },
   session = { persist = true, save_tool_output = true },
   ui = { layout = 'vertical', width = 0.42, icons = 'unicode', show_reasoning = false },
@@ -1038,7 +1079,8 @@ require('coagent').setup({
   -- experiment log (see "Experiment log"); list options replace the defaults
   experiments = {
     enabled = true,
-    commands = { 'python[%d%.]*%s.-train[%w_%-%.]*%.py', 'python[%d%.]*%s.-eval[%w_%-%.]*%.py' }, -- Lua patterns
+    from_ledger = true, -- entry commands of the ledger's "How to run" mark runs
+    commands = { 'python[%d%.]*%s.-train[%w_%-%.]*%.py', 'torchrun%s', 'accelerate%s+launch%s' }, -- extra Lua patterns
     exclude = { 'pytest', '%-m%s+unittest' },
     metrics = { 'loss', 'val_loss', 'acc', 'accuracy', 'f1', 'auc', 'mae', 'rmse', 'epoch', 'lr' },
     patterns = { { pattern = 'Top%-1 acc ([%d%.]+)', key = 'top1' } }, -- extra metrics
@@ -1057,7 +1099,7 @@ require('coagent').setup({
   references = { url = true, url_max_bytes = 32 * 1024, clipboard_max_bytes = 32 * 1024 },
   inline = { context_lines = 40, keymaps = { accept = 'ga', reject = 'gr', retry = 'gi', diff = 'gd' } },
   -- delegating subtasks to another chat (see "Delegating subtasks")
-  delegate = { language = 'en', download_dir = nil, review_imports = true, max_source_bytes = 2 * 1024 * 1024, kinds = {} },
+  delegate = { language = 'en', download_dir = nil, review_imports = true, auto_followup = false, max_source_bytes = 2 * 1024 * 1024, kinds = {} },
   notify = { on = { 'approval', 'done', 'failed', 'limit', 'waiting' }, bell = true, desktop = false, only_when_unfocused = true },
 })
 ```

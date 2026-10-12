@@ -1,6 +1,6 @@
---- Background processes (dev servers, watchers):
+--- Background processes (dev servers, watchers, training / evaluation runs):
 ---   start_process  (exec: same approval rules as run_command)
----   read_process_output, list_processes, stop_process (only touch processes the agent started)
+---   wait_process, read_process_output, list_processes, stop_process (only touch processes the agent started)
 ---
 --- Processes live in a per-controller Manager. They keep running after the
 --- task completes (so the user can try the app), and are killed when the user
@@ -24,6 +24,10 @@ local M = {}
 ---@field code integer?
 ---@field started integer
 ---@field item table? timeline item
+---@field ended integer? when it exited
+---@field finalized boolean? set once the exit handler (experiment record) ran
+---@field exp_id integer? experiment log id of this run
+---@field experiment table? experiment entry, once recorded
 
 ---@class Coagent.BgManager
 local Manager = {}
@@ -157,6 +161,7 @@ function Manager:start(spec)
     end,
   }, function(res)
     p.status = 'exited'
+    p.ended = util.now()
     p.code = res.code
     p.killed = res.killed
     if res.error then
@@ -165,12 +170,14 @@ function Manager:start(spec)
       append(p, '\n[stopped: reached background.max_lifetime_ms]\n', cfg.max_output_bytes)
     end
     self:_changed(p)
-    if spec.on_exit then
-      -- after the output chunks that are still scheduled
-      vim.schedule(function()
+    -- after the output chunks that are still scheduled; `finalized` tells
+    -- wait_process that the experiment record (if any) is written
+    vim.schedule(function()
+      if spec.on_exit then
         pcall(spec.on_exit, p, res)
-      end)
-    end
+      end
+      p.finalized = true
+    end)
   end)
   self.procs[p.id] = p
   table.insert(self.order, p.id)
@@ -206,9 +213,12 @@ end
 M.start_process = {
   name = 'start_process',
   kind = 'exec',
-  description = 'Start a long-running command in the background (dev server, file watcher, local service) and keep it running '
-    .. 'while you continue working. Returns an id and the first output. Use read_process_output to check logs later and '
-    .. 'stop_process when done. Use run_command (not this) for commands that finish on their own, such as tests.',
+  description = 'Start a long-running command in the background and keep it running while you continue working: dev servers, '
+    .. 'file watchers, local services, and training / evaluation runs that may take more than a few minutes. Returns an id '
+    .. 'and the first output. For a run that finishes on its own, call wait_process next (it blocks until the process exits '
+    .. 'or a pattern appears, without polling); use read_process_output to check logs and stop_process when done. '
+    .. 'Set experiment = true for training / evaluation runs (any script or launcher) so the run, its git state and its '
+    .. 'metrics go to the experiment log. Use run_command (not this) for short commands such as tests.',
   schema = {
     type = 'object',
     required = { 'command' },
@@ -218,6 +228,8 @@ M.start_process = {
       ready_pattern = { type = 'string', description = 'Wait until this text (Lua pattern) appears in the output, e.g. "Listening on".' },
       wait_ms = { type = 'integer', description = 'How long to wait for ready_pattern / initial output (default 5000, max 60000).' },
       purpose = { type = 'string', description = 'Why the process is needed.' },
+      experiment = { type = 'boolean', description = 'true for a training / evaluation run: record it in the experiment log.' },
+      name = { type = 'string', description = 'Short name of the experiment run (with experiment = true), e.g. "lr3e-4-warmup".' },
     },
   },
   title = function(args)
@@ -249,6 +261,7 @@ M.start_process = {
     local exp, exited
     local function record(proc, res)
       local e = exp.finish({ code = proc.code, output = proc.out, duration_ms = util.now() - proc.started, timed_out = res.timed_out, killed = res.killed, error = res.error })
+      proc.experiment = e
       if ctx.on_experiment then
         ctx.on_experiment(e)
       end
@@ -274,8 +287,10 @@ M.start_process = {
     -- training / evaluation runs go to the experiment log; on_exit records
     -- the result (or here, when it ran while git was being read)
     -- (/exp run records any command: ctx.experiment = { source, force })
-    local opts = vim.tbl_extend('force', { source = 'agent:bg' }, ctx.experiment or {})
+    -- (experiment = true: the model says it is a run, whatever the file names)
+    local opts = vim.tbl_extend('force', { source = 'agent:bg', force = args.experiment == true, name = args.name }, ctx.experiment or {})
     exp = log and log:begin(prepared.command, prepared.cwd, opts) or nil
+    p.exp_id = exp and exp.entry.id or nil
     if exp and exited then
       record(exited[1], exited[2])
     end
@@ -292,7 +307,7 @@ M.start_process = {
       head = string.format('Process %s is running in the background%s.', p.id, state == 'ready' and ' and is ready' or '')
     end
     if exp then
-      head = head .. string.format('\n[experiment #%d: metrics are recorded when %s exits; see the experiments tool]', exp.entry.id, p.id)
+      head = head .. string.format('\n[experiment #%d: metrics are recorded when %s exits; wait_process returns them]', exp.entry.id, p.id)
     end
     return {
       ok = state ~= 'exited' or p.code == 0,
@@ -342,6 +357,190 @@ M.read_process_output = {
       ok = true,
       output = ctx.processes:status_line(p) .. '\n' .. (text ~= '' and text or '(no new output)'),
       summary = p.status == 'running' and 'running' or ('exited ' .. tostring(p.code)),
+    }
+  end,
+}
+
+--- Last non-empty output line (progress bars redraw with \r: the last part).
+---@param text string
+---@return string
+local function last_line(text)
+  local tail = text:sub(-4096):gsub('\27%[[%d;?]*%a', '')
+  local parts = vim.split(tail, '[\r\n]')
+  for i = #parts, 1, -1 do
+    local l = vim.trim(parts[i])
+    if l ~= '' then
+      return l
+    end
+  end
+  return ''
+end
+M.last_line = last_line
+
+--- Look for `pattern` in the output from absolute offset `pos`. Returns the
+--- matching line, or the offset to scan from next time (the start of the last,
+--- possibly incomplete line).
+---@return integer next_pos, string? line
+local function scan(p, pos, pattern)
+  local from = math.max(pos, p.base)
+  local text = p.out:sub(from - p.base + 1)
+  local ok, s, e = pcall(string.find, text, pattern)
+  if not ok then
+    s, e = text:find(pattern, 1, true)
+  end
+  if s then
+    local ls = 1
+    local nl = text:sub(1, s):find('\n[^\n]*$')
+    if nl then
+      ls = nl + 1
+    end
+    local le = text:find('\n', e + 1, true)
+    local line = text:sub(ls, (le or (#text + 1)) - 1)
+    line = line:gsub('\27%[[%d;?]*%a', ''):gsub('\r', ' ')
+    return from + #text, util.ellipsize(vim.trim(line), 300)
+  end
+  local after = text:find('\n[^\n]*$')
+  return from + (after or 0)
+end
+
+M.wait_process = {
+  name = 'wait_process',
+  -- waits for a process the agent started; changes nothing
+  kind = 'read',
+  description = 'Wait for a background process started with start_process: block until it exits (until = "exit", the default) '
+    .. 'or until a Lua pattern appears in its new output (e.g. "Epoch 3/", "val_acc"), or until timeout_ms. No model '
+    .. 'requests are made while waiting and the wait does not count toward the task time limit, so use it for training / '
+    .. 'evaluation runs instead of calling read_process_output repeatedly. Returns the exit code, the tail of the new '
+    .. 'output and the metrics of the experiment log when the run was recorded.',
+  schema = {
+    type = 'object',
+    required = { 'id' },
+    properties = {
+      id = { type = 'string', description = 'Process id, e.g. "bg1".' },
+      ['until'] = { type = 'string', description = '"exit" (default) or a Lua pattern to wait for in new output.' },
+      timeout_ms = { type = 'integer', description = 'Give up waiting after this long (default and max: background.max_lifetime_ms). The process keeps running.' },
+    },
+  },
+  title = function(args)
+    local u = args['until']
+    return 'Wait for ' .. tostring(args.id) .. ((u and u ~= '' and u ~= 'exit') and (' until "' .. tostring(u) .. '"') or ' to exit')
+  end,
+  prepare = function(args, ctx)
+    local r, err = find_proc(args, ctx)
+    if not r then
+      return nil, err
+    end
+    local u = args['until']
+    if u ~= nil and type(u) ~= 'string' then
+      return nil, 'until must be "exit" or a Lua pattern'
+    end
+    r.pattern = (u and u ~= '' and u ~= 'exit') and u or nil
+    local cap = ctx.processes:cfg().max_lifetime_ms
+    local t = tonumber(args.timeout_ms)
+    r.timeout_ms = math.min((t and t > 0) and t or cap, cap)
+    return r
+  end,
+  run = function(_, ctx, prepared)
+    local p = prepared.proc
+    local started = util.now()
+    local waiting = p.status == 'running'
+    local cancelled = false
+    if ctx.set_cancel then
+      ctx.set_cancel(function()
+        cancelled = true
+      end)
+    end
+    local pos = math.max(p.read_pos, p.base)
+    local state, matched
+    local shown, shown_at = nil, 0
+    while true do
+      if prepared.pattern then
+        local line
+        pos, line = scan(p, pos, prepared.pattern)
+        if line then
+          state, matched = 'matched', line
+          break
+        end
+      end
+      if p.status ~= 'running' then
+        state = 'exited'
+        break
+      end
+      if cancelled or (ctx.cancelled and ctx.cancelled()) then
+        return { ok = false, output = 'Wait cancelled by the user.', summary = 'cancelled', meta = { waited_ms = util.now() - started } }
+      end
+      if ctx.pause_requested and ctx.pause_requested() then
+        state = 'paused'
+        break
+      end
+      if util.now() - started >= prepared.timeout_ms then
+        state = 'timeout'
+        break
+      end
+      -- live progress on the timeline item: runtime and the last output line
+      local progress = string.format('%s %s %s', util.format_duration(util.now() - p.started), '·', util.ellipsize(last_line(p.out), 100))
+      if ctx.on_progress and progress ~= shown and util.now() - shown_at >= 1000 then
+        shown, shown_at = progress, util.now()
+        ctx.on_progress(progress)
+      end
+      async.sleep(200)
+      async.main()
+    end
+    if state == 'exited' then
+      -- the experiment record is written by the exit handler
+      local deadline = util.now() + 5000
+      while not p.finalized and util.now() < deadline do
+        async.sleep(50)
+      end
+      async.main()
+      if prepared.pattern then
+        local _, line = scan(p, pos, prepared.pattern)
+        matched = line
+      end
+    end
+    local waited = util.now() - started
+    local runtime = util.format_duration((p.ended or util.now()) - p.started)
+    local head
+    if state == 'exited' then
+      head = string.format('Process %s %s after %s (waited %s).', p.id,
+        p.killed and 'was stopped' or ('exited with code ' .. tostring(p.code)), runtime, util.format_duration(waited))
+      if prepared.pattern then
+        head = head .. (matched and ('\nPattern "' .. prepared.pattern .. '" appeared: ' .. matched) or ('\nPattern "' .. prepared.pattern .. '" did not appear before it exited.'))
+      end
+    elseif state == 'matched' then
+      head = string.format('Pattern "%s" appeared in the output of %s after waiting %s; it is still running (%s so far).\nMatching line: %s',
+        prepared.pattern, p.id, util.format_duration(waited), runtime, matched)
+    elseif state == 'paused' then
+      head = string.format('Stopped waiting because the user paused the agent; %s is still running (%s so far). Call wait_process again to keep waiting.', p.id, runtime)
+    else
+      head = string.format('%s is still running after waiting %s (%s so far). Call wait_process again to keep waiting, or stop_process to end it.',
+        p.id, util.format_duration(waited), runtime)
+    end
+    if p.experiment and ctx.experiments then
+      head = head .. '\n' .. require('coagent.agent.experiments').brief(ctx.experiments, p.experiment)
+    elseif p.exp_id then
+      head = head .. string.format('\n[experiment #%d: metrics are recorded when %s exits]', p.exp_id, p.id)
+    end
+    local out = util.redact(ctx.processes:read(p, { tail = 60 }))
+    out = util.truncate_middle(out, ctx.config.limits.max_tool_output_bytes)
+    local summary
+    if state == 'exited' then
+      summary = p.killed and 'stopped' or ('exited ' .. tostring(p.code))
+    elseif state == 'matched' then
+      summary = 'pattern found'
+    elseif state == 'paused' then
+      summary = 'paused, still running'
+    else
+      summary = 'timeout, still running'
+    end
+    if p.experiment then
+      summary = summary .. ' · #' .. p.experiment.id
+    end
+    return {
+      ok = state ~= 'exited' or (p.code == 0 and not p.killed),
+      output = head .. '\nNew output (tail):\n' .. (out ~= '' and out or '(none)'),
+      summary = summary,
+      meta = { waited_ms = waited, waiting = waiting, code = p.code, experiment = p.experiment and p.experiment.id or p.exp_id },
     }
   end,
 }

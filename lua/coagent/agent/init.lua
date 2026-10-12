@@ -44,6 +44,8 @@ function M.build(opts)
   -- the ledger is shared per project directory; its requests and notices go
   -- through the newest controller
   c.ledger = Ledger.new(config, ws, { experiments = experiments, ctrl = c })
+  -- entry commands of the ledger's "How to run" mark experiment runs
+  experiments.ledger = c.ledger
   if config.mode == 'auto' and perms.mode ~= 'auto' then
     c:notice('warn', 'mode = "auto" is not enabled for ' .. ws.root .. ' (not in auto.workspaces); using supervised. Enable it with :CoagentMode auto.')
   elseif config.mode == 'judge' and perms.mode ~= 'judge' then

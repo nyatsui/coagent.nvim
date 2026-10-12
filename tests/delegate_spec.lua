@@ -788,6 +788,131 @@ python train.py --epochs 1
     assert.are.equal('COMPLETED', c:state())
   end)
 
+  ----------------------------------------------------------------------------
+  -- Follow-ups (prompts, delegate.auto_followup)
+  ----------------------------------------------------------------------------
+
+  it('follow-up prompts run long commands with start_process (experiment) + wait_process and ask for metrics', function()
+    local sub = { id = 3, kind = 'analyze', dir = '/tmp/sub3' }
+    local R = {
+      commands = {
+        { section = 'verification', command = 'pytest -q' },
+        { section = 'experiments', command = 'bash scripts/run.sh base' },
+        { section = '実験', command = 'python -m pkg.train --lr 1e-3' },
+      },
+      parsed = { sections = { plan = '1. Lower the lr.' } },
+    }
+    local list = Delegate.followups(sub, R)
+    assert.are.same({ 'verify', 'experiments', 'experiment', 'experiment', 'plan' }, vim.tbl_map(function(f)
+      return f.kind
+    end, list))
+    for _, f in ipairs(list) do
+      assert.is_truthy(f.prompt:find('start_process', 1, true), f.label)
+      assert.is_truthy(f.prompt:find('wait_process', 1, true), f.label)
+      assert.is_truthy(f.prompt:find('experiment = true', 1, true), f.label)
+      assert.is_truthy(f.prompt:find('read_process_output', 1, true), f.label) -- "never poll"
+    end
+    assert.is_truthy(list[2].prompt:find('bash scripts/run.sh base\npython -m pkg.train --lr 1e-3', 1, true))
+    assert.is_truthy(list[2].prompt:find('table of the metrics', 1, true))
+    assert.is_truthy(list[3].prompt:find('report the metrics wait_process returns', 1, true))
+    assert.is_truthy(list[5].prompt:find('Report the metrics of every run', 1, true))
+
+    assert.are.equal(list[1], Delegate.auto_followup(list, 'verify'))
+    assert.are.equal(list[2], Delegate.auto_followup(list, 'experiments'))
+    assert.are.equal(list[1], Delegate.auto_followup(list, 'first'))
+    assert.is_nil(Delegate.auto_followup(list, false))
+    assert.is_nil(Delegate.auto_followup(list, nil))
+    local one = Delegate.followups(sub, { commands = { { section = 'experiments', command = 'bash go.sh' } } })
+    assert.are.equal('experiment', Delegate.auto_followup(one, 'experiments').kind)
+    assert.is_nil(Delegate.auto_followup(one, 'verify'))
+
+    assert.is_true(Delegate.import_ok({ summary = { line = 'report' } }))
+    assert.is_true(Delegate.import_ok({ summary = { state = 'COMPLETED' }, imported = { applied = { { status = 'applied' } } } }))
+    assert.is_false(Delegate.import_ok({ summary = { state = 'CANCELLED' } }))
+    assert.is_false(Delegate.import_ok({ summary = { state = 'COMPLETED' }, imported = { applied = { { status = 'applied' }, { status = 'denied' } } } }))
+  end)
+
+  --- the user message that started the newest task
+  local function last_prompt(c)
+    for i = #c.session.messages, 1, -1 do
+      local m = c.session.messages[i]
+      if m.role == 'user' then
+        return m.content
+      end
+    end
+  end
+
+  it('auto_followup starts the matching follow-up after a successful import', function()
+    local c = setup()
+    delegate_cmd('analyze results')
+    local follow
+    assert.is_true(agent.receive('1', { text = REPORT, auto_followup = 'experiments', followup = function(l)
+      follow = l
+    end }))
+    assert.is_true(h.wait(function()
+      return #notices(c, 'Starting the follow-up of subtask #1') > 0
+    end))
+    idle(c)
+    assert.is_nil(follow) -- not offered: started
+    local p = last_prompt(c)
+    assert.is_truthy(p:find('Run this experiment from the plan of subtask #1', 1, true), p)
+    assert.is_truthy(p:find('python train.py --lr 0.01 --epochs 5', 1, true))
+    assert.is_truthy(p:find('wait_process', 1, true))
+    assert.are.equal('COMPLETED', c:state())
+
+    -- nothing matches ('verify' without verification commands): the selection as before
+    delegate_cmd('analyze again')
+    follow = nil
+    agent.receive('2', { text = REPORT, auto_followup = 'verify', followup = function(l)
+      follow = l
+    end })
+    assert.is_true(h.wait(function()
+      return follow ~= nil
+    end))
+    assert.are.equal('experiment', follow[1].kind)
+  end)
+
+  it('delegate.auto_followup = "verify" runs the verification commands, unless a file was denied', function()
+    local c = setup({ delegate = { auto_followup = 'verify' } })
+    local sub = delegate_cmd('implement add AMP @train.py @src/utils.py')
+    sub.created = os.time() - 100
+    c:delegations():save(sub)
+    download('train.py', 'import model\n\ndef main(lr=0.01):\n    return model.Net()\n', 10)
+    download('new_module.py', 'def amp():\n    return True\n', 5)
+    approvals(c, 'approve')
+    local follow
+    agent.receive('1', { text = IMPLEMENT_REPLY, followup = function(l)
+      follow = l
+    end })
+    assert.is_true(h.wait(function()
+      return #notices(c, 'Starting the follow-up of subtask #1 (delegate.auto_followup = verify)') > 0
+    end))
+    idle(c)
+    assert.is_nil(follow)
+    local p = last_prompt(c)
+    assert.is_truthy(p:find('Run the verification commands from the result of subtask #1', 1, true), p)
+    assert.is_truthy(p:find('python -m pytest -q\npython train.py --epochs 1', 1, true))
+
+    -- a denied file: no automatic follow-up, the selection is offered
+    local c2 = setup({ delegate = { auto_followup = 'verify' } })
+    sub = delegate_cmd('implement add AMP @train.py @src/utils.py')
+    sub.created = os.time() - 100
+    c2:delegations():save(sub)
+    download('train.py', 'import model\n\ndef main(lr=0.01):\n    return model.Net()\n', 10)
+    approvals(c2, function(item)
+      return item.args.path == 'train.py' and 'deny' or 'approve'
+    end)
+    follow = nil
+    agent.receive('1', { text = IMPLEMENT_REPLY, followup = function(l)
+      follow = l
+    end })
+    assert.is_true(h.wait(function()
+      return follow ~= nil
+    end))
+    assert.are.equal(0, #notices(c2, 'Starting the follow-up'))
+    assert.are.equal('verify', follow[1].kind)
+  end)
+
   it('records the imported result in the ledger', function()
     local c = setup()
     agent.ledger('note started')

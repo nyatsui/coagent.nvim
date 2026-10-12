@@ -91,7 +91,7 @@ local defaults = {
     -- :CoagentResume / /resume continues it with fresh counters.
     max_steps = 40, -- LLM requests per task
     max_tool_calls = 120, -- tool executions per task
-    max_duration_ms = 30 * 60 * 1000, -- active wall clock per task (approval waits excluded)
+    max_duration_ms = 30 * 60 * 1000, -- active wall clock per task (approval waits and wait_process excluded)
     max_identical_failures = 3, -- same tool+args failing repeatedly -> stop
     max_identical_calls = 4, -- same tool+args repeated without progress -> stop
     max_consecutive_denials = 3, -- user rejected N actions in a row -> stop
@@ -150,7 +150,7 @@ local defaults = {
   background = {
     max_processes = 3, -- concurrent background processes (start_process)
     max_output_bytes = 1024 * 1024, -- retained output per process (tail)
-    max_lifetime_ms = 2 * 60 * 60 * 1000, -- killed automatically after this
+    max_lifetime_ms = 2 * 60 * 60 * 1000, -- killed automatically after this (also the longest wait_process)
   },
 
   auto = {
@@ -237,10 +237,9 @@ local defaults = {
     max_description = 200, -- bytes of each description in the system prompt
   },
 
-  -- Experiment log (ML training / evaluation runs). Commands matching
-  -- `commands` (Lua patterns on the command line, minus `exclude`) that run
-  -- through run_command / start_process, and every `/exp run <cmd>`, are
-  -- recorded per project in stdpath('state')/coagent/experiments/<project>.jsonl
+  -- Experiment log (ML training / evaluation runs). Runs through
+  -- run_command / start_process (detected as below, minus `exclude`), and
+  -- every `/exp run <cmd>`, are recorded per project in stdpath('state')/coagent/experiments/<project>.jsonl
   -- (0600, outside the repo, secrets redacted): command, cwd, git HEAD and a
   -- hash of `git diff HEAD` (the diff kept up to max_diff_bytes), duration,
   -- exit code and metrics from the output (`key=value` / `key: value` for
@@ -252,12 +251,25 @@ local defaults = {
   experiments = {
     enabled = true,
     dir = nil, -- nil = stdpath('state')/coagent/experiments
+    -- Runs are recorded when the agent passes experiment = true to
+    -- run_command / start_process, when the command starts like an entry
+    -- command of the project ledger (the commands in backticks under "How to
+    -- run" in overview.md: `bash scripts/run.sh`, `python -m pkg.train`, ...;
+    -- re-read when the ledger changes), or when it matches one of these Lua
+    -- patterns (an extra; the launchers are always runs).
+    from_ledger = true,
     commands = {
       'python[%d%.]*%s.-train[%w_%-%.]*%.py',
       'python[%d%.]*%s.-eval[%w_%-%.]*%.py',
       'python[%d%.]*%s.-test[%w_%-%.]*%.py',
-      'torchrun%s.-%.py',
-      'accelerate%s+launch%s.-%.py',
+      'python[%d%.]*%s+%-m%s+[%w_%.]*train',
+      'python[%d%.]*%s+%-m%s+[%w_%.]*eval',
+      'python[%d%.]*%s+%-m%s+torch%.distributed%.run',
+      'python[%d%.]*%s+%-m%s+torch%.distributed%.launch',
+      'python[%d%.]*%s+%-m%s+accelerate%.commands%.launch',
+      'torchrun%s',
+      'accelerate%s+launch%s',
+      'deepspeed%s.-%.py',
     },
     exclude = { 'pytest', '%-m%s+unittest' },
     metrics = { 'loss', 'val_loss', 'acc', 'accuracy', 'f1', 'auc', 'mae', 'rmse', 'epoch', 'lr' },
@@ -329,6 +341,12 @@ local defaults = {
     clipboard = true, -- copy 00_prompt.md to the + register
     open_folder = true, -- open the bundle folder (vim.ui.open)
     review_imports = true, -- imported files always ask for approval, even in auto mode
+    -- After a successful /receive: false = offer the local follow-ups in a
+    -- selection (default); 'verify' = run the verification commands,
+    -- 'experiments' = run the experiment commands (then 'verify'), 'first' =
+    -- the first follow-up offered; started automatically (when there is one),
+    -- with the approvals of the current mode.
+    auto_followup = false,
     -- Kinds: built-ins analyze | implement | fix | review. Add your own or
     -- override parts of one; name = false removes a kind:
     --   kinds = { profile = { output = 'text', description = 'find the bottleneck',

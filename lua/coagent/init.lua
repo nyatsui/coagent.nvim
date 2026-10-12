@@ -1132,7 +1132,7 @@ end
 --- register), the + register (clipboard) or opts.text; files from the
 --- download folder (newer than the bundle) and from the pasted text.
 ---@param arg string?
----@param opts {text:string?, choose:table?, drift:table?, followup:(boolean|fun(list:table))?}? (API / tests)
+---@param opts {text:string?, choose:table?, drift:table?, followup:(boolean|fun(list:table))?, auto_followup:(false|string)?}? (API / tests)
 ---@return boolean ok
 function M.receive(arg, opts)
   opts = opts or {}
@@ -1196,6 +1196,21 @@ function M.receive(arg, opts)
     local list = Delegate.followups(sub, info.R)
     if #list == 0 then
       return
+    end
+    -- delegate.auto_followup: start the matching follow-up after a clean
+    -- import (approvals follow the current mode); otherwise offer the list
+    local mode = opts.auto_followup
+    if mode == nil then
+      mode = cfg.auto_followup
+    end
+    local auto = Delegate.auto_followup(list, mode)
+    if auto and Delegate.import_ok(info) then
+      c:notice('info', string.format('Starting the follow-up of subtask #%d (delegate.auto_followup = %s): %s', sub.id, tostring(mode), auto.label))
+      local ok, ferr = c:submit(auto.prompt, { input = auto.prompt })
+      if ok then
+        return
+      end
+      c:notice('warn', 'Follow-up not started: ' .. tostring(ferr))
     end
     if type(opts.followup) == 'function' then
       return opts.followup(list)

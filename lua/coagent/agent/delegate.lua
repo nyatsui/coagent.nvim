@@ -1865,8 +1865,14 @@ function M.tool_result(sub, R, summary, request, max_bytes)
   return table.concat(out, '\n')
 end
 
---- Local follow-ups offered after a manual import.
----@return {label:string, prompt:string}[]
+-- how follow-ups run long commands (training / evaluation)
+M.LONG_RUNS = 'Run commands that may take more than a few minutes (training, evaluation) with start_process '
+  .. '(experiment = true, a short name) and then wait_process until they exit, not with run_command, and never poll '
+  .. 'read_process_output in a loop.'
+
+--- Local follow-ups offered after a manual import. `kind`: 'verify' |
+--- 'experiment' (one command) | 'experiments' (all of them) | 'plan' | 'fix'.
+---@return {label:string, prompt:string, kind:string}[]
 function M.followups(sub, R)
   local out = {}
   local verify, exps = {}, {}
@@ -1879,8 +1885,23 @@ function M.followups(sub, R)
   end
   if #verify > 0 then
     table.insert(out, {
+      kind = 'verify',
       label = 'Run the verification commands (' .. #verify .. ')',
-      prompt = string.format('Run the verification commands from the result of subtask #%d and report the results; fix small problems if they fail:\n%s', sub.id, fenced(table.concat(verify, '\n'), 'bash')),
+      prompt = string.format('Run the verification commands from the result of subtask #%d and report the results; fix small problems if they fail. %s\n%s',
+        sub.id, M.LONG_RUNS, fenced(table.concat(verify, '\n'), 'bash')),
+    })
+  end
+  local run_exp = 'Run it with start_process (experiment = true, a short name) and wait_process until it exits (not run_command, '
+    .. 'no polling with read_process_output), then report the metrics wait_process returns and how they compare with the '
+    .. 'previous runs in the experiment log.'
+  if #exps > 1 then
+    table.insert(out, {
+      kind = 'experiments',
+      label = 'Run all ' .. math.min(#exps, 5) .. ' experiments one after another',
+      prompt = string.format('Run these experiments from the plan of subtask #%d one after another. Run each with start_process '
+        .. '(experiment = true, a short name) and wait_process until it exits (not run_command, no polling with '
+        .. 'read_process_output), then report a table of the metrics wait_process returns, compared with the previous runs '
+        .. 'in the experiment log:\n%s', sub.id, fenced(table.concat(vim.list_slice(exps, 1, 5), '\n'), 'bash')),
     })
   end
   for i, cmd in ipairs(exps) do
@@ -1888,25 +1909,74 @@ function M.followups(sub, R)
       break
     end
     table.insert(out, {
+      kind = 'experiment',
       label = 'Run experiment: ' .. util.ellipsize(cmd, 70),
-      prompt = string.format('Run this experiment from the plan of subtask #%d and report the metrics:\n%s', sub.id, fenced(cmd, 'bash')),
+      prompt = string.format('Run this experiment from the plan of subtask #%d. %s\n%s', sub.id, run_exp, fenced(cmd, 'bash')),
     })
   end
   local plan = R.parsed and R.parsed.sections and R.parsed.sections['plan']
   if sub.kind == 'analyze' and plan and plan ~= '' then
     table.insert(out, {
+      kind = 'plan',
       label = 'Carry out the plan',
-      prompt = string.format('Carry out the plan from the analysis of subtask #%d (the full report is in the project ledger and in %s):\n\n%s', sub.id, vim.fn.fnamemodify(sub.dir .. '/' .. M.FILES.result, ':~'), util.clip(plan, 6000)),
+      prompt = string.format('Carry out the plan from the analysis of subtask #%d (the full report is in the project ledger and in %s). %s Report the metrics of every run.\n\n%s',
+        sub.id, vim.fn.fnamemodify(sub.dir .. '/' .. M.FILES.result, ':~'), M.LONG_RUNS, util.clip(plan, 6000)),
     })
   end
   local findings = R.parsed and R.parsed.sections and R.parsed.sections['findings']
   if sub.kind == 'review' and findings and findings ~= '' then
     table.insert(out, {
+      kind = 'fix',
       label = 'Fix the Critical and Major findings',
       prompt = string.format('Fix the Critical and Major findings of the review of subtask #%d (verify each against the code first):\n\n%s', sub.id, util.clip(findings, 8000)),
     })
   end
   return out
+end
+
+--- The follow-up `delegate.auto_followup` starts by itself: 'verify',
+--- 'experiments' (all experiment commands, or the only one), 'first'; nil
+--- when it is off or nothing matches (the selection is offered instead).
+---@param list {label:string, prompt:string, kind:string}[]
+---@param mode false|string|nil
+---@return {label:string, prompt:string, kind:string}?
+function M.auto_followup(list, mode)
+  if not mode or #list == 0 then
+    return nil
+  end
+  if mode == 'first' then
+    return list[1]
+  end
+  for _, f in ipairs(list) do
+    if (mode == 'verify' and f.kind == 'verify') or (mode == 'experiments' and f.kind == 'experiments') then
+      return f
+    end
+  end
+  if mode == 'experiments' then
+    for _, f in ipairs(list) do
+      if f.kind == 'experiment' then
+        return f
+      end
+    end
+  end
+  return nil
+end
+
+--- Did an import go through cleanly (task completed; no file denied, failed
+--- or left unapplied)? on_done info of Controller:receive.
+---@param info {summary:table?, imported:table?}
+---@return boolean
+function M.import_ok(info)
+  local s = info.summary or {}
+  if s.state and s.state ~= 'COMPLETED' then
+    return false
+  end
+  for _, a in ipairs((info.imported and info.imported.applied) or {}) do
+    if a.status ~= 'applied' and a.status ~= 'partially applied' then
+      return false
+    end
+  end
+  return true
 end
 
 --- Put text into the + register (the unnamed one too, when no clipboard).

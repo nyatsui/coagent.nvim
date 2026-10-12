@@ -1,7 +1,9 @@
 --- Experiment log for ML work (training / evaluation runs).
 ---
---- Commands matching `experiments.commands` that run through run_command or
---- start_process (or `/exp run <cmd>`) are recorded per project in
+--- Training / evaluation runs that go through run_command or start_process
+--- (flagged by the model with experiment = true, an entry command of the
+--- project ledger, or an `experiments.commands` pattern; see "Detection"),
+--- or `/exp run <cmd>`, are recorded per project in
 ---   <stdpath('state')>/coagent/experiments/<project-key>.jsonl   (dir 0700, file 0600)
 --- outside the repository: command, cwd, git HEAD, a short hash of `git diff
 --- HEAD` (the diff itself capped), duration, exit code, metrics parsed from the
@@ -315,6 +317,8 @@ end
 ---@field command string
 ---@field cwd string relative to the workspace root
 ---@field source string 'agent' | 'agent:bg' | 'user'
+---@field name string? short run name given by the model (experiment = true)
+---@field detected string? 'flag' (experiment = true) | 'ledger' | 'pattern' | 'manual' (/exp run)
 ---@field status string 'running' | 'done' | 'killed' | 'timeout'
 ---@field code integer?
 ---@field duration_ms integer?
@@ -476,9 +480,253 @@ function Log:_compact()
   self.cache = nil
 end
 
---- Does `command` look like a training / evaluation run?
+------------------------------------------------------------------------------
+-- Detection: which commands are runs
+------------------------------------------------------------------------------
+-- A command is recorded when
+--   * the model says so (run_command / start_process with experiment = true),
+--   * it starts like an entry command of the project ledger ("How to run" of
+--     overview.md: the commands in backticks there, e.g. `bash scripts/run.sh`,
+--     `python -m pkg.train`, `torchrun ... main.py`), or
+--   * it matches an `experiments.commands` Lua pattern (launchers included),
+-- unless it matches `experiments.exclude`. /exp run records any command.
+
+-- programs that set up, test or inspect a project rather than run it
+local NOT_RUNS = {
+  pip = true, pip3 = true, conda = true, mamba = true, micromamba = true, poetry = true, pipenv = true, uv = true,
+  npm = true, yarn = true, pnpm = true, apt = true, ['apt-get'] = true, brew = true, git = true, cd = true,
+  source = true, ['.'] = true, export = true, cp = true, mv = true, mkdir = true, ls = true, cat = true, echo = true,
+  rm = true, pytest = true, tox = true, nox = true, ['pre-commit'] = true, ruff = true, black = true, flake8 = true,
+  mypy = true, isort = true, tensorboard = true, wandb = true, ['huggingface-cli'] = true, ['nvidia-smi'] = true,
+  jupyter = true, streamlit = true, uvicorn = true, gunicorn = true, flask = true, docker = true, curl = true, wget = true, tail = true, head = true, watch = true, sudo = true,
+}
+local NOT_TARGETS = { install = true, setup = true, test = true, tests = true, lint = true, format = true, fmt = true, clean = true, docs = true, check = true, deps = true }
+local NOT_RUN_MODULES = { pip = true, venv = true, pytest = true, unittest = true, tensorboard = true, ['http.server'] = true, build = true }
+-- `python -m <launcher> ... script.py`: the script is the entry
+local LAUNCHER_MODULES = { ['torch.distributed.run'] = true, ['torch.distributed.launch'] = true, ['accelerate.commands.launch'] = true, ['deepspeed.launcher.runner'] = true }
+-- `<launcher> [options] script.py`
+local LAUNCHERS = { torchrun = true, deepspeed = true, accelerate = true, horovodrun = true, mpirun = true, srun = true }
+-- prefixes that only wrap the real command
+local WRAPPERS = { nohup = true, time = true, env = true, exec = true, nice = true, stdbuf = true }
+
+--- Words of the shell segments of a command (`&&`, `;`, `|` split), each
+--- without leading VAR=value assignments and wrappers (nohup, time, env,
+--- `uv run`, `poetry run`, `conda run -n x`); `python3.10` -> `python`,
+--- `./x` -> `x`, quotes dropped.
 ---@param command string
----@return boolean
+---@return string[][]
+function M.segments(command)
+  local out = {}
+  for seg in ((command or '') .. ';'):gmatch('(.-)%s*[;&|]+%s*') do
+    local words = {}
+    for w in seg:gmatch('%S+') do
+      w = w:gsub([=[^["']]=], ''):gsub([=[["']$]=], '')
+      table.insert(words, w)
+    end
+    local i = 1
+    while i <= #words do
+      local w = words[i]
+      if w:match('^[%a_][%w_]*=') or WRAPPERS[w] then
+        i = i + 1
+      elseif (w == 'uv' or w == 'poetry' or w == 'pipenv' or w == 'pdm' or w == 'rye') and words[i + 1] == 'run' then
+        i = i + 2
+      elseif (w == 'conda' or w == 'mamba' or w == 'micromamba') and words[i + 1] == 'run' then
+        i = i + 2
+        while words[i] and words[i]:match('^%-') do
+          i = i + ((words[i] == '-n' or words[i] == '-p' or words[i] == '--name' or words[i] == '--prefix') and 2 or 1)
+        end
+      else
+        break
+      end
+    end
+    local norm = {}
+    for k = i, #words do
+      local w = words[k]
+      if k == i and w:match('^python[%d%.]*$') then
+        w = 'python'
+      end
+      w = w:gsub('^%./', '')
+      table.insert(norm, w)
+    end
+    if #norm > 0 then
+      table.insert(out, norm)
+    end
+  end
+  return out
+end
+
+local function is_script(w)
+  return w:match('%.py$') or w:match('%.sh$') or w:match('%.bash$')
+end
+
+--- Prefix of a run command: the program and its entry (script or module),
+--- e.g. { 'python', '-m', 'pkg.train' }, { 'torchrun', 'train.py' },
+--- { 'bash', 'scripts/run.sh' }, { 'make', 'train' }. nil: not a run (setup,
+--- tests, tools) or no entry.
+---@param words string[] a segment from M.segments
+---@return string[]?
+function M.entry_prefix(words)
+  local prog = words[1]
+  if not prog or NOT_RUNS[prog] or prog:match('^<') then
+    return nil
+  end
+  if prog == 'python' then
+    local i = 2
+    while words[i] do
+      local w = words[i]
+      if w == '-m' then
+        local mod = words[i + 1]
+        if not mod or NOT_RUN_MODULES[mod] then
+          return nil
+        end
+        if LAUNCHER_MODULES[mod] then
+          for k = i + 2, #words do
+            if is_script(words[k]) then
+              return { 'python', '-m', mod, words[k] }
+            end
+          end
+          return { 'python', '-m', mod }
+        end
+        return { 'python', '-m', mod }
+      elseif w == '-c' then
+        return nil
+      elseif w:match('^%-') then
+        i = i + 1
+      elseif is_script(w) then
+        if w == 'setup.py' or w:match('/setup%.py$') or w == 'manage.py' then
+          return nil
+        end
+        return { 'python', w }
+      else
+        return nil
+      end
+    end
+    return nil
+  end
+  if LAUNCHERS[prog] then
+    local first = prog == 'accelerate' and 3 or 2
+    if prog == 'accelerate' and words[2] ~= 'launch' then
+      return nil
+    end
+    for k = first, #words do
+      local w, module = words[k], false
+      if w == '-m' and words[k + 1] then
+        w, module = words[k + 1], true -- torchrun -m pkg.train
+      end
+      if module or is_script(w) then
+        return vim.list_extend(prog == 'accelerate' and { 'accelerate', 'launch' } or { prog }, { w })
+      end
+    end
+    return nil
+  end
+  if prog == 'bash' or prog == 'sh' or prog == 'zsh' then
+    local w = words[2]
+    return (w and not w:match('^%-')) and { prog, w } or nil
+  end
+  -- `train.sh`, `scripts/run.sh` (arguments vary between runs): the script;
+  -- `make train`, `just train`, a console script: the program and its first
+  -- plain word
+  if is_script(prog) or prog:find('/', 1, true) then
+    return { prog }
+  end
+  local w = words[2]
+  if (prog == 'make' or prog == 'just' or prog == 'task') and (not w or NOT_TARGETS[w]) then
+    return nil
+  end
+  if w and not (w:match('^%-') or w:match('[<>{}%$%[%]=]') or w:match('%.%.%.')) then
+    return { prog, w }
+  end
+  return { prog }
+end
+
+--- Entry commands of the "How to run" section of the ledger's overview.md:
+--- every command in backticks (inline or in a fenced block) that is a run.
+---@param text string overview.md
+---@return {command:string, prefix:string[]}[]
+function M.ledger_commands(text)
+  local Ledger = require('coagent.agent.ledger')
+  local doc = Ledger.parse(text or '')
+  local sec = Ledger.section(doc, 'How to run')
+  if not sec then
+    return {}
+  end
+  local cmds = {}
+  local fence = false
+  for _, line in ipairs(vim.split(sec.body, '\n', { plain = true })) do
+    if line:match('^%s*```') or line:match('^%s*~~~') then
+      fence = not fence
+    elseif fence then
+      local l = vim.trim((line:gsub('^%s*%$%s+', '')))
+      if l ~= '' and not l:match('^#') then
+        table.insert(cmds, l)
+      end
+    else
+      for tok in line:gmatch('`([^`\n]+)`') do
+        table.insert(cmds, vim.trim((tok:gsub('^%$%s+', ''))))
+      end
+    end
+  end
+  local out, seen = {}, {}
+  for _, cmd in ipairs(cmds) do
+    for _, words in ipairs(M.segments(cmd)) do
+      local prefix = M.entry_prefix(words)
+      -- a single word without arguments is a path mentioned in the text
+      -- (`configs/train.yaml`), not a command, unless it is a script
+      if prefix and (#words > 1 or is_script(words[1])) then
+        local key = table.concat(prefix, ' ')
+        if not seen[key] then
+          seen[key] = true
+          table.insert(out, { command = cmd, prefix = prefix })
+        end
+      end
+    end
+  end
+  return out
+end
+
+--- Does a segment run the entry `prefix`? Same program; the other words of
+--- the prefix appear in order (launcher options and arguments may sit in
+--- between: `torchrun --nproc_per_node 8 train.py --lr 1e-3`).
+local function runs(words, prefix)
+  if words[1] ~= prefix[1] then
+    return false
+  end
+  local k = 2
+  for i = 2, #words do
+    if k > #prefix then
+      break
+    end
+    if words[i] == prefix[k] then
+      k = k + 1
+    end
+  end
+  return k > #prefix
+end
+
+--- Entry prefixes from the project ledger (re-read when overview.md changes).
+---@return {command:string, prefix:string[]}[]
+function Log:ledger_entries()
+  if self.config.from_ledger == false or not self.ledger or not self.ledger:enabled() then
+    return {}
+  end
+  local path = self.ledger:path('overview')
+  local st = vim.uv.fs_stat(path)
+  if not st then
+    self.ledger_cache = nil
+    return {}
+  end
+  local stamp = path .. ':' .. st.size .. ':' .. st.mtime.sec .. ':' .. (st.mtime.nsec or 0)
+  if not (self.ledger_cache and self.ledger_cache.stamp == stamp) then
+    self.ledger_cache = { stamp = stamp, entries = M.ledger_commands(util.read_file(path) or '') }
+  end
+  return self.ledger_cache.entries
+end
+
+--- Does `command` look like a training / evaluation run? Returns how it was
+--- recognized: 'ledger' (an entry command of the project ledger) or
+--- 'pattern' (experiments.commands).
+---@param command string
+---@return boolean, string?
 function Log:matches(command)
   if not self:enabled() or type(command) ~= 'string' then
     return false
@@ -489,10 +737,20 @@ function Log:matches(command)
       return false
     end
   end
+  local entries = self:ledger_entries()
+  if #entries > 0 then
+    for _, words in ipairs(M.segments(command)) do
+      for _, e in ipairs(entries) do
+        if runs(words, e.prefix) then
+          return true, 'ledger'
+        end
+      end
+    end
+  end
   for _, p in ipairs(self.config.commands or {}) do
     local ok, hit = pcall(string.find, command, p)
     if ok and hit then
-      return true
+      return true, 'pattern'
     end
   end
   return false
@@ -589,16 +847,28 @@ end
 ---@field entry Coagent.ExperimentEntry
 ---@field finish fun(res:{code:integer?, output:string?, duration_ms:integer?, timed_out:boolean?, killed:boolean?, error:string?}):Coagent.ExperimentEntry
 
---- Start recording a run when `command` matches (or `opts.force`).
+--- Start recording a run when `command` matches (or `opts.force`: the
+--- model's experiment = true, /exp run).
 ---@param command string
 ---@param cwd string absolute working directory
----@param opts {source:string?, force:boolean?}?
+---@param opts {source:string?, force:boolean?, name:string?}?
 ---@return Coagent.ExperimentRun?
 function Log:begin(command, cwd, opts)
   opts = opts or {}
-  if not self:enabled() or not (opts.force or self:matches(command)) then
+  if not self:enabled() then
     return nil
   end
+  local detected
+  if opts.force then
+    detected = opts.source == 'user' and 'manual' or 'flag'
+  else
+    local hit, how = self:matches(command)
+    if not hit then
+      return nil
+    end
+    detected = how
+  end
+  local name = type(opts.name) == 'string' and vim.trim(opts.name) ~= '' and util.ellipsize(util.redact(vim.trim(opts.name)), 80) or nil
   local entries = self:list()
   local id = (#entries > 0 and entries[#entries].id or 0) + 1
   local settings, settings_order = M.settings(util.redact(command))
@@ -609,6 +879,8 @@ function Log:begin(command, cwd, opts)
     command = util.redact(command),
     cwd = self.ws:display(cwd or self.ws.root),
     source = opts.source or 'agent',
+    name = name,
+    detected = detected,
     status = 'running',
     settings = settings,
     settings_order = settings_order,
@@ -648,6 +920,14 @@ function Log:begin(command, cwd, opts)
     end,
   }
 end
+
+--- How a run was recognized (show_text).
+M.DETECTED = {
+  flag = 'marked by the agent',
+  ledger = 'ledger entry command',
+  pattern = 'experiments.commands',
+  manual = '/exp run',
+}
 
 ---@param id integer|string
 ---@param text string
@@ -775,7 +1055,7 @@ function M.table_lines(all, shown, cfg, opts)
       short_time(e.time),
       status_text(e),
       e.duration_ms and util.format_duration(e.duration_ms) or '-',
-      short_command(e.command, opts.command_width or 40),
+      short_command(e.name and ('[' .. e.name .. '] ' .. e.command) or e.command, opts.command_width or 40),
     }
     for _, k in ipairs(cols) do
       local v = e.metrics and e.metrics[k]
@@ -847,15 +1127,16 @@ function M.table_text(log, opts)
   if #all == 0 then
     return {
       'No experiments recorded for this project yet.',
-      'Runs of commands matching experiments.commands (e.g. python train.py / eval.py) are recorded,',
-      'or record any command with /exp run <command>.',
+      'Runs are recorded when the agent marks a command as an experiment, when it starts like a "How to run"',
+      'command of the project ledger (/ledger init), or when it matches experiments.commands (python train.py,',
+      'torchrun, accelerate launch, python -m pkg.train, ...); record any command with /exp run <command>.',
     }
   end
   local shown = all
   if opts.filter and opts.filter ~= '' then
     local f = opts.filter:lower()
     shown = vim.tbl_filter(function(e)
-      if e.command:lower():find(f, 1, true) then
+      if e.command:lower():find(f, 1, true) or (e.name or ''):lower():find(f, 1, true) then
         return true
       end
       for _, n in ipairs(e.notes or {}) do
@@ -928,10 +1209,10 @@ function M.show_text(log, e, opts)
   opts = opts or {}
   local best = M.bests(log:list(), log.config)
   local lines = {
-    string.format('# Experiment #%d', e.id),
+    string.format('# Experiment #%d%s', e.id, e.name and (' ' .. e.name) or ''),
     '',
-    string.format('- When: %s  (%s, %s%s)', os.date('%Y-%m-%d %H:%M:%S', e.time), e.source or '?', status_text(e),
-      e.duration_ms and (', ' .. util.format_duration(e.duration_ms)) or ''),
+    string.format('- When: %s  (%s, %s%s%s)', os.date('%Y-%m-%d %H:%M:%S', e.time), e.source or '?', status_text(e),
+      e.duration_ms and (', ' .. util.format_duration(e.duration_ms)) or '', e.detected and (', recorded: ' .. (M.DETECTED[e.detected] or e.detected)) or ''),
     '- Command: `' .. e.command .. '`',
     '- Cwd: ' .. (e.cwd or '.'),
     '- ' .. git_line(e),

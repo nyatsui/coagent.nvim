@@ -552,11 +552,25 @@ The experiment log records ML training / evaluation runs and their metrics
 per project, so runs can be compared and handed to a web chat or to the
 agent without requests. Nothing in it sends a model request.
 
-A run is recorded when a command that matches `experiments.commands` (Lua
-patterns; default: python scripts with train / eval / test in the name,
-torchrun, accelerate launch; `exclude` drops pytest) runs through
-run_command or start_process, and for every "/exp run <command>". Stored:
-id, time, command, cwd, source (agent, agent:bg, user), git HEAD and
+A command that runs through run_command or start_process is recorded
+when (whatever the entry point is called):
+1. the agent marks it: both tools take `experiment = true` and an optional
+   short `name`; the system prompt asks for it on every training /
+   evaluation run (bash scripts/run.sh, python -m pkg.train, make sweep);
+2. it starts like an entry command of the project ledger: the commands in
+   backticks under "How to run" in overview.md become prefix matches (the
+   program and its entry script or module, e.g. "bash scripts/run.sh",
+   "python -m vision.train", "torchrun ... -m vision.train"; setup / test
+   commands are skipped), re-read when the ledger changes
+   (`experiments.from_ledger`);
+3. it matches `experiments.commands` (Lua patterns, an extra; default:
+   python scripts with train / eval / test in the name, python -m ...train
+   / ...eval, and the launchers torchrun, accelerate launch, deepspeed,
+   python -m torch.distributed.run / accelerate.commands.launch);
+unless it matches `exclude` (pytest, unittest) and was not marked. Every
+"/exp run <command>" is recorded too. Stored:
+id, time, command, cwd, source (agent, agent:bg, user), run name, how it
+was recognized, git HEAD and
 branch, a short hash of `git diff HEAD` (the diff itself up to
 `max_diff_bytes`), changed files, untracked names, duration, exit code,
 the output tail, settings from the command line (--lr 1e-3, --epochs=10,
@@ -573,6 +587,21 @@ LR=0.1, model.lr=0.01) and metrics:
 The LAST value per key wins. Foreground runs are recorded on exit (the
 result ends with "[experiment #N recorded: ...]"); background runs when the
 process exits, with a notice in the panel.
+
+                                                    *coagent-wait-process*
+Long runs are hands-off. run_command stops at `commands.max_timeout_ms`
+(15 minutes); for training / evaluation that may take longer the agent
+calls start_process (experiment = true) and then
+`wait_process(id, until, timeout_ms)`. It blocks inside the tool until the
+process exits (until = "exit", the default) or a Lua pattern appears in
+its new output, at most `background.max_lifetime_ms`. While it waits no
+model request is made (the prompt forbids polling read_process_output),
+the tool item shows the runtime and the last output line, and the wait is
+not counted toward `limits.max_duration_ms`. <C-c> / :CoagentStop stops
+the task and the run; p / :CoagentPause only stops waiting (the run keeps
+going; /resume waits again). The result has the exit code, the tail of the
+new output and the experiment's metrics line. wait_process changes nothing
+and needs no approval; start_process asks like run_command.
 
 Storage: stdpath('state')/coagent/experiments/<project>-<hash>.jsonl,
 outside the repository, directory 0700, file 0600, secrets masked.
@@ -607,7 +636,8 @@ runs whose command or notes contain it.
 >lua
   experiments = {
     enabled = true,
-    commands = { 'python[%d%.]*%s.-train[%w_%-%.]*%.py' },
+    from_ledger = true,  -- "How to run" commands of the ledger mark runs
+    commands = { 'python[%d%.]*%s.-train[%w_%-%.]*%.py', 'torchrun%s' },
     exclude = { 'pytest' },
     metrics = { 'loss', 'val_loss', 'acc', 'f1', 'epoch', 'lr' },
     patterns = {}, json_lines = true,
@@ -780,8 +810,14 @@ Kinds and output contracts (delegate.language = 'ja' for Japanese):
       choose: merge with the agent, overwrite after review, or skip.
       Snippets that cannot be placed deterministically go to ONE agent step
       (read + edit_file/write_file only). The result is recorded in the
-      ledger and local follow-ups are offered (verification commands,
-      experiments from the analysis).
+      ledger and local follow-ups are offered (verification commands, one
+      or all experiments from the analysis, the plan, review fixes). Their
+      prompts ask for start_process (experiment = true) + wait_process for
+      long commands and a report of the metrics.
+      `delegate.auto_followup` = 'verify' | 'experiments' | 'first' starts
+      the matching follow-up by itself after a clean import (every file
+      applied, nothing denied; approvals follow the current mode); false
+      (default), no match or a denied file: the selection is offered.
 
 The agent can delegate with the `delegate` tool; it ALWAYS asks for
 approval (also in auto mode) and shows the bundle summary. The task then

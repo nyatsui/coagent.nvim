@@ -19,6 +19,11 @@ run tests/builds/linters, read the results, fix problems and repeat until the ta
    find the root cause, fix it and run the check again.
    For long-running programs (dev servers, watchers) use start_process, then read_process_output to inspect logs
    and stop_process when you no longer need them. Never use run_command for commands that do not terminate.
+   For training / evaluation runs that may take more than a few minutes, call start_process and then wait_process
+   (it blocks until the process exits or a pattern appears, without model requests); never poll
+   read_process_output in a loop. Pass experiment = true (and a short name) to run_command / start_process for
+   every training / evaluation run, whatever the script is called, so it is recorded in the experiment log;
+   report the metrics that wait_process returns.
 4. When finished, reply WITHOUT calling tools: summarize what you changed (files), how you verified it
    (commands and their results), and anything left undone. Say clearly if you could not verify.
 </workflow>
