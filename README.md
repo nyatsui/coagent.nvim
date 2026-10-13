@@ -70,8 +70,8 @@ I'll find the `add` implementation and its tests.
   experiment updates it with one small request, local tasks get a compact digest, and `ledger.bundle()` hands the whole
   picture to another chat. Your edits are never overwritten without a diff
 - **Delegating subtasks to another chat** — `/delegate analyze|implement|fix|review` writes a self-contained bundle
-  (ledger, full sources, environment, git diff, full command outputs, attachments, output contract) for a web chat you
-  operate by hand; `/receive` maps the downloaded files back (renames, base drift) and applies them through the normal
+  (ledger, full sources, environment, git diff, full command outputs, attachments, output contract; `bundle.md` = one
+  file to attach) in a git-ignored `.coagent/delegate/<id>/` (or `~/coagent/`) for a web chat you operate by hand; `/receive` maps the downloaded files back (renames, base drift) and applies them through the normal
   review. The agent can delegate too (always with approval) and waits in `WAITING_EXTERNAL`. coagent never automates
   the other chat
 - **`#url` / `#clipboard`** — attach the text of a web page you typed, or the clipboard
@@ -817,9 +817,8 @@ writes the prompt and contract in Japanese; fixed headers and file names stay as
 | `review` | code review | `## Findings` by severity (`### Critical` / `Major` / `Minor` / `Nit`) with `path:line` |
 | your own | `delegate.kinds = { name = { output = 'text'\|'files', description, contract, default_instruction } }` | your contract (`name = false` removes a kind) |
 
-**The bundle.** `/delegate <kind> [instruction]` writes
-`stdpath('state')/coagent/delegate/<project>/<id>/` (or `delegate.dir`), copies `00_prompt.md` to the `+` register,
-opens the folder and registers the subtask as pending in the ledger (`subtasks.md`):
+**The bundle.** `/delegate <kind> [instruction]` writes a folder `<id>/` (see "Where the bundle goes" below), copies
+`00_prompt.md` to the `+` register and registers the subtask as pending in the ledger (`subtasks.md`):
 
 | File | Content |
 |---|---|
@@ -827,11 +826,43 @@ opens the folder and registers the subtask as pending in the ledger (`subtasks.m
 | `01_ledger.md` | the project ledger (overview, goals, status, decisions, recent subtasks; `ledger.bundle()`). Without a ledger: a local overview (directory tree, README, recent requests) |
 | `02_sources.md` | the **full** contents of the relevant source files: the files you name (`@file`, folders too), the files changed in this session and the core files of the ledger overview; `all` sends every source file. Generous cap (`max_source_bytes`, 2 MB): files beyond it are left out **whole** and listed, never cut |
 | `03_context.md` | environment (OS, Python, PyTorch / CUDA / cuDNN, `nvidia-smi`), git HEAD / status / `git diff HEAD`, the last command outputs and tracebacks **in full**, the experiment table |
+| `bundle.md` | `01` + `02` + `03` in **one file**, unchanged, each between `===== BEGIN <file> =====` / `===== END <file> =====` lines (`delegate.combined = false` leaves it out) |
 | attachments | copies of CSV / logs / plots as-is (`@results.csv`, `@plots/loss.png`; data files you mention become attachments) |
 | `manifest_expected.json` | paths and sha256 of the sources sent (for base-drift detection on import) |
 
-Then: open the other chat, paste `00_prompt.md`, attach `01`–`03` and the attachments, and send. When the answer is
-there, copy it (or download the files it returns).
+Then: open the other chat, paste `00_prompt.md`, attach **either `bundle.md` or `01`–`03`** (same content;
+`00_prompt.md` tells the other chat that both are possible) plus the attachments, and send. When the answer is there,
+copy it (or download the files it returns).
+
+**Where the bundle goes** (`delegate.location`) — chosen so the folder is easy to reach from the browser's file picker:
+
+| `location` | Folder | Notes |
+|---|---|---|
+| `'repo'` (default) | `<repo>/.coagent/delegate/<id>/` | next to your code, so the picker is already close. `.coagent/` is added **once** to `.git/info/exclude` (local to your clone, never committed) unless git already ignores it; **the shared `.gitignore` is never touched**. Outside git nothing is written besides the bundle |
+| `'home'` | `~/coagent/<project>/<id>/` (`delegate.home_dir`) | outside the repository, no hidden folder on the way |
+| `'state'` | `stdpath('state')/coagent/delegate/<project>-<hash>/<id>/` | the old location |
+
+`delegate.dir` is an explicit override (`<dir>/<project>-<hash>/<id>/`). Every location keeps a **`latest`** symlink to
+the newest bundle, so the picker path never changes: `<repo>/.coagent/delegate/latest/` (skipped silently where
+symlinks cannot be made). Folders are `0700`, files `0600`. Bundles written in another location earlier (the state
+folder before this option existed, or before you switched) stay in `/delegate list`, `/delegate open` and `/receive`;
+ids continue after them.
+
+**`.coagent/` stays out of the project.** coagent never lists, searches, mentions, scans or sends it: `glob`, `search`
+and `list_dir` skip it unless the path names it, `@` completion, `02_sources.md` and `/delegate all`, `/ledger init` /
+`refresh` and the stale check, `git_status` / `git_diff`, `03_context.md` and the experiment records (git pathspec
+`:(exclude).coagent`), format-after-edit and diagnostics all leave it out. `.coagent/**` is in the default
+`auto.protected_globs` (reads and commands that touch it ask), and the write tools **refuse** it outright: only coagent
+itself writes bundles. With a ledger kept in `.coagent/ledger` (`ledger.dir_in_repo`, maybe committed), only
+`.coagent/delegate/` is excluded.
+
+**After writing**, the notice shows the folder relative to the repository (`Folder: .coagent/delegate/3/`), the
+`latest` path and the full path, and a dialog offers: **`y`** copy the folder path to the `+` register (paste it into
+the file picker: macOS `Cmd+Shift+G`, Linux GTK `Ctrl+L`, Windows the address bar), **`o`** open the folder
+(`vim.ui.open`; over SSH or without a UI the path is printed instead), **`p`** copy `00_prompt.md` again
+(`delegate.offer = false`: no dialog; `delegate.open_folder = true`: open the folder right away). `/delegate open <id>`
+opens the folder and copies its path too. In the macOS picker, `.coagent` is hidden: `Cmd+Shift+G` with the copied
+path (or `Cmd+Shift+.`) gets there; `location = 'home'` avoids the hidden folder.
 
 **Receiving.** `/receive [id]` (the waiting or newest open subtask by default):
 
@@ -874,7 +905,7 @@ as a manual result), `/delegate cancel 3` or `/stop` end the task.
 |---|---|
 | `/delegate <kind> [all] [instruction, @files]` | Write a bundle (`all` = every source file; `@data.csv` attaches data) |
 | `/delegate list` | Subtasks of this project with their state (pending / waiting / received / cancelled) |
-| `/delegate open <id>` | Open the bundle folder and copy `00_prompt.md` again |
+| `/delegate open <id>` | Open the bundle folder (prints it over SSH) and copy its path; the dialog offers `p` to copy `00_prompt.md` again |
 | `/delegate cancel <id>` / `detach` | Drop a subtask / stop waiting for it |
 | `/receive [id] [paste\|clipboard\|files]` | Import a result (paste buffer by default; `files` = downloads only) |
 
@@ -883,7 +914,8 @@ as a manual result), `/delegate cancel 3` or `/stop` end the task.
 ```text
 /exp                                   training plateaus at val_acc 0.71 (runs #12-#15)
 /delegate analyze why does val_acc plateau? @runs/metrics.csv @plots/loss.png
-    -> paste 00_prompt.md into the other chat, attach 01_ledger.md 02_sources.md 03_context.md metrics.csv loss.png
+    -> paste 00_prompt.md into the other chat; y copies the folder path for the file picker;
+       attach bundle.md metrics.csv loss.png (from .coagent/delegate/latest/)
 /receive 4                             paste the report; the ledger records findings and plan
     -> follow-up "Run experiment: bash scripts/run.sh --lr 3e-4 --warmup 500"   (local, with approval;
        started by itself with delegate.auto_followup = 'experiments'; start_process + wait_process, metrics reported)
@@ -897,8 +929,13 @@ as a manual result), `/delegate cancel 3` or `/stop` end the task.
 delegate = {
   language = 'en',            -- 'ja': Japanese prompts and contracts
   download_dir = nil,         -- nil = $XDG_DOWNLOAD_DIR / xdg-user-dir / ~/Downloads
-  dir = nil,                  -- nil = stdpath('state')/coagent/delegate
-  clipboard = true, open_folder = true,
+  location = 'repo',          -- 'repo' (.coagent/delegate) | 'home' (home_dir/<project>) | 'state'
+  home_dir = '~/coagent',
+  dir = nil,                  -- explicit folder, overrides location
+  combined = true,            -- bundle.md = 01 + 02 + 03 in one file
+  clipboard = true,           -- 00_prompt.md to the + register
+  offer = true,               -- dialog: y copy the folder path, o open it, p copy the prompt
+  open_folder = false,        -- open the folder right away
   review_imports = true,      -- imported files always ask, even in auto mode
   auto_followup = false,      -- 'verify' | 'experiments' | 'first': start that follow-up after /receive
   sources = { changed = true, core = true },
@@ -1158,7 +1195,7 @@ require('coagent').setup({
   references = { url = true, url_max_bytes = 32 * 1024, clipboard_max_bytes = 32 * 1024 },
   inline = { context_lines = 40, keymaps = { accept = 'ga', reject = 'gr', retry = 'gi', diff = 'gd' } },
   -- delegating subtasks to another chat (see "Delegating subtasks")
-  delegate = { language = 'en', download_dir = nil, review_imports = true, auto_followup = false, max_source_bytes = 2 * 1024 * 1024, kinds = {} },
+  delegate = { location = 'repo', combined = true, language = 'en', download_dir = nil, review_imports = true, auto_followup = false, max_source_bytes = 2 * 1024 * 1024, kinds = {} },
   notify = { on = { 'approval', 'done', 'failed', 'limit', 'waiting', 'stopped' }, bell = true, desktop = false, only_when_unfocused = true },
 })
 ```

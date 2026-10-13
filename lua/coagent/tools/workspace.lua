@@ -8,6 +8,30 @@
 local Workspace = {}
 Workspace.__index = Workspace
 
+--- coagent's own folder in the repository (/delegate bundles with
+--- delegate.location = 'repo', optionally the ledger). It is never listed,
+--- searched, scanned or sent, and the agent cannot write into it.
+Workspace.INTERNAL = '.coagent'
+--- git pathspec that leaves it out of diffs, status and file lists
+--- (relative to the workspace root, the cwd of coagent's git calls).
+Workspace.GIT_EXCLUDE = ':(exclude).coagent'
+
+--- `-- <the whole repository> <minus .coagent>` for git diff / status;
+--- `here` = the cwd's tree instead (ls-files, whose paths are cwd-relative).
+---@param here boolean?
+---@return string[]
+function Workspace.git_pathspec(here)
+  return { '--', here and '.' or ':/', Workspace.GIT_EXCLUDE }
+end
+
+--- Is `rel` (relative to the root) inside coagent's own folder?
+---@param rel string?
+---@return boolean
+function Workspace.is_internal(rel)
+  rel = (rel or ''):gsub('^%./', '')
+  return rel == Workspace.INTERNAL or vim.startswith(rel, Workspace.INTERNAL .. '/')
+end
+
 --- Detect the workspace root: git toplevel of `dir`, or `dir` itself.
 ---@param dir string?
 ---@return string

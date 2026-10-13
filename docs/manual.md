@@ -249,9 +249,19 @@ Web チャット。社内の Microsoft 365 Copilot など）に任せ、結果�
    変更・新規ファイルを**同じファイル名で全文**ダウンロード + Verification）、`fix`（Cause + implement と同じ）、`review`
    （重大度別の Findings、`path:line`）、設定した独自の種類（`delegate.kinds`）。`@file` でソース（フォルダ可）、`@results.csv` や
    `@loss.png` などのデータは添付。`/delegate implement all ...` で全ソース。`delegate.language = 'ja'` で日本語
-2. バンドルのフォルダ（`stdpath('state')/coagent/delegate/<project>/<id>/`）が開き、`00_prompt.md` が `+` レジスタに入ります。
-   別のチャットに貼り、`01_ledger.md`（台帳。無ければローカルの概要）・`02_sources.md`（ソース全文。上限超過は丸ごと外して一覧）・
-   `03_context.md`（環境・git・直近のコマンド出力の全文・実験表）と添付を添付して送信
+2. バンドルがリポジトリ内の `.coagent/delegate/<id>/` に書き出され、`00_prompt.md` が `+` レジスタに入ります。通知に
+   `Folder: .coagent/delegate/3/`・常に最新を指す `.coagent/delegate/latest/`・フルパスが出て、ダイアログで `y`（フォルダのパスを
+   コピー。ファイル選択ダイアログで macOS は `Cmd+Shift+G`、Linux は `Ctrl+L`、Windows はアドレスバーに貼る）・`o`（フォルダを開く。
+   SSH 先ではパスを表示）・`p`（プロンプトを再コピー）を選べます。別のチャットに貼り、**`bundle.md`**（下の 3 つを 1 ファイルに
+   まとめたもの）**か** `01_ledger.md`（台帳。無ければローカルの概要）・`02_sources.md`（ソース全文。上限超過は丸ごと外して一覧）・
+   `03_context.md`（環境・git・直近のコマンド出力の全文・実験表）のどちらかと、添付ファイルを添付して送信
+   - 置き場所は `delegate.location`: `'repo'`（既定。`.coagent/` を `.git/info/exclude` に一度だけ追加。この clone だけの設定で
+     コミットされず、共有の `.gitignore` には触れません。すでに無視されていれば何もしません）、`'home'`（`~/coagent/<project>/<id>/`、
+     `delegate.home_dir`）、`'state'`（以前の `stdpath('state')/coagent/delegate/<project>-<hash>/<id>/`）。`delegate.dir` を指定すると
+     それが優先。どの場所にも `latest` リンクがあり、以前の場所のバンドルも一覧・`/delegate open`・`/receive` で使えます
+   - `.coagent/` は glob・search・list_dir（パスで明示しない限り）、`@` 補完、`02_sources.md` と `/delegate all`、台帳の生成・更新と
+     古さの判定、`git_status`・`git_diff`・`03_context.md`・実験の記録（pathspec `:(exclude).coagent`）、整形・診断の対象外です。
+     既定の `auto.protected_globs` に `.coagent/**` があり、書き込みツールは拒否します（バンドルを書くのは coagent だけ）
 3. `/receive [id]` — 下書きバッファ（`+` レジスタの内容入り）で回答を確認して `:w`。ファイルを返す種類は、ダウンロードフォルダ
    （`delegate.download_dir`）のバンドルより新しいファイルを Manifest 表・送ったソース・ワークスペースの同名ファイル（1 つだけのとき）
    の順に対応付けます。`train (1).py` は最新が優先。不明な名前は確認。貼り付けた `### path` の全文ブロックや diff も取り込みます
@@ -266,7 +276,7 @@ Web チャット。社内の Microsoft 365 Copilot など）に任せ、結果�
 エージェント自身も `delegate` ツールで任せられます（**常に承認が必要**。承認画面にバンドルの概要）。承認後のタスクは
 `WAITING_EXTERNAL`（winbar `waiting: analyze #3`、通知、セッションに保存）になり、新しいメッセージは受け付けません。
 `/receive 3` で結果を `delegate` の結果として再開、`/delegate detach` で待機をやめて別の作業へ（あとで `/receive 3`）、
-`/delegate cancel 3` / `/stop` で終了。`/delegate list`・`/delegate open <id>` で一覧とフォルダ。`:CoagentDelegate`・`:CoagentReceive` も同じ。
+`/delegate cancel 3` / `/stop` で終了。`/delegate list`・`/delegate open <id>`（フォルダを開いてパスをコピー）で一覧とフォルダ。`:CoagentDelegate`・`:CoagentReceive` も同じ。
 
 ML の流れの例: `/exp` で頭打ちを確認 → `/delegate analyze 頭打ちの理由は? @runs/metrics.csv @plots/loss.png` → 回答を
 `/receive` → 提案された実験 `bash scripts/run.sh --lr 3e-4 --warmup 500` をローカルで実行（`start_process` + `wait_process`）→ `/delegate implement 計画どおり

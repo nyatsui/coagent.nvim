@@ -15,6 +15,7 @@
 --- wins) and compacted when it grows. Views (/exp ...) and the read-only
 --- `experiments` tool only read this file: no model request.
 local util = require('coagent.core.util')
+local Workspace = require('coagent.tools.workspace')
 
 local M = {}
 
@@ -794,7 +795,7 @@ function Log:_git_info()
   local info = { head = vim.trim(head) }
   local branch = git(root, { 'rev-parse', '--abbrev-ref', 'HEAD' })
   info.branch = branch and vim.trim(branch) or nil
-  local diff = git(root, { 'diff', 'HEAD', '--no-color', '--no-ext-diff' }) or ''
+  local diff = git(root, vim.list_extend({ 'diff', 'HEAD', '--no-color', '--no-ext-diff' }, Workspace.git_pathspec())) or ''
   if diff ~= '' then
     info.diff_hash = vim.fn.sha256(diff):sub(1, 8)
     local max = self.config.max_diff_bytes or (100 * 1024)
@@ -806,7 +807,7 @@ function Log:_git_info()
       info.diff = redacted
     end
     local stat = {}
-    for line in (git(root, { 'diff', 'HEAD', '--numstat' }) or ''):gmatch('[^\n]+') do
+    for line in (git(root, vim.list_extend({ 'diff', 'HEAD', '--numstat' }, Workspace.git_pathspec())) or ''):gmatch('[^\n]+') do
       local a, r, f = line:match('^(%S+)%s+(%S+)%s+(.+)$')
       if f then
         table.insert(stat, { file = f, added = tonumber(a) or a, removed = tonumber(r) or r })
@@ -815,7 +816,7 @@ function Log:_git_info()
     info.diff_stat = stat
   end
   local untracked = {}
-  for f in (git(root, { 'ls-files', '--others', '--exclude-standard' }) or ''):gmatch('[^\n]+') do
+  for f in (git(root, vim.list_extend({ 'ls-files', '--others', '--exclude-standard' }, Workspace.git_pathspec(true))) or ''):gmatch('[^\n]+') do
     if #untracked >= 50 then
       break
     end
@@ -1302,7 +1303,7 @@ function M.diff_text(log, a, b)
   }
   if a.head and b.head and a.head ~= b.head then
     table.insert(lines, string.format('# HEAD changed: committed changes %s..%s:', a.head:sub(1, 10), b.head:sub(1, 10)))
-    local stat = git(log.ws.root, { 'diff', '--stat', a.head, b.head })
+    local stat = git(log.ws.root, vim.list_extend({ 'diff', '--stat', a.head, b.head }, Workspace.git_pathspec()))
     for _, l in ipairs(util.lines(stat or '(not available)')) do
       if l ~= '' then
         table.insert(lines, '#   ' .. l)

@@ -177,7 +177,7 @@ local defaults = {
     -- File writes allowed without approval in auto mode (globs relative to root). Empty = all.
     writable_globs = {},
     -- Never auto-approved, even inside the workspace.
-    protected_globs = { '.git/**', '.env', '.env.*', '**/*.pem', '**/*.key', '**/id_rsa*', '**/.ssh/**' },
+    protected_globs = { '.git/**', '.coagent/**', '.env', '.env.*', '**/*.pem', '**/*.key', '**/id_rsa*', '**/.ssh/**' },
   },
 
   -- Judge mode (:CoagentMode judge, like Claude Code's "auto" permission mode).
@@ -358,19 +358,33 @@ local defaults = {
   -- approval) writes a self-contained bundle folder - 00_prompt.md (copied to
   -- the + register), 01_ledger.md (the project ledger), 02_sources.md (FULL
   -- source files), 03_context.md (environment, git, command outputs,
-  -- experiments), attachments, manifest_expected.json - and /receive [id]
+  -- experiments), bundle.md (01-03 in one file), attachments,
+  -- manifest_expected.json - and /receive [id]
   -- imports the reply: pasted text and/or downloaded files, every change
   -- through the normal review (diff, hunks, approval, checks, /rewind).
   -- Follow your organization's rules for what may be pasted into external tools.
   delegate = {
     enabled = true,
-    dir = nil, -- nil = stdpath('state')/coagent/delegate (one folder per project)
+    -- Where bundles go (easy to reach from the browser's file picker):
+    --   'repo'  <root>/.coagent/delegate/<id>/ - .coagent/ is added to
+    --           .git/info/exclude (local, never committed; .gitignore is not
+    --           touched) unless git ignores it already; coagent never lists,
+    --           searches or sends it, and the agent cannot write it
+    --   'home'  <home_dir>/<project>/<id>/ (outside the repository)
+    --   'state' stdpath('state')/coagent/delegate/<project>-<hash>/<id>/
+    -- Every location keeps `latest` -> the newest bundle. Bundles in the other
+    -- locations stay listed, openable and importable.
+    location = 'repo',
+    home_dir = '~/coagent',
+    dir = nil, -- explicit folder (overrides location): <dir>/<project>-<hash>/<id>/
     -- where the browser saves downloads; nil = $XDG_DOWNLOAD_DIR,
     -- `xdg-user-dir DOWNLOAD`, then ~/Downloads
     download_dir = nil,
     language = 'en', -- 'en' | 'ja': 00_prompt.md, output contracts, reply language
+    combined = true, -- also write bundle.md (01 + 02 + 03 in one file to attach)
     clipboard = true, -- copy 00_prompt.md to the + register
-    open_folder = true, -- open the bundle folder (vim.ui.open)
+    offer = true, -- dialog after writing: y copy the folder path, o open it, p copy the prompt
+    open_folder = false, -- open the bundle folder right away (vim.ui.open)
     review_imports = true, -- imported files always ask for approval, even in auto mode
     -- After a successful /receive: false = offer the local follow-ups in a
     -- selection (default); 'verify' = run the verification commands,
@@ -544,6 +558,10 @@ function M.setup(opts)
         vim.log.levels.WARN
       )
     end
+  end
+  local loc = (M.options.delegate or {}).location
+  if loc ~= nil and loc ~= 'repo' and loc ~= 'home' and loc ~= 'state' then
+    vim.notify(string.format("[coagent] delegate.location = %q is not 'repo' | 'home' | 'state'; 'repo' is used", tostring(loc)), vim.log.levels.WARN)
   end
   check('reasoning_effort', M.options.reasoning_effort)
   for _, role in ipairs(Roles.ROLES) do

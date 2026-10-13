@@ -4,6 +4,7 @@ local util = require('coagent.core.util')
 local process = require('coagent.tools.process')
 local sandbox = require('coagent.tools.sandbox')
 local cmdparse = require('coagent.agent.cmdparse')
+local Workspace = require('coagent.tools.workspace')
 
 local M = {}
 
@@ -209,11 +210,11 @@ M.git_status = {
     return {}
   end,
   run = function(_, ctx)
-    local st = git(ctx, { 'status', '--short', '--branch' })
+    local st = git(ctx, vim.list_extend({ 'status', '--short', '--branch' }, Workspace.git_pathspec()))
     if st.code ~= 0 then
       return { ok = false, output = 'Error: ' .. (st.stderr ~= '' and st.stderr or 'not a git repository') }
     end
-    local stat = git(ctx, { 'diff', '--stat', 'HEAD' })
+    local stat = git(ctx, vim.list_extend({ 'diff', '--stat', 'HEAD' }, Workspace.git_pathspec()))
     local out = st.stdout .. (stat.code == 0 and stat.stdout ~= '' and ('\n' .. stat.stdout) or '')
     return { ok = true, output = out, summary = (#util.lines(st.stdout) - 1) .. ' changed' }
   end,
@@ -258,6 +259,8 @@ M.git_diff = {
     table.insert(cmd, '--')
     if prepared.path then
       table.insert(cmd, prepared.path.rel)
+    else
+      vim.list_extend(cmd, { ':/', Workspace.GIT_EXCLUDE })
     end
     local res = git(ctx, cmd)
     if res.code ~= 0 then

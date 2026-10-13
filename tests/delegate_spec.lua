@@ -76,12 +76,16 @@ python train.py --lr 0.01 --epochs 5
 
 describe('external subtasks', function()
   local agent, backend, root, steps, opened, dl, cfg_extra
+  local asked, answer, remote -- the y / o / p dialog (Delegate.sys.ask)
 
   local function read(rel)
     return h.read(root .. '/' .. rel)
   end
 
   local function setup(extra, files)
+    -- dialogs scheduled by the previous bundles go nowhere
+    answer = 0
+    vim.wait(10)
     steps = {}
     opened = {}
     backend = Mock.new(function(messages, n, req)
@@ -112,6 +116,14 @@ describe('external subtasks', function()
     Delegate.sys.open = function(path)
       table.insert(opened, path)
       return true
+    end
+    asked, answer, remote = {}, 0, false
+    Delegate.sys.ask = function(msg)
+      table.insert(asked, msg)
+      return answer
+    end
+    Delegate.sys.remote = function()
+      return remote
     end
     Delegate._clear_env_cache()
     return agent.controller()
@@ -211,7 +223,7 @@ describe('external subtasks', function()
     -- the last prompt is in the + register
     local last = h.read(subs.review.dir .. '/00_prompt.md')
     assert.are.equal(last, vim.fn.getreg('+'))
-    assert.are.equal(4, #opened)
+    assert.are.equal(0, #opened) -- delegate.open_folder = false: the dialog offers it (o)
     assert.are.equal(4, #c:delegations():list())
     assert.are.equal(1, #notices(c, 'Then /receive ' .. subs.review.id))
     -- implement needs an instruction; unknown kinds are refused
@@ -293,6 +305,219 @@ describe('external subtasks', function()
     assert.is_truthy(l2:find('Use AdamW', 1, true))
     assert.is_truthy(l2:find('subtask #1 (analyze) sent', 1, true))
     assert.is_truthy(h.read(sub2.dir .. '/00_prompt.md'):find('project ledger: overview, goals, status, decisions, recent subtasks', 1, true))
+  end)
+
+  ----------------------------------------------------------------------------
+  -- Where bundles go (delegate.location)
+  ----------------------------------------------------------------------------
+
+  local function git_in(dir, args)
+    local res = vim.system(vim.list_extend({ 'git', '-C', dir }, args), { text = true }):wait()
+    return res.code, res.stdout or ''
+  end
+
+  local function count(text, pat)
+    local n = 0
+    for _ in (text or ''):gmatch(pat) do
+      n = n + 1
+    end
+    return n
+  end
+
+  it("location 'repo' (default): .coagent/delegate/<id>/, git-ignored via .git/info/exclude once, .gitignore untouched", function()
+    local files = vim.tbl_extend('force', FILES, { ['.gitignore'] = 'build/\n' })
+    local c = setup({ delegate = { dir = '' } }, files)
+    assert.are.equal('repo', Delegate.location(c.config.delegate))
+    local sub = delegate_cmd('analyze first')
+    assert.are.equal(root .. '/.coagent/delegate/1', sub.dir)
+    assert.are.equal('build/\n', read('.gitignore'))
+    local exclude = read('.git/info/exclude')
+    assert.are.equal(1, count(exclude, '\n/%.coagent/\n'), exclude)
+    assert.are.equal(0, (git_in(root, { 'check-ignore', '-q', '.coagent/delegate/1/00_prompt.md' })))
+    local _, status = git_in(root, { 'status', '--porcelain' })
+    assert.are.equal('', status) -- nothing new for git: bundles never show up as changes
+    assert.are.equal(1, #notices(c, 'Added .coagent/ to .git/info/exclude'))
+    assert.are.equal(1, #notices(c, 'Folder: .coagent/delegate/1/ (the newest bundle is always also .coagent/delegate/latest/)'))
+    assert.are.equal(1, #notices(c, 'Full path: ' .. sub.dir))
+    -- files 0600, folders 0700
+    assert.are.equal(tonumber('600', 8), bit.band(vim.uv.fs_stat(sub.dir .. '/bundle.md').mode, tonumber('777', 8)))
+    assert.are.equal(tonumber('700', 8), bit.band(vim.uv.fs_stat(sub.dir).mode, tonumber('777', 8)))
+    -- the second bundle (even after a restart) adds nothing
+    Delegate._clear_env_cache()
+    local sub2 = delegate_cmd('review second')
+    assert.are.equal(root .. '/.coagent/delegate/2', sub2.dir)
+    assert.are.equal(exclude, read('.git/info/exclude'))
+    assert.are.equal(1, #notices(c, 'Added .coagent/'))
+    assert.are.equal('build/\n', read('.gitignore'))
+    -- latest -> the newest bundle
+    assert.are.equal('2', vim.uv.fs_readlink(root .. '/.coagent/delegate/latest'))
+    assert.are.equal(h.read(sub2.dir .. '/00_prompt.md'), read('.coagent/delegate/latest/00_prompt.md'))
+    local list = vim.tbl_map(function(s)
+      return s.id
+    end, c:delegations():list())
+    assert.are.same({ 1, 2 }, list)
+  end)
+
+  it('does not touch .git/info/exclude when git already ignores .coagent/, nor outside git', function()
+    local files = vim.tbl_extend('force', FILES, { ['.gitignore'] = '.coagent/\n' })
+    setup({ delegate = { dir = '' } }, files)
+    local before = read('.git/info/exclude')
+    local sub = delegate_cmd('analyze x')
+    assert.are.equal(root .. '/.coagent/delegate/1', sub.dir)
+    assert.are.equal(before, read('.git/info/exclude'))
+    assert.are.equal('.coagent/\n', read('.gitignore'))
+    assert.are.equal(0, #notices(agent.controller(), 'Added .coagent/'))
+    -- no git: bundles still go to .coagent/delegate, nothing else is written
+    agent._reset()
+    backend = Mock.new(function()
+      return { content = 'done' }
+    end)
+    root = h.workspace(FILES)
+    agent.setup({ backend = backend, root = root, session = { persist = false }, ui = { render_throttle_ms = 0 },
+      experiments = { dir = vim.fn.tempname() }, ledger = { dir = vim.fn.tempname() }, delegate = { env_commands = {} } })
+    Delegate._clear_env_cache()
+    local ok, s2 = agent.delegate('analyze y')
+    assert.is_true(ok)
+    assert.are.equal(root .. '/.coagent/delegate/1', s2.dir)
+    assert.is_nil(vim.uv.fs_stat(root .. '/.git'))
+    assert.is_nil(vim.uv.fs_stat(root .. '/.gitignore'))
+    -- /delegate all never sends earlier bundles
+    local _, s3 = agent.delegate('analyze all everything')
+    local sources = h.read(s3.dir .. '/02_sources.md')
+    assert.is_truthy(sources:find('## train.py', 1, true))
+    assert.is_nil(sources:find('.coagent', 1, true))
+    assert.is_nil(h.read(s3.dir .. '/00_prompt.md'):find('.coagent', 1, true))
+  end)
+
+  it('keeps a ledger in .coagent/ committable: then only .coagent/delegate/ is excluded', function()
+    setup({ delegate = { dir = '' }, ledger = { dir_in_repo = '.coagent/ledger' } })
+    delegate_cmd('analyze x')
+    local exclude = read('.git/info/exclude')
+    assert.are.equal(1, count(exclude, '\n/%.coagent/delegate/\n'), exclude)
+    assert.are.equal(0, count(exclude, '\n/%.coagent/\n'))
+    assert.are_not.equal(0, (git_in(root, { 'check-ignore', '-q', '.coagent/ledger/status.md' })))
+  end)
+
+  it('bundle.md combines 01 + 02 + 03 unchanged; 00_prompt.md names both ways to attach', function()
+    local c = setup({ delegate = { dir = '' } })
+    c.session.changes:record(root .. '/src/utils.py', 'src/utils.py', 'old\n', read('src/utils.py'))
+    local sub = delegate_cmd('analyze why @train.py @data/results.csv')
+    local bundle = h.read(sub.dir .. '/bundle.md')
+    assert.is_truthy(bundle:find('# Subtask #1: bundle (01_ledger.md + 02_sources.md + 03_context.md)', 1, true), bundle:sub(1, 300))
+    local at = 0
+    for _, name in ipairs({ '01_ledger.md', '02_sources.md', '03_context.md' }) do
+      local b = bundle:find('===== BEGIN ' .. name, 1, true)
+      local e = bundle:find('===== END ' .. name .. ' =====', 1, true)
+      assert.is_truthy(b and e and b > at and e > b, name)
+      at = e
+      local part = vim.trim(h.read(sub.dir .. '/' .. name))
+      assert.is_truthy(bundle:find(part, 1, true), name .. ' is in bundle.md unchanged')
+    end
+    assert.is_truthy(bundle:find(TRAIN, 1, true))
+    assert.is_falsy(bundle:find('epoch,loss', 1, true)) -- data stays an attachment
+    local prompt = h.read(sub.dir .. '/00_prompt.md')
+    assert.is_truthy(prompt:find('| `bundle.md` |', 1, true))
+    assert.is_truthy(prompt:find('**either** `bundle.md` **or** the three files', 1, true))
+    assert.are.equal(1, #notices(c, 'attach bundle.md (or 01_ledger.md, 02_sources.md, 03_context.md) + results.csv'))
+    -- Japanese, and combined = false
+    setup({ delegate = { dir = '', language = 'ja' } })
+    local ja = delegate_cmd('analyze')
+    assert.is_truthy(h.read(ja.dir .. '/bundle.md'):find('サブタスク #1: バンドル', 1, true))
+    assert.is_truthy(h.read(ja.dir .. '/00_prompt.md'):find('`bundle.md` **または**', 1, true))
+    local c3 = setup({ delegate = { dir = '', combined = false } })
+    local plain = delegate_cmd('analyze')
+    assert.is_nil(vim.uv.fs_stat(plain.dir .. '/bundle.md'))
+    assert.is_falsy(h.read(plain.dir .. '/00_prompt.md'):find('bundle.md', 1, true))
+    assert.are.equal(1, #notices(c3, 'attach 01_ledger.md, 02_sources.md, 03_context.md.'))
+  end)
+
+  it('the dialog: y copies the folder path, o opens it (prints it over SSH), p copies the prompt; /delegate open copies the path', function()
+    local c = setup({ delegate = { dir = '' } })
+    answer = 1
+    local sub = delegate_cmd('analyze x')
+    assert.are.equal(h.read(sub.dir .. '/00_prompt.md'), vim.fn.getreg('+')) -- before the dialog runs
+    assert.is_true(h.wait(function()
+      return #asked == 1
+    end))
+    assert.is_truthy(asked[1]:find('Subtask #1: bundle in .coagent/delegate/1/', 1, true))
+    assert.are.equal(sub.dir, vim.fn.getreg('+'))
+    assert.are.equal(1, #notices(c, 'Copied ' .. sub.dir .. ' to the + register'))
+    assert.are.equal(0, #opened)
+    -- o
+    answer = 2
+    assert.are.equal(2, Delegate.offer(sub, root, function(l, t)
+      c:notice(l, t)
+    end))
+    assert.are.same({ sub.dir }, opened)
+    remote = true
+    Delegate.offer(sub, root, function(l, t)
+      c:notice(l, t)
+    end)
+    assert.are.equal(1, #opened)
+    assert.are.equal(1, #notices(c, 'Nothing to open here (SSH / no UI). The bundle folder is ' .. sub.dir))
+    -- p
+    answer = 3
+    vim.fn.setreg('+', 'other')
+    Delegate.offer(sub, root, function() end)
+    assert.are.equal(h.read(sub.dir .. '/00_prompt.md'), vim.fn.getreg('+'))
+    -- /delegate open copies the folder path (and prints it when nothing opens)
+    answer = 0
+    vim.fn.setreg('+', 'other')
+    assert.is_true((agent.delegate('open 1')))
+    assert.are.equal(sub.dir, vim.fn.getreg('+'))
+    assert.are.equal(1, #notices(c, 'Folder path copied to the + register'))
+    -- offer = false: no dialog
+    setup({ delegate = { dir = '', offer = false } })
+    delegate_cmd('analyze y')
+    vim.wait(50)
+    assert.are.equal(0, #asked)
+  end)
+
+  it("location 'home' and 'state'; older bundles in another location stay listed, openable and importable", function()
+    local home = vim.fn.tempname()
+    local c = setup({ delegate = { dir = '', location = 'home', home_dir = home } })
+    local name = vim.fs.basename(root)
+    local sub = delegate_cmd('analyze first')
+    assert.are.equal(home .. '/' .. name .. '/1', sub.dir)
+    assert.are.equal('1', vim.uv.fs_readlink(home .. '/' .. name .. '/latest'))
+    assert.are.equal(root .. '\n', h.read(home .. '/' .. name .. '/.root'))
+    assert.is_nil(vim.uv.fs_stat(root .. '/.coagent'))
+    assert.are_not.equal(1, count(read('.git/info/exclude') or '', '%.coagent'))
+    -- another project with the same name gets its own folder
+    local other = Delegate.project_dir({ location = 'home', home_dir = home }, '/elsewhere/' .. name)
+    assert.are.equal(home .. '/' .. name .. '-' .. vim.fn.sha256('/elsewhere/' .. name):sub(1, 8), other)
+
+    -- switch to 'state': #1 stays available, the next id is 2
+    c.config.delegate.location = 'state'
+    c.delegate_store = nil
+    local state = vim.fn.stdpath('state') .. '/coagent/delegate/'
+    local sub2 = delegate_cmd('review second')
+    assert.are.equal(2, sub2.id)
+    assert.is_true(vim.startswith(sub2.dir, state), sub2.dir)
+    assert.are.equal('2', vim.uv.fs_readlink(vim.fs.dirname(sub2.dir) .. '/latest'))
+    -- and to 'repo'
+    c.config.delegate.location = 'repo'
+    c.delegate_store = nil
+    local sub3 = delegate_cmd('analyze third')
+    assert.are.equal(root .. '/.coagent/delegate/3', sub3.dir)
+    local store = c:delegations()
+    assert.are.same({ 1, 2, 3 }, vim.tbl_map(function(s)
+      return s.id
+    end, store:list()))
+    assert.are.equal(sub.dir, store:get(1).dir)
+    assert.are.equal(sub2.dir, store:get(2).dir)
+    assert.is_true((agent.delegate('open 1')))
+    assert.are.equal(sub.dir, vim.fn.getreg('+'))
+    -- /receive imports a result into the old bundle folder
+    agent.receive('1', { text = REPORT, followup = false })
+    assert.is_true(h.wait(function()
+      local s = store:get(1)
+      return s and s.state == 'received'
+    end))
+    idle(c)
+    assert.is_truthy(vim.uv.fs_stat(sub.dir .. '/result.md'))
+    assert.are.equal('received', store:get(1).state)
+    assert.are.equal('pending', store:get(2).state)
   end)
 
   ----------------------------------------------------------------------------

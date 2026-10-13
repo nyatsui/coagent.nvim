@@ -836,7 +836,7 @@ Kinds and output contracts (delegate.language = 'ja' for Japanese):
               (name = false removes a kind).
 
   /delegate <kind> [all] [instruction with @files]
-      Writes stdpath('state')/coagent/delegate/<project>/<id>/:
+      Writes <project folder>/<id>/ (|coagent-delegate-location|):
         00_prompt.md     to paste: id, kind, instruction, the attachments
                          and their meaning, the output contract
         01_ledger.md     the project ledger (|coagent-ledger-bundle|), or a
@@ -848,11 +848,25 @@ Kinds and output contracts (delegate.language = 'ja' for Japanese):
         03_context.md    OS, Python, PyTorch/CUDA, nvidia-smi, git status
                          and diff, the last command outputs in full, the
                          experiment table
+        bundle.md        01 + 02 + 03 in ONE file, unchanged, between
+                         "===== BEGIN <file> =====" / "===== END <file>
+                         =====" lines (delegate.combined = false: none)
         attachments      copies of @data files (CSV, logs, plots) as-is
         manifest_expected.json   paths + sha256 of the sources sent
-      copies 00_prompt.md to the + register, opens the folder and adds a
-      pending entry to the ledger.
+      copies 00_prompt.md to the + register and adds a pending entry to the
+      ledger. Attach EITHER bundle.md OR 01-03 (same content; 00_prompt.md
+      tells the other chat both are possible) plus the attachments.
+      The notice shows the folder relative to the repository
+      (".coagent/delegate/3/"), the `latest` path and the full path; a
+      dialog offers: y copy the folder path to the + register (paste it in
+      the browser's file picker: macOS Cmd+Shift+G, Linux Ctrl+L, Windows
+      the address bar), o open the folder (vim.ui.open; over SSH or without
+      a UI the path is printed), p copy 00_prompt.md again.
+      delegate.offer = false: no dialog; delegate.open_folder = true: open
+      the folder right away.
   /delegate list | open <id> | cancel <id> | detach
+      open: opens the bundle folder (prints it over SSH) and copies its
+      path; the dialog offers p to copy 00_prompt.md again.
   /receive [id] [paste|clipboard|files]
       Imports the reply. Text: a paste buffer pre-filled from the +
       register (:w imports it). Files: downloads newer than the bundle in
@@ -883,6 +897,33 @@ waits in WAITING_EXTERNAL (winbar "waiting: analyze #3", notify 'waiting',
 saved with the session). New messages are refused until /receive 3 (the
 result becomes the tool's result), /delegate detach (keep it for later),
 /delegate cancel 3 or :CoagentStop.
+
+                                                *coagent-delegate-location*
+delegate.location chooses where bundles go:
+  'repo' (default)  <root>/.coagent/delegate/<id>/. `.coagent/` is added
+                    ONCE to .git/info/exclude (local to the clone, never
+                    committed) unless git ignores it already; the shared
+                    .gitignore is never touched; outside git nothing else
+                    is written. With ledger.dir_in_repo inside .coagent/,
+                    only .coagent/delegate/ is excluded.
+  'home'            <delegate.home_dir, default ~/coagent>/<project>/<id>/
+                    (outside the repository; no hidden folder).
+  'state'           stdpath('state')/coagent/delegate/<project>-<hash>/<id>/
+                    (the old location).
+delegate.dir overrides it (<dir>/<project>-<hash>/<id>/). Every location
+keeps a `latest` symlink to the newest bundle (skipped silently when it
+cannot be made), so the picker path stays the same. Folders 0700, files
+0600. Bundles in the other locations (e.g. the state folder of earlier
+versions) stay in /delegate list, /delegate open and /receive; new ids
+continue after them.
+
+coagent never lists, searches, mentions, scans, diffs or sends `.coagent/`:
+glob / search / list_dir skip it unless the path names it; @ completion,
+02_sources.md and /delegate all, /ledger init / refresh and the stale
+check, git_status / git_diff, 03_context.md and experiment records (git
+pathspec ":(exclude).coagent"), format-after-edit and diagnostics leave it
+out. `.coagent/**` is a default auto.protected_globs entry and the write
+tools refuse it: only coagent writes bundles.
 
 Example (ML): /delegate analyze why does val_acc plateau? @metrics.csv
 @loss.png -> paste, /receive 4 -> run the suggested experiment locally ->

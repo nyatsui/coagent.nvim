@@ -63,7 +63,8 @@ I'll find the `add` implementation and its tests.
   実験のたびに小さな 1 リクエストで更新。ローカルのタスクには要約（digest）を渡し、`ledger.bundle()` で全体像を他の
   チャットへ渡せます。あなたが編集した部分は差分を見せずに上書きしません
 - **サブタスクを別のチャットに任せる** — `/delegate analyze|implement|fix|review` が、手で操作する Web チャット向けの自己完結した
-  バンドル（台帳、ソース全文、環境、git diff、コマンド出力の全文、添付、出力形式）を書き出し、`/receive` がダウンロードしたファイルを
+  バンドル（台帳、ソース全文、環境、git diff、コマンド出力の全文、添付、出力形式。`bundle.md` は添付用の 1 ファイル版）を git に無視される
+  `.coagent/delegate/<id>/`（または `~/coagent/`）に書き出し、`/receive` がダウンロードしたファイルを
   対応付けて（改名・ベースのずれに対応）通常のレビューを通して適用します。エージェントも（必ず承認付きで）任せられ、`WAITING_EXTERNAL`
   で待ちます。coagent が別のチャットを自動操作することはありません
 - **`#url` / `#clipboard`** — 入力した URL のページ本文やクリップボードを添付
@@ -793,8 +794,8 @@ coagent は司令塔のままです。重いサブタスク（結果の分析と
 | `review` | コードレビュー | 重大度別の `## Findings`（`### Critical` / `Major` / `Minor` / `Nit`）、`path:line` 付き |
 | 独自 | `delegate.kinds = { name = { output = 'text'\|'files', description, contract, default_instruction } }` | あなたの指定（`name = false` で種類を削除） |
 
-**バンドル.** `/delegate <種類> [指示]` は `stdpath('state')/coagent/delegate/<project>/<id>/`（または `delegate.dir`）を書き出し、
-`00_prompt.md` を `+` レジスタにコピーし、フォルダを開き、サブタスクを台帳（`subtasks.md`）に pending として登録します。
+**バンドル.** `/delegate <種類> [指示]` はフォルダ `<id>/` を書き出し（場所は下の「バンドルの置き場所」）、`00_prompt.md` を `+` レジスタに
+コピーし、サブタスクを台帳（`subtasks.md`）に pending として登録します。
 
 | ファイル | 内容 |
 |---|---|
@@ -802,11 +803,39 @@ coagent は司令塔のままです。重いサブタスク（結果の分析と
 | `01_ledger.md` | プロジェクト台帳（概要・目標・現状・決定・最近のサブタスク。`ledger.bundle()`）。台帳が無いときはローカルで作る概要（ディレクトリ構成・README・最近の依頼） |
 | `02_sources.md` | 関係するソースファイルの**全文**: 指定したファイル（`@file`、フォルダも可）、このセッションで変更したファイル、台帳の概要にある中核ファイル。`all` で全ソース。上限は大きめ（`max_source_bytes` = 2 MB）で、超えたファイルは**丸ごと**外して一覧に載せます。途中で切ることはありません |
 | `03_context.md` | 環境（OS、Python、PyTorch / CUDA / cuDNN、`nvidia-smi`）、git の HEAD・status・`git diff HEAD`、直近のコマンド出力とトレースバックの**全文**、実験表 |
+| `bundle.md` | `01` + `02` + `03` を**1 ファイル**にまとめたもの。内容はそのままで、各ファイルは `===== BEGIN <file> =====` / `===== END <file> =====` の行で区切られます（`delegate.combined = false` で作りません） |
 | 添付 | CSV・ログ・プロットをそのままコピー（`@results.csv`、`@plots/loss.png`。指定したデータファイルは添付になります） |
 | `manifest_expected.json` | 送ったソースのパスと sha256（取り込み時のベースのずれ検出用） |
 
-あとは別のチャットを開いて `00_prompt.md` を貼り、`01`〜`03` と添付ファイルを添付して送信します。回答が来たらコピーします
-（返されたファイルはダウンロードします）。
+あとは別のチャットを開いて `00_prompt.md` を貼り、**`bundle.md` か `01`〜`03` のどちらか**（内容は同じ。どちらでもよいことは
+`00_prompt.md` が相手に伝えます）と添付ファイルを添付して送信します。回答が来たらコピーします（返されたファイルはダウンロードします）。
+
+**バンドルの置き場所**（`delegate.location`）— ブラウザのファイル選択ダイアログからたどりやすい場所を選べます:
+
+| `location` | フォルダ | 補足 |
+|---|---|---|
+| `'repo'`（既定） | `<リポジトリ>/.coagent/delegate/<id>/` | コードのすぐ隣。`.coagent/` を `.git/info/exclude`（この clone だけの設定で、コミットされない）に**一度だけ**追加します。git がすでに無視している場合は何もしません。**共有の `.gitignore` には一切触れません**。git 管理外ではバンドル以外は何も書きません |
+| `'home'` | `~/coagent/<project>/<id>/`（`delegate.home_dir`） | リポジトリの外。途中に隠しフォルダがありません |
+| `'state'` | `stdpath('state')/coagent/delegate/<project>-<hash>/<id>/` | 以前の置き場所 |
+
+`delegate.dir` を指定するとそれが優先されます（`<dir>/<project>-<hash>/<id>/`）。どの場所にも最新のバンドルを指す **`latest`**
+シンボリックリンクを作るので、ダイアログで開くパスは常に同じです: `<リポジトリ>/.coagent/delegate/latest/`（リンクを作れない環境では
+黙って省略）。フォルダは `0700`、ファイルは `0600`。以前に別の場所へ書いたバンドル（このオプション以前の state フォルダや、切り替える前の
+場所）も `/delegate list`・`/delegate open`・`/receive` で引き続き使え、ID はその続きから振られます。
+
+**`.coagent/` はプロジェクトに混ざりません.** coagent はここを一覧・検索・補完・走査・送信の対象にしません: `glob`・`search`・`list_dir`
+はパスで明示しない限りスキップし、`@` 補完、`02_sources.md` と `/delegate all`、`/ledger init` / `refresh` と古さの判定、
+`git_status` / `git_diff`、`03_context.md` と実験の記録（git の pathspec `:(exclude).coagent`）、編集後の整形と診断もすべて除外します。
+`.coagent/**` は既定の `auto.protected_globs` に入っており（読み込みやそこに触れるコマンドは確認あり）、書き込みツールは**拒否**します。
+バンドルを書くのは coagent 自身だけです。台帳を `.coagent/ledger` に置いている場合（`ledger.dir_in_repo`。コミットするかもしれない）は、
+`.coagent/delegate/` だけを除外します。
+
+**書き出したあと**、通知にリポジトリからの相対パス（`Folder: .coagent/delegate/3/`）、`latest` のパス、フルパスが出て、ダイアログで
+次を選べます: **`y`** フォルダのパスを `+` レジスタにコピー（ファイル選択ダイアログに貼る: macOS は `Cmd+Shift+G`、Linux の GTK は
+`Ctrl+L`、Windows はアドレスバー）、**`o`** フォルダを開く（`vim.ui.open`。SSH 先や UI のない環境ではパスを表示）、**`p`**
+`00_prompt.md` をもう一度コピー（`delegate.offer = false` でダイアログなし、`delegate.open_folder = true` ですぐにフォルダを開く）。
+`/delegate open <id>` もフォルダを開いてパスをコピーします。macOS のダイアログでは `.coagent` は隠しフォルダなので、コピーしたパスを
+`Cmd+Shift+G` で貼るか `Cmd+Shift+.` で表示してください。`location = 'home'` なら隠しフォルダを通りません。
 
 **受け取り.** `/receive [id]`（省略時は待機中か最新の未完了のサブタスク）:
 
@@ -845,7 +874,7 @@ coagent は司令塔のままです。重いサブタスク（結果の分析と
 |---|---|
 | `/delegate <種類> [all] [指示, @files]` | バンドルを書き出す（`all` = 全ソース、`@data.csv` でデータを添付） |
 | `/delegate list` | このプロジェクトのサブタスクと状態（pending / waiting / received / cancelled） |
-| `/delegate open <id>` | バンドルのフォルダを開き、`00_prompt.md` をもう一度コピー |
+| `/delegate open <id>` | バンドルのフォルダを開き（SSH 先では表示）、パスをコピー。ダイアログの `p` で `00_prompt.md` をもう一度コピー |
 | `/delegate cancel <id>` / `detach` | サブタスクを取り消す / 待機をやめる |
 | `/receive [id] [paste\|clipboard\|files]` | 結果を取り込む（既定は下書きバッファ。`files` はダウンロードのみ） |
 
@@ -854,7 +883,8 @@ coagent は司令塔のままです。重いサブタスク（結果の分析と
 ```text
 /exp                                   val_acc が 0.71 で頭打ち（実行 #12〜#15）
 /delegate analyze val_acc が頭打ちになる理由は? @runs/metrics.csv @plots/loss.png
-    -> 00_prompt.md を別のチャットに貼り、01_ledger.md 02_sources.md 03_context.md metrics.csv loss.png を添付
+    -> 00_prompt.md を別のチャットに貼る。y でフォルダのパスをコピーし、ファイル選択ダイアログで
+       .coagent/delegate/latest/ の bundle.md metrics.csv loss.png を添付
 /receive 4                             レポートを貼る。台帳に分析と計画が記録される
     -> 続き「Run experiment: bash scripts/run.sh --lr 3e-4 --warmup 500」（ローカル、承認あり。
        delegate.auto_followup = 'experiments' なら自動で開始。start_process + wait_process でメトリクスを報告）
@@ -868,8 +898,13 @@ coagent は司令塔のままです。重いサブタスク（結果の分析と
 delegate = {
   language = 'ja',            -- 'ja': 日本語のプロンプトと出力形式
   download_dir = nil,         -- nil = $XDG_DOWNLOAD_DIR / xdg-user-dir / ~/Downloads
-  dir = nil,                  -- nil = stdpath('state')/coagent/delegate
-  clipboard = true, open_folder = true,
+  location = 'repo',          -- 'repo'（.coagent/delegate）| 'home'（home_dir/<project>）| 'state'
+  home_dir = '~/coagent',
+  dir = nil,                  -- 明示したフォルダ（location より優先）
+  combined = true,            -- bundle.md = 01 + 02 + 03 を 1 ファイルに
+  clipboard = true,           -- 00_prompt.md を + レジスタへ
+  offer = true,               -- ダイアログ: y フォルダのパスをコピー、o 開く、p プロンプトを再コピー
+  open_folder = false,        -- すぐにフォルダを開く
   review_imports = true,      -- 取り込むファイルは auto モードでも必ず承認
   auto_followup = false,      -- 'verify' | 'experiments' | 'first': /receive のあとその続きを自動で開始
   sources = { changed = true, core = true },
@@ -1122,7 +1157,7 @@ require('coagent').setup({
   references = { url = true, url_max_bytes = 32 * 1024, clipboard_max_bytes = 32 * 1024 },
   inline = { context_lines = 40, keymaps = { accept = 'ga', reject = 'gr', retry = 'gi', diff = 'gd' } },
   -- サブタスクを別のチャットに任せる（「サブタスクを別のチャットに任せる」参照）
-  delegate = { language = 'en', download_dir = nil, review_imports = true, auto_followup = false, max_source_bytes = 2 * 1024 * 1024, kinds = {} },
+  delegate = { location = 'repo', combined = true, language = 'en', download_dir = nil, review_imports = true, auto_followup = false, max_source_bytes = 2 * 1024 * 1024, kinds = {} },
   notify = { on = { 'approval', 'done', 'failed', 'limit', 'waiting', 'stopped' }, bell = true, desktop = false, only_when_unfocused = true },
 })
 ```

@@ -9,9 +9,12 @@ local process = require('coagent.tools.process')
 local formatter = require('coagent.tools.format')
 local edit_diag = require('coagent.tools.edit_diagnostics')
 
+local Workspace = require('coagent.tools.workspace')
+
 local M = {}
 
-local SKIP_DIRS = { ['.git'] = true, ['node_modules'] = true, ['__pycache__'] = true, ['.venv'] = true, ['.mypy_cache'] = true, ['.pytest_cache'] = true, ['.dependencies'] = true }
+-- `.coagent` (coagent's own bundles) is skipped unless asked for explicitly
+local SKIP_DIRS = { ['.git'] = true, ['node_modules'] = true, ['__pycache__'] = true, ['.venv'] = true, ['.mypy_cache'] = true, ['.pytest_cache'] = true, ['.dependencies'] = true, [Workspace.INTERNAL] = true }
 
 --- CopilotChat function definitions (user-customizable via CopilotChat.setup).
 local function cc_function(name)
@@ -280,6 +283,7 @@ M.glob = {
       end
     end
     local root = ctx.ws.root
+    local explicit = args.pattern:gsub('^%./', ''):match('^([^/*?{[]+)/')
     local out = {}
     for _, f in ipairs(files) do
       f = f:gsub('^%./', '')
@@ -287,7 +291,7 @@ M.glob = {
         f = f:sub(#root + 2)
       end
       local top = f:match('^([^/]+)/')
-      if not (top and SKIP_DIRS[top]) then
+      if not (top and SKIP_DIRS[top] and top ~= explicit) then
         table.insert(out, f)
       end
     end
@@ -336,6 +340,8 @@ M.search = {
     if not info then
       return nil, err
     end
+    -- searching inside .coagent/ only when the path names it
+    info.internal = info.inside and Workspace.is_internal(info.rel)
     return { path = info }
   end,
   run = function(args, ctx, prepared)
@@ -356,9 +362,16 @@ M.search = {
       for _, g in ipairs(ctx.config.auto.protected_globs or {}) do
         vim.list_extend(argv, { '--glob', '!' .. g })
       end
-      vim.list_extend(argv, { '--glob', '!.git', '-e', args.pattern, target })
+      vim.list_extend(argv, { '--glob', '!.git' })
+      if not prepared.path.internal then
+        vim.list_extend(argv, { '--glob', '!' .. Workspace.INTERNAL })
+      end
+      vim.list_extend(argv, { '-e', args.pattern, target })
     else
       argv = { 'grep', '-rnIH', '--exclude-dir=.git', '--exclude-dir=node_modules', '--exclude-dir=.dependencies' }
+      if not prepared.path.internal then
+        table.insert(argv, '--exclude-dir=' .. Workspace.INTERNAL)
+      end
       table.insert(argv, args.fixed_strings and '-F' or '-E')
       if not args.case_sensitive then
         table.insert(argv, '-i')
@@ -433,6 +446,9 @@ local function writable(ctx, path)
   end
   if info.rel:match('^%.git/') or info.rel == '.git' then
     return nil, 'refusing to modify git internals'
+  end
+  if Workspace.is_internal(info.rel) then
+    return nil, 'refusing to modify ' .. info.rel .. ': .coagent/ holds coagent\'s own files (delegation bundles); coagent writes them itself'
   end
   local conflict = M.buffer_conflict(info.real)
   if conflict then

@@ -24,7 +24,7 @@ function M.list_text(subs, waiting)
     table.insert(lines, string.format('  #%-3d %-10s %-22s %s  %s%s', s.id, s.kind, st, os.date('%m-%d %H:%M', s.created or 0),
       vim.fn.strcharpart((s.instruction or ''):gsub('\n', ' '), 0, 60), s.agent and '  [agent]' or ''))
   end
-  table.insert(lines, '/receive <id> imports a result; /delegate open <id> opens the bundle; /delegate cancel <id> drops one.')
+  table.insert(lines, '/receive <id> imports a result; /delegate open <id> opens the bundle and copies its folder path; /delegate cancel <id> drops one.')
   return table.concat(lines, '\n')
 end
 

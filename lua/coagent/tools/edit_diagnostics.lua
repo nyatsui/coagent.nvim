@@ -23,6 +23,7 @@
 local async = require('coagent.core.async')
 local util = require('coagent.core.util')
 local diff = require('coagent.core.diff')
+local Workspace = require('coagent.tools.workspace')
 
 local M = {}
 
@@ -173,7 +174,7 @@ end
 ---@return Coagent.EditDiagSnapshot?
 function M.before(ctx, info)
   local o = M.opts(ctx.config)
-  if not o.enabled then
+  if not o.enabled or (info.inside and Workspace.is_internal(info.rel)) then
     return nil
   end
   local snap = { opts = o }

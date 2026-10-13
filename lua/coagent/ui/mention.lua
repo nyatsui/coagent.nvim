@@ -6,7 +6,8 @@ local M = {}
 M.MAX_FILES = 2000
 M.TTL_MS = 5000
 
-local SKIP_DIRS = { ['.git'] = true, ['node_modules'] = true, ['__pycache__'] = true, ['.venv'] = true, ['.mypy_cache'] = true, ['.pytest_cache'] = true, ['.dependencies'] = true }
+-- .coagent: coagent's own bundles (also left out when git does not ignore it)
+local SKIP_DIRS = { ['.git'] = true, ['node_modules'] = true, ['__pycache__'] = true, ['.venv'] = true, ['.mypy_cache'] = true, ['.pytest_cache'] = true, ['.dependencies'] = true, ['.coagent'] = true }
 
 local cache = {} -- root -> {time, list}
 

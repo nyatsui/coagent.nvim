@@ -6,20 +6,23 @@
 --- reply (pasted text, downloaded files) through the normal reviewed-edit
 --- pipeline.
 ---
----   <delegate.dir or stdpath('state')/coagent/delegate>/<project-key>/<id>/
+---   <project folder>/<id>/      (delegate.location, see M.project_dir)
 ---     00_prompt.md            to paste: id, kind, instruction, attachments, output contract
 ---     01_ledger.md            the project ledger (or a local overview when there is none)
 ---     02_sources.md           FULL contents of the relevant source files
 ---     03_context.md           environment, git status/diff, recent command outputs, experiments
+---     bundle.md               01 + 02 + 03 in one file (delegate.combined): attach it instead
 ---     <attachments>           copies of CSV / logs / plots, as-is
 ---     manifest_expected.json  paths + sha256 of the sources sent (base-drift detection)
 ---     result.md, received/    what /receive imported
 ---     .coagent/               subtask state (subtask.json) and base copies of the sources
+---   <project folder>/latest     symlink to the newest bundle
 ---
 --- This module is UI-free: bundle building, the subtask store, parsing of
 --- replies and download mapping. The controller owns the WAITING_EXTERNAL
 --- state and applies files with its tool pipeline.
 local util = require('coagent.core.util')
+local Workspace = require('coagent.tools.workspace')
 
 local M = {}
 
@@ -29,8 +32,11 @@ M.FILES = {
   sources = '02_sources.md',
   context = '03_context.md',
   manifest = 'manifest_expected.json',
+  combined = 'bundle.md',
   result = 'result.md',
 }
+M.LATEST = 'latest'
+M.LOCATIONS = { 'repo', 'home', 'state' }
 M.RESERVED = { 'list', 'open', 'cancel', 'detach', 'help' }
 
 local DIR_MODE = tonumber('700', 8)
@@ -38,11 +44,24 @@ local FILE_MODE = tonumber('600', 8)
 
 --- Side effects, replaceable in tests.
 M.sys = {
+  --- vim.ui.open; true when an opener started.
   open = function(path)
-    if vim.ui.open then
-      return pcall(vim.ui.open, path)
+    if not vim.ui.open then
+      return false
     end
-    return false
+    local ok, cmd, err = pcall(vim.ui.open, path)
+    return ok and cmd ~= nil and err == nil
+  end,
+  --- vim.fn.confirm (0 = dismissed); no dialog without a UI.
+  ask = function(msg, choices)
+    if #vim.api.nvim_list_uis() == 0 then
+      return 0
+    end
+    return vim.fn.confirm(msg, choices, 0)
+  end,
+  --- No local desktop to open a folder on (headless, or over SSH).
+  remote = function()
+    return #vim.api.nvim_list_uis() == 0 or vim.env.SSH_CONNECTION ~= nil or vim.env.SSH_TTY ~= nil
   end,
 }
 
@@ -375,21 +394,108 @@ local Store = {}
 Store.__index = Store
 M.Store = Store
 
---- Folder of all bundles of this project (same project key as sessions).
+local function project_key(root)
+  return vim.fs.basename(root):gsub('[^%w%-_%.]', '_') .. '-' .. vim.fn.sha256(root):sub(1, 12)
+end
+
+local function state_dir(root)
+  return vim.fn.stdpath('state') .. '/coagent/delegate/' .. project_key(root)
+end
+
+local function repo_dir(root)
+  return root .. '/' .. Workspace.INTERNAL .. '/delegate'
+end
+
+local ROOT_MARK = '.root'
+
+--- ~/coagent/<project>: the project's name, plus a hash when another
+--- project with the same name already owns the folder.
+local function home_dir(cfg, root)
+  local base = vim.fs.normalize(cfg.home_dir and cfg.home_dir ~= '' and cfg.home_dir or '~/coagent')
+  local dir = base .. '/' .. vim.fs.basename(root):gsub('[^%w%-_%.]', '_')
+  local owner = util.read_file(dir .. '/' .. ROOT_MARK)
+  if owner and vim.trim(owner) ~= root then
+    dir = dir .. '-' .. vim.fn.sha256(root):sub(1, 8)
+  end
+  return dir
+end
+
+--- Where new bundles go: 'dir' (delegate.dir, explicit) or delegate.location.
+---@param cfg table delegate config
+---@return 'dir'|'repo'|'home'|'state'
+function M.location(cfg)
+  cfg = cfg or {}
+  if cfg.dir and cfg.dir ~= '' then
+    return 'dir'
+  end
+  return vim.tbl_contains(M.LOCATIONS, cfg.location) and cfg.location or 'repo'
+end
+
+--- Folder of all bundles of this project:
+---   repo   <root>/.coagent/delegate (git-ignored locally, see M.git_exclude)
+---   home   <delegate.home_dir or ~/coagent>/<project>
+---   state  stdpath('state')/coagent/delegate/<project>-<hash>
+---   dir    <delegate.dir>/<project>-<hash>
 ---@param cfg table delegate config
 ---@param root string
 ---@return string
 function M.project_dir(cfg, root)
-  local base = cfg and cfg.dir and vim.fs.normalize(cfg.dir) or (vim.fn.stdpath('state') .. '/coagent/delegate')
-  local key = vim.fs.basename(root):gsub('[^%w%-_%.]', '_') .. '-' .. vim.fn.sha256(root):sub(1, 12)
-  return base .. '/' .. key
+  cfg = cfg or {}
+  local loc = M.location(cfg)
+  if loc == 'dir' then
+    return vim.fs.normalize(cfg.dir) .. '/' .. project_key(root)
+  elseif loc == 'home' then
+    return home_dir(cfg, root)
+  elseif loc == 'state' then
+    return state_dir(root)
+  end
+  return repo_dir(root)
+end
+
+--- Every folder that may hold bundles of this project, the current one
+--- first: bundles written before a location change stay listed, openable and
+--- importable.
+---@param cfg table delegate config
+---@param root string
+---@return string[]
+function M.project_dirs(cfg, root)
+  cfg = cfg or {}
+  local out, seen = {}, {}
+  for _, d in ipairs({ M.project_dir(cfg, root), state_dir(root), repo_dir(root), home_dir(cfg, root) }) do
+    if not seen[d] then
+      seen[d] = true
+      table.insert(out, d)
+    end
+  end
+  return out
+end
+
+--- Folder path for messages: relative to the workspace root when inside
+--- it (`.coagent/delegate/3/`), else with `~`.
+---@param dir string
+---@param root string
+---@return string
+function M.display_dir(dir, root)
+  if vim.startswith(dir, root .. '/') then
+    return dir:sub(#root + 2) .. '/'
+  end
+  return vim.fn.fnamemodify(dir, ':~') .. '/'
 end
 
 ---@param cfg table delegate config
 ---@param ws Coagent.Workspace
+---@param opts {keep_ledger:boolean?}? keep_ledger: the ledger lives in .coagent/ too (ledger.dir_in_repo)
 ---@return Coagent.DelegateStore
-function M.store(cfg, ws)
-  return setmetatable({ cfg = cfg or {}, ws = ws, dir = M.project_dir(cfg, ws.root) }, Store)
+function M.store(cfg, ws, opts)
+  cfg = cfg or {}
+  return setmetatable({
+    cfg = cfg,
+    ws = ws,
+    opts = opts or {},
+    location = M.location(cfg),
+    dir = M.project_dir(cfg, ws.root),
+    dirs = M.project_dirs(cfg, ws.root),
+  }, Store)
 end
 
 ---@param id integer|string
@@ -402,17 +508,45 @@ local function meta_path(dir)
   return dir .. '/.coagent/subtask.json'
 end
 
----@return Coagent.Subtask[] oldest first
-function Store:list()
+local function ids_in(dir)
   local out = {}
-  if vim.fn.isdirectory(self.dir) == 0 then
-    return out
+  if vim.fn.isdirectory(dir) == 1 then
+    for name, typ in vim.fs.dir(dir) do
+      if typ == 'directory' and name:match('^%d+$') then
+        table.insert(out, tonumber(name))
+      end
+    end
   end
-  for name, typ in vim.fs.dir(self.dir) do
-    if typ == 'directory' and name:match('^%d+$') then
-      local sub = self:get(tonumber(name))
-      if sub then
-        table.insert(out, sub)
+  return out
+end
+
+---@param dir string
+---@param n integer
+---@return Coagent.Subtask?
+local function load(dir, n)
+  local data = util.read_file(meta_path(dir .. '/' .. n))
+  local sub = data and util.json_decode(data)
+  if type(sub) ~= 'table' then
+    return nil
+  end
+  sub.id = n
+  sub.dir = dir .. '/' .. n
+  sub.sources = sub.sources or {}
+  sub.attachments = sub.attachments or {}
+  return sub
+end
+
+---@return Coagent.Subtask[] oldest first (every location; the current one wins an id)
+function Store:list()
+  local out, seen = {}, {}
+  for _, dir in ipairs(self.dirs or { self.dir }) do
+    for _, n in ipairs(ids_in(dir)) do
+      if not seen[n] then
+        local sub = load(dir, n)
+        if sub then
+          seen[n] = true
+          table.insert(out, sub)
+        end
       end
     end
   end
@@ -429,17 +563,13 @@ function Store:get(id)
   if not n then
     return nil, 'not a subtask id: ' .. tostring(id)
   end
-  local dir = self:path(n)
-  local data = util.read_file(meta_path(dir))
-  local sub = data and util.json_decode(data)
-  if type(sub) ~= 'table' then
-    return nil, 'no subtask #' .. n
+  for _, dir in ipairs(self.dirs or { self.dir }) do
+    local sub = load(dir, n)
+    if sub then
+      return sub
+    end
   end
-  sub.id = n
-  sub.dir = dir
-  sub.sources = sub.sources or {}
-  sub.attachments = sub.attachments or {}
-  return sub
+  return nil, 'no subtask #' .. n
 end
 
 ---@param sub Coagent.Subtask
@@ -449,14 +579,18 @@ function Store:save(sub)
   write(meta_path(sub.dir), vim.json.encode(copy))
 end
 
---- Reserve the next id (a new empty folder).
+--- Reserve the next id (a new empty folder). Ids continue after the bundles
+--- of every location, so an id is never reused after a location change.
 ---@return integer id, string dir
 function Store:alloc()
   ensure_dir(self.dir)
+  if self.location == 'home' and not vim.uv.fs_stat(self.dir .. '/' .. ROOT_MARK) then
+    write(self.dir .. '/' .. ROOT_MARK, self.ws.root .. '\n')
+  end
   local max = 0
-  for name, typ in vim.fs.dir(self.dir) do
-    if typ == 'directory' and name:match('^%d+$') then
-      max = math.max(max, tonumber(name))
+  for _, dir in ipairs(self.dirs or { self.dir }) do
+    for _, n in ipairs(ids_in(dir)) do
+      max = math.max(max, n)
     end
   end
   for id = max + 1, max + 100 do
@@ -467,6 +601,97 @@ function Store:alloc()
     end
   end
   error('cannot allocate a subtask folder in ' .. self.dir)
+end
+
+--- Point <project folder>/latest at bundle `id` (a relative symlink; any
+--- failure is ignored: the numbered folder is always there).
+---@param id integer
+function Store:link_latest(id)
+  pcall(function()
+    local link = self.dir .. '/' .. M.LATEST
+    local st = vim.uv.fs_lstat(link)
+    if st and st.type ~= 'link' then
+      return -- never replace a real file or folder
+    end
+    if st then
+      vim.uv.fs_unlink(link)
+    end
+    vim.uv.fs_symlink(tostring(id), link)
+  end)
+end
+
+--- Path of the `latest` link of the folder holding `sub`.
+---@param sub Coagent.Subtask
+---@return string
+function M.latest_path(sub)
+  return vim.fs.dirname(sub.dir) .. '/' .. M.LATEST
+end
+
+local excluded = {} -- root -> result of M.git_exclude (once per Neovim)
+
+--- Keep `.coagent/` out of git without touching the shared .gitignore: add
+--- it to .git/info/exclude (local to this clone, never committed), unless
+--- git already ignores it. Nothing to do outside git.
+---@param root string workspace root
+---@param rel string? folder to ignore (default '.coagent')
+---@return 'added'|'ignored'|'no-git'|'failed' result, string? path the exclude file, string? entry the line added
+function M.git_exclude(root, rel)
+  rel = rel or Workspace.INTERNAL
+  local key = root .. '\0' .. rel
+  if excluded[key] then
+    return unpack(excluded[key])
+  end
+  local function run(args)
+    local ok, res = pcall(function()
+      return vim.system(vim.list_extend({ 'git', '-C', root }, args), { text = true }):wait(5000)
+    end)
+    return ok and res or { code = -1, stdout = '' }
+  end
+  local result, path, entry
+  local inside = run({ 'rev-parse', '--is-inside-work-tree' })
+  if inside.code ~= 0 or vim.trim(inside.stdout or '') ~= 'true' then
+    result = 'no-git'
+  elseif run({ 'check-ignore', '-q', rel .. '/x' }).code == 0 then
+    result = 'ignored'
+  else
+    path = vim.trim(run({ 'rev-parse', '--git-path', 'info/exclude' }).stdout or '')
+    local prefix = vim.trim(run({ 'rev-parse', '--show-prefix' }).stdout or '')
+    if path == '' then
+      result = 'failed'
+    else
+      if path:sub(1, 1) ~= '/' then
+        path = root .. '/' .. path
+      end
+      path = vim.fs.normalize(path)
+      entry = '/' .. prefix .. rel .. '/'
+      local old = util.read_file(path) or ''
+      local present = false
+      for line in old:gmatch('[^\n]+') do
+        present = present or vim.trim(line) == entry
+      end
+      if present then
+        result = 'ignored'
+      else
+        if vim.fn.isdirectory(vim.fs.dirname(path)) == 0 then
+          vim.fn.mkdir(vim.fs.dirname(path), 'p')
+        end
+        local text = old .. ((old == '' or old:sub(-1) == '\n') and '' or '\n')
+          .. '# coagent: /delegate bundles (local to this clone; .gitignore is not changed)\n' .. entry .. '\n'
+        local f = io.open(path, 'w')
+        if f then
+          f:write(text)
+          f:close()
+          result = 'added'
+        else
+          result = 'failed'
+        end
+      end
+    end
+  end
+  if result ~= 'failed' then
+    excluded[key] = { result, path, entry }
+  end
+  return result, path, entry
 end
 
 --- The newest subtask still waiting for a result (or nil).
@@ -772,6 +997,7 @@ local function environment(env)
 end
 
 function M._clear_env_cache()
+  excluded = {}
   env_cache = {}
 end
 
@@ -825,7 +1051,8 @@ local function context_text(env, lang)
   }
   vim.list_extend(out, environment(env))
   local root = env.ws.root
-  local status = git(root, { 'status', '--short', '--branch' })
+  -- .coagent/ (the bundles themselves) is never part of the context
+  local status = git(root, vim.list_extend({ 'status', '--short', '--branch' }, Workspace.git_pathspec()))
   if status then
     table.insert(out, '')
     table.insert(out, '## Git')
@@ -839,14 +1066,14 @@ local function context_text(env, lang)
     table.insert(out, '')
     table.insert(out, fenced(vim.trim(status) ~= '' and status or '(clean)', 'text'))
     if cfg.git_diff ~= false then
-      local d = git(root, { 'diff', 'HEAD', '--no-color', '--no-ext-diff' }) or ''
+      local d = git(root, vim.list_extend({ 'diff', 'HEAD', '--no-color', '--no-ext-diff' }, Workspace.git_pathspec())) or ''
       table.insert(out, '')
       table.insert(out, '### git diff HEAD')
       table.insert(out, '')
       local max = cfg.max_diff_bytes or (512 * 1024)
       if #d > max then
         table.insert(warnings, string.format('git diff is %s, above delegate.max_diff_bytes (%s): only the stat is included', human(#d), human(max)))
-        d = (git(root, { 'diff', 'HEAD', '--stat', '--no-color' }) or '') .. '\n(full diff left out: ' .. human(#d) .. ')'
+        d = (git(root, vim.list_extend({ 'diff', 'HEAD', '--stat', '--no-color' }, Workspace.git_pathspec())) or '') .. '\n(full diff left out: ' .. human(#d) .. ')'
       end
       table.insert(out, fenced(vim.trim(d) ~= '' and d or '(no changes)', 'diff'))
     end
@@ -903,6 +1130,14 @@ local T = {
     not_included = 'Not included:',
     contract = 'Output contract (follow it exactly)',
     reply = 'Reply in English. Start your answer with the line "Subtask #%s".',
+    combined_row = '`01_ledger.md` + `02_sources.md` + `03_context.md` in one file, unchanged',
+    either = 'The material comes in one of two ways, with the same content: **either** `bundle.md` **or** the three files `01_ledger.md`, `02_sources.md` and `03_context.md`, plus the other files in the table. Wherever this prompt names one of the three files, look for its section in `bundle.md` if that is what you got.',
+    bundle_title = 'Subtask #%s: bundle (%s)',
+    bundle_intro = 'This file is `01_ledger.md`, `02_sources.md` and `03_context.md` of the subtask in one file, unchanged, each between a BEGIN and an END line. The task and the output contract are in `00_prompt.md`.',
+    ledger_part = 'project ledger',
+    overview_part = 'project overview',
+    sources_part = 'source files, full contents',
+    context_part = 'context: environment, git, command outputs, experiments',
   },
   ja = {
     title = 'サブタスク #%s: %s',
@@ -922,6 +1157,14 @@ local T = {
     not_included = '含まれていないもの:',
     contract = '出力形式(厳守)',
     reply = '日本語で回答してください(見出し・ファイル名・パス・コードは指定どおり)。回答の最初の行に「Subtask #%s」と書いてください。',
+    combined_row = '`01_ledger.md` + `02_sources.md` + `03_context.md` を 1 ファイルにまとめたもの(内容は同じ)',
+    either = '資料は次のどちらかの形で渡されます(内容は同じです): `bundle.md` **または** `01_ledger.md`・`02_sources.md`・`03_context.md` の 3 ファイル、およびその他の表中のファイル。このプロンプトが 3 ファイルのいずれかに言及している場合、`bundle.md` を受け取ったときはその中の該当セクションを参照してください。',
+    bundle_title = 'サブタスク #%s: バンドル(%s)',
+    bundle_intro = 'このファイルは、サブタスクの `01_ledger.md`・`02_sources.md`・`03_context.md` を変更せずに 1 つにまとめたものです。各ファイルは BEGIN 行と END 行の間にあります。タスクと出力形式は `00_prompt.md` にあります。',
+    ledger_part = 'プロジェクト台帳',
+    overview_part = 'プロジェクト概要',
+    sources_part = 'ソースファイル(全文)',
+    context_part = 'コンテキスト: 環境、git、コマンド出力、実験',
   },
 }
 
@@ -953,8 +1196,15 @@ local function prompt_text(plan, id)
     '| `' .. M.FILES.sources .. '` | ' .. (lang == 'ja' and string.format(t.sources_row, #plan.sources, '') or string.format(t.sources_row, #plan.sources, #plan.sources == 1 and '' or 's')) .. ' |',
     '| `' .. M.FILES.context .. '` | ' .. t.context_row .. ' |',
   }
+  if plan.combined then
+    table.insert(out, '| `' .. M.FILES.combined .. '` | ' .. t.combined_row .. ' |')
+  end
   for _, a in ipairs(plan.attachments) do
     table.insert(out, string.format('| `%s` | %s |', a.name, (a.meaning:gsub('|', '/'))))
+  end
+  if plan.combined then
+    table.insert(out, '')
+    table.insert(out, t.either)
   end
   table.insert(out, '')
   table.insert(out, t.sources_list)
@@ -982,6 +1232,40 @@ local function prompt_text(plan, id)
 end
 M.prompt_text = prompt_text
 
+--- bundle.md: 01_ledger.md + 02_sources.md + 03_context.md, unchanged,
+--- between BEGIN / END lines (one file to attach instead of three).
+---@param plan Coagent.DelegatePlan
+---@param id integer|string
+---@param stext string? 02_sources.md (built when not given)
+---@return string
+local function combined_text(plan, id, stext)
+  local t = T[plan.lang]
+  local parts = {
+    { name = M.FILES.ledger, label = plan.from_ledger and t.ledger_part or t.overview_part, text = plan.ledger },
+    { name = M.FILES.sources, label = t.sources_part, text = stext or sources_text(plan.sources, plan.omitted, plan.lang) },
+    { name = M.FILES.context, label = t.context_part, text = plan.context },
+  }
+  local out = {
+    '# ' .. string.format(t.bundle_title, id, table.concat(vim.tbl_map(function(p)
+      return p.name
+    end, parts), ' + ')),
+    '',
+    t.bundle_intro,
+  }
+  for _, p in ipairs(parts) do
+    vim.list_extend(out, {
+      '',
+      string.format('===== BEGIN %s (%s) =====', p.name, p.label),
+      '',
+      (p.text:gsub('\n+$', '')),
+      '',
+      string.format('===== END %s =====', p.name),
+    })
+  end
+  return table.concat(out, '\n') .. '\n'
+end
+M.combined_text = combined_text
+
 ------------------------------------------------------------------------------
 -- Bundle: prepare (no side effects) and write
 ------------------------------------------------------------------------------
@@ -999,6 +1283,7 @@ M.prompt_text = prompt_text
 ---@field context string
 ---@field warnings string[]
 ---@field agent boolean
+---@field combined boolean also write bundle.md
 
 --- Build the bundle in memory (reads files, runs the environment commands).
 ---@param env Coagent.DelegateEnv
@@ -1041,7 +1326,7 @@ function M.prepare(env, spec)
       return nil, 'attachment is a protected file (' .. info.protected .. '): ' .. tostring(path)
     end
     local name = vim.fs.basename(info.real)
-    if name:match('^0%d_') or name == M.FILES.manifest then
+    if name:match('^0%d_') or name == M.FILES.manifest or name == M.FILES.combined then
       name = 'att_' .. name
     end
     local base, ext = name:match('^(.-)(%.[^.]*)$')
@@ -1081,6 +1366,7 @@ function M.prepare(env, spec)
     context = ctext,
     warnings = warnings,
     agent = spec.agent or false,
+    combined = cfg.combined ~= false,
   }
 end
 
@@ -1121,15 +1407,24 @@ end
 ---@param store Coagent.DelegateStore
 ---@param plan Coagent.DelegatePlan
 ---@param meta {session:string?, call_id:string?}?
----@return Coagent.Subtask
+---@return Coagent.Subtask sub, string prompt, {git_exclude:string?, exclude_file:string?, exclude_entry:string?} info
 function M.write(store, plan, meta)
   meta = meta or {}
+  local info = {}
+  if store.location == 'repo' then
+    -- before the first file lands in the repository
+    info.git_exclude, info.exclude_file, info.exclude_entry = M.git_exclude(store.ws.root, store.opts.keep_ledger and (Workspace.INTERNAL .. '/delegate') or nil)
+  end
   local id, dir = store:alloc()
   local prompt = prompt_text(plan, id)
   write(dir .. '/' .. M.FILES.prompt, prompt)
   write(dir .. '/' .. M.FILES.ledger, plan.ledger)
-  write(dir .. '/' .. M.FILES.sources, sources_text(plan.sources, plan.omitted, plan.lang))
+  local stext = sources_text(plan.sources, plan.omitted, plan.lang)
+  write(dir .. '/' .. M.FILES.sources, stext)
   write(dir .. '/' .. M.FILES.context, plan.context)
+  if plan.combined then
+    write(dir .. '/' .. M.FILES.combined, combined_text(plan, id, stext))
+  end
   for _, a in ipairs(plan.attachments) do
     local dst = dir .. '/' .. a.name
     local ok = vim.uv.fs_copyfile(a.src, dst)
@@ -1165,7 +1460,8 @@ function M.write(store, plan, meta)
     lang = plan.lang,
   }
   store:save(sub)
-  return sub, prompt
+  store:link_latest(id)
+  return sub, prompt, info
 end
 
 ---@param sub Coagent.Subtask
@@ -1989,6 +2285,47 @@ function M.to_clipboard(text)
     return false
   end
   return true
+end
+
+--- Open a bundle folder in the system file manager. Over SSH or without a
+--- UI there is nothing local to open: returns false and the caller prints
+--- the path.
+---@param dir string
+---@return boolean opened
+function M.reveal(dir)
+  if M.sys.remote() then
+    return false
+  end
+  return M.sys.open(dir) == true
+end
+
+M.OFFER_CHOICES = '&Yank folder path\n&Open folder\nCopy &prompt\n&Close'
+M.PICKER_HINT = 'in the file picker: macOS Cmd+Shift+G, Linux Ctrl+L, Windows the address bar'
+
+--- One dialog after a bundle is written (and on /delegate open):
+--- y copies the folder path (to paste into the browser's file picker),
+--- o opens the folder (prints its path over SSH / without a UI),
+--- p copies 00_prompt.md again. Nothing without a UI.
+---@param sub Coagent.Subtask
+---@param root string workspace root
+---@param notify fun(level:string, text:string)
+---@return integer choice 0 = dismissed
+function M.offer(sub, root, notify)
+  local choice = M.sys.ask(string.format('Subtask #%d: bundle in %s', sub.id, M.display_dir(sub.dir, root)), M.OFFER_CHOICES)
+  if choice == 1 then
+    local clip = M.to_clipboard(sub.dir)
+    notify('info', string.format('Copied %s to the %s register: paste it %s.', sub.dir, clip and '+' or 'unnamed', M.PICKER_HINT))
+  elseif choice == 2 then
+    if M.reveal(sub.dir) then
+      notify('info', 'Opened ' .. M.display_dir(sub.dir, root))
+    else
+      notify('info', 'Nothing to open here (SSH / no UI). The bundle folder is ' .. sub.dir)
+    end
+  elseif choice == 3 then
+    local clip = M.to_clipboard(M.prompt_of(sub))
+    notify('info', string.format('%s copied to the %s register again.', M.FILES.prompt, clip and '+' or 'unnamed'))
+  end
+  return choice
 end
 
 ------------------------------------------------------------------------------

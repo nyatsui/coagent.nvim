@@ -2243,7 +2243,11 @@ end
 ---@return Coagent.DelegateStore
 function Controller:delegations()
   if not self.delegate_store then
-    self.delegate_store = Delegate.store(self.config.delegate or {}, self.ws)
+    -- a ledger kept in .coagent/ (ledger.dir_in_repo) may be committed: then
+    -- only .coagent/delegate/ is git-ignored
+    local ld = (self.config.ledger or {}).dir_in_repo
+    local keep = type(ld) == 'string' and ld ~= '' and require('coagent.tools.workspace').is_internal(vim.fs.normalize(ld))
+    self.delegate_store = Delegate.store(self.config.delegate or {}, self.ws, { keep_ledger = keep })
   end
   return self.delegate_store
 end
@@ -2260,7 +2264,7 @@ end
 ---@return Coagent.Subtask
 function Controller:_delegate_create(plan, meta)
   local store = self:delegations()
-  local sub, prompt_md = Delegate.write(store, plan, { session = self.session.id, call_id = meta and meta.call_id })
+  local sub, prompt_md, info = Delegate.write(store, plan, { session = self.session.id, call_id = meta and meta.call_id })
   local l = self.ledger
   if l and l:enabled() then
     local ok, id = pcall(function()
@@ -2269,7 +2273,7 @@ function Controller:_delegate_create(plan, meta)
         kind = 'delegated',
         title = string.format('subtask #%d (%s) sent: %s', sub.id, sub.kind, sub.instruction),
         request = sub.instruction,
-        outcome = 'pending: sent to an external chat (bundle ' .. vim.fn.fnamemodify(sub.dir, ':~') .. ')',
+        outcome = 'pending: sent to an external chat (bundle ' .. Delegate.display_dir(sub.dir, self.ws.root) .. ')',
       })
     end)
     if ok then
@@ -2278,19 +2282,40 @@ function Controller:_delegate_create(plan, meta)
     end
   end
   local cfg = self.config.delegate or {}
+  local root = self.ws.root
   local clip = cfg.clipboard ~= false and Delegate.to_clipboard(prompt_md)
-  if cfg.open_folder ~= false then
-    Delegate.sys.open(sub.dir)
+  if cfg.open_folder == true then
+    Delegate.reveal(sub.dir)
   end
-  local names = { Delegate.FILES.ledger, Delegate.FILES.sources, Delegate.FILES.context }
-  for _, a in ipairs(sub.attachments) do
-    table.insert(names, a.name)
-  end
+  local data = vim.tbl_map(function(a)
+    return a.name
+  end, sub.attachments)
+  local three = table.concat({ Delegate.FILES.ledger, Delegate.FILES.sources, Delegate.FILES.context }, ', ')
   local lines = Delegate.summary_lines(plan, sub.id)
-  table.insert(lines, 'Bundle: ' .. vim.fn.fnamemodify(sub.dir, ':~'))
-  table.insert(lines, string.format('Paste %s (%s) into the other chat and attach %s.', Delegate.FILES.prompt, clip and 'in the + register' or 'open it from the folder', table.concat(names, ', ')))
+  local shown = Delegate.display_dir(sub.dir, root)
+  table.insert(lines, string.format('Folder: %s (the newest bundle is always also %s)', shown, Delegate.display_dir(Delegate.latest_path(sub), root)))
+  if shown:sub(1, 1) ~= '~' and shown:sub(1, 1) ~= '/' then
+    table.insert(lines, 'Full path: ' .. sub.dir)
+  end
+  if info and info.git_exclude == 'added' then
+    table.insert(lines, string.format('Added %s to %s (local to this clone, never committed; .gitignore is unchanged).', (info.exclude_entry or ''):gsub('^/', ''), (Delegate.display_dir(info.exclude_file, root):gsub('/$', ''))))
+  end
+  table.insert(lines, string.format('Paste %s (%s) into the other chat and attach %s%s.', Delegate.FILES.prompt, clip and 'in the + register' or 'open it from the folder',
+    plan.combined and string.format('%s (or %s)', Delegate.FILES.combined, three) or three,
+    #data > 0 and (' + ' .. table.concat(data, ', ')) or ''))
   table.insert(lines, string.format('Then /receive %d imports the reply%s.', sub.id, sub.output == 'files' and ' (downloaded files and/or pasted text)' or ' (pasted text)'))
+  local ask = cfg.offer ~= false and #vim.api.nvim_list_uis() > 0
+  if ask then
+    table.insert(lines, 'y: copy the folder path (for the file picker)  o: open the folder  p: copy the prompt again')
+  end
   self:notice('info', table.concat(lines, '\n'))
+  if cfg.offer ~= false then
+    vim.schedule(function()
+      Delegate.offer(sub, root, function(level, text)
+        self:notice(level, text)
+      end)
+    end)
+  end
   return sub
 end
 

@@ -25,6 +25,7 @@
 --- context DATA: it never feeds into permissions, modes or models.
 local util = require('coagent.core.util')
 local async = require('coagent.core.async')
+local Workspace = require('coagent.tools.workspace')
 
 local M = {}
 
@@ -965,7 +966,7 @@ function Ledger:_sources_in(text)
     elseif not fence then
       for tok in line:gmatch('`([^`\n]+)`') do
         local p = tok:gsub(':%d+.*$', ''):gsub('^%./', '')
-        if not seen[p] and #p < 300 and not p:match('%s') and not p:match('^/') and not p:match('%.%.') then
+        if not seen[p] and #p < 300 and not p:match('%s') and not p:match('^/') and not p:match('%.%.') and not Workspace.is_internal(p) then
           seen[p] = true
           local st = vim.uv.fs_stat(self.ws.root .. '/' .. p)
           if st and st.type == 'file' and #out < 200 then
@@ -1006,7 +1007,9 @@ function Ledger:stale()
   for _, s in ipairs(m.sources) do
     local abs = self.ws.root .. '/' .. s.path
     local st = vim.uv.fs_stat(abs)
-    if not st then
+    if Workspace.is_internal(s.path) then
+      -- coagent's own files (.coagent/) never make the overview stale
+    elseif not st then
       table.insert(missing, s.path)
     elseif st.size ~= s.size or mtime(st) ~= s.mtime then
       if sha(util.read_file(abs) or '') ~= s.sha then
@@ -1050,7 +1053,7 @@ local DATA_DIRS = { data = true, datasets = true, dataset = true, outputs = true
 ---@return string[]
 function M.list_files(root)
   local out = {}
-  local res = vim.system({ 'git', '-C', root, 'ls-files', '-co', '--exclude-standard' }, { text = true }):wait(5000)
+  local res = vim.system(vim.list_extend({ 'git', '-C', root, 'ls-files', '-co', '--exclude-standard' }, Workspace.git_pathspec(true)), { text = true }):wait(5000)
   if res and res.code == 0 then
     for line in (res.stdout or ''):gmatch('[^\n]+') do
       table.insert(out, line)

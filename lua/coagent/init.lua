@@ -1153,9 +1153,18 @@ function M.delegate(arg)
       c:notice('error', '/delegate open: ' .. tostring(err or 'no subtask'))
       return false
     end
-    Delegate.sys.open(sub.dir)
-    local clip = Delegate.to_clipboard(Delegate.prompt_of(sub))
-    c:notice('info', string.format('Subtask #%d (%s, %s): %s\n00_prompt.md copied to the %s register again.', sub.id, sub.kind, sub.state, vim.fn.fnamemodify(sub.dir, ':~'), clip and '+' or 'unnamed'))
+    local opened = Delegate.reveal(sub.dir)
+    local clip = Delegate.to_clipboard(sub.dir)
+    c:notice('info', string.format('Subtask #%d (%s, %s): %s%s\nFolder path copied to the %s register: paste it %s.%s', sub.id, sub.kind, sub.state,
+      Delegate.display_dir(sub.dir, c.ws.root), opened and ' (opened)' or '', clip and '+' or 'unnamed', Delegate.PICKER_HINT,
+      opened and '' or ('\nFull path: ' .. sub.dir)))
+    if (config.options.delegate or {}).offer ~= false then
+      vim.schedule(function()
+        Delegate.offer(sub, c.ws.root, function(level, text)
+          c:notice(level, text)
+        end)
+      end)
+    end
     return true, sub
   elseif verb == 'cancel' then
     local ok, err = c:cancel_subtask(rest ~= '' and rest or (c.session.waiting and c.session.waiting.id) or nil)

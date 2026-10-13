@@ -21,6 +21,7 @@
 --- the edit itself and formatting is local and deterministic.
 local util = require('coagent.core.util')
 local diff = require('coagent.core.diff')
+local Workspace = require('coagent.tools.workspace')
 
 local M = {}
 
@@ -182,7 +183,7 @@ function M.format_file(ws, changes, config, abs, mode)
   if not info.inside then
     return { status = 'skipped', reason = 'outside the workspace' }
   end
-  if info.protected or info.rel:match('^%.git/') then
+  if info.protected or info.rel:match('^%.git/') or Workspace.is_internal(info.rel) then
     return { status = 'skipped', reason = 'protected file' }
   end
   if f.current == nil then
