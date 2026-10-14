@@ -78,6 +78,22 @@ function M.add(acc, role, model, res)
   r.tokens = r.tokens + tokens
 end
 
+--- Quotas worth showing: drops the ones named in `usage.hide_quotas` (by
+--- default the legacy "Premium requests", which does not describe token
+--- billing) and Completions (unlimited on paid plans).
+---@param quotas table[]?
+---@param hide string[]?
+---@return table[]
+function M.visible_quotas(quotas, hide)
+  local skip = { Completions = true }
+  for _, name in ipairs(hide or {}) do
+    skip[name] = true
+  end
+  return vim.tbl_filter(function(q)
+    return not skip[q.name]
+  end, quotas or {})
+end
+
 --- "; effort high x3, low x1" (empty without efforts).
 ---@param efforts table<string, integer>?
 ---@param prefix string

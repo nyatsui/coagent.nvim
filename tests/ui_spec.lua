@@ -418,7 +418,7 @@ describe('ui', function()
       return vim.bo[vim.api.nvim_get_current_buf()].bufhidden == 'wipe'
     end)
     local text = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), '\n')
-    assert.is_truthy(text:find('Premium requests   not included in this plan', 1, true), text)
+    assert.is_falsy(text:find('Premium', 1, true), text) -- legacy quota hidden (usage.hide_quotas)
     assert.is_truthy(text:find('Chat               12 / 50 used (24%), 38 left', 1, true), text)
     assert.is_truthy(text:find('resets on 2026-11-01', 1, true))
     vim.cmd('close')

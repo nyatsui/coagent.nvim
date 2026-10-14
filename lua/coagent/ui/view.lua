@@ -34,6 +34,15 @@ function View.new(config, actions)
       end
     end,
   })
+  -- remember a width / input height the user set by hand
+  vim.api.nvim_create_autocmd('WinResized', {
+    group = self.augroup,
+    callback = function()
+      if self:visible() then
+        layout.record(self.config.ui, self.wins, vim.v.event.windows)
+      end
+    end,
+  })
   vim.api.nvim_create_autocmd('WinClosed', {
     group = self.augroup,
     callback = function(ev)
@@ -225,6 +234,17 @@ function View:toggle(opts)
   end
 end
 
+--- Set the panel width ("60", "50%", "+10", "-10", "reset"); remembered.
+---@param spec string
+---@return boolean ok, string? err
+function View:set_width(spec)
+  local ok, err = layout.set_width(self.config.ui, self:visible() and self.wins or nil, spec)
+  if ok and self:visible() then
+    self:refresh_bar()
+  end
+  return ok, err
+end
+
 --- Switch between split and float.
 function View:set_layout(name)
   local was = self:visible()
@@ -337,11 +357,10 @@ function View:bar()
     table.insert(segs, { 4, 4, n .. ' changed' })
   end
   if self.config.usage.show_in_bar and self.usage then
-    -- the first limited quota the plan actually includes (premium requests on
-    -- paid plans; on Copilot Free premium is 0/0 and chat is the limit)
-    for _, q in ipairs(self.usage.quotas or {}) do
-      if not q.unlimited and q.total and q.total > 0 and q.name ~= 'Completions' then
-        local short = ({ ['Premium requests'] = 'premium', Chat = 'chat', Completions = 'compl' })[q.name] or q.name
+    -- the first limited quota the plan includes (usage.hide_quotas filtered out)
+    for _, q in ipairs(Usage.visible_quotas(self.usage.quotas, self.config.usage.hide_quotas)) do
+      if not q.unlimited and q.total and q.total > 0 then
+        local short = ({ Chat = 'chat' })[q.name] or q.name
         table.insert(segs, { 6, 3, string.format('%s %d/%d left', short, q.remaining or (q.total - (q.used or 0)), q.total) })
         break
       end
@@ -637,6 +656,12 @@ function View:_keymaps()
   end
   pmap('close', function()
     self:close()
+  end)
+  pmap('widen', function()
+    self:set_width('+' .. 5 * vim.v.count1)
+  end)
+  pmap('narrow', function()
+    self:set_width('-' .. 5 * vim.v.count1)
   end)
   pmap('focus_input', function()
     self:focus_input()

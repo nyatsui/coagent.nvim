@@ -213,6 +213,15 @@ end, {
 cmd('CoagentProcesses', function()
   agent().processes()
 end, { desc = 'Show or stop background processes started by the agent' })
+cmd('CoagentWidth', function(a)
+  agent().set_width(a.args)
+end, {
+  nargs = '?',
+  desc = 'Panel width: N columns, N%, +N, -N, reset (remembered)',
+  complete = function()
+    return { '40%', '50%', '60%', '+10', '-10', 'reset' }
+  end,
+})
 cmd('CoagentLayout', function(a)
   agent().set_layout(a.args ~= '' and a.args or 'vertical')
 end, {

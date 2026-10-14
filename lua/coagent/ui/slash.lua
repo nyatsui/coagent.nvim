@@ -198,6 +198,15 @@ M.COMMANDS = {
     end,
   },
   {
+    name = 'width',
+    args = '[N|N%|+N|-N|reset]',
+    desc = 'Panel width (remembered; also < / > in the panel)',
+    complete = { '40%', '50%', '60%', '+10', '-10', 'reset' },
+    run = function(arg)
+      app().set_width(arg)
+    end,
+  },
+  {
     name = 'changes',
     desc = 'Files changed in this session',
     run = function()

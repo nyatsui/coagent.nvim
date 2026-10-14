@@ -310,6 +310,7 @@ vim.keymap.set('x', '<leader>ai', ':CoagentInline<CR>', { desc = 'Coagent inline
 | `/resume` | 一時停止したタスクを再開（上限で止まった場合はカウンタをリセットして続行。`:CoagentResume` と同じ） |
 | `/stop` / `/processes` | 停止 / バックグラウンドプロセス |
 | `/queue [clear]` | 作業中に送ったメッセージ（キュー）の一覧 / `clear` で破棄 |
+| `/width [N\|N%\|+N\|-N\|reset]` | パネルの幅（`:CoagentWidth` と同じ） |
 | `/clear` / `/help` | 入力欄をクリア / コマンド一覧 |
 
 - 未知のコマンド（`/foo`）はエラー表示のみで送信されず、入力も残ります
@@ -966,6 +967,7 @@ delegate = {
 | `:CoagentEffort [level] [role]` | 推論の強さ: `minimal` / `low` / `medium` / `high` / `off` / `default`（`/effort` と同じ） |
 | `:CoagentNew` / `:CoagentSessions` | 新規セッション / 保存済みセッション一覧 |
 | `:CoagentLayout [vertical\|float]` | レイアウト切替 |
+| `:CoagentWidth [N\|N%\|+N\|-N\|reset]` | パネルの幅: 列数・端末幅に対する % ・相対・`ui.width` に戻す。手で変えた幅も含めて記憶します |
 
 ### キーマップ（既定値。すべて `keymaps` で変更・無効化可能）
 
@@ -982,6 +984,7 @@ delegate = {
 | `p` / `R` | 一時停止 / 再開 | `gs` / `gn` | セッション一覧 / 新規 |
 | `gm` | モード切替 | `i` | 入力欄へ |
 | `gu` | 利用量・残量 | `gi` | 承認待ちの計画を修正（フィードバックを入力） |
+| `>` / `<` | パネルを 5 列広く / 狭く（回数指定可: `3>`） | | |
 | `q` | 閉じる | `g?` | ヘルプ |
 
 入力欄: `<CR>`（ノーマル）/ `<C-s>`（インサート）送信（作業中はキューへ）、`<C-c>` キューを戻す / 停止、`<C-k>` パネルへ、`<C-p>`/`<C-n>` 履歴。
@@ -1079,6 +1082,7 @@ require('coagent').setup({
   hide_copilotchat_ui = true, -- CopilotChat は裏で使うだけ（ログイン案内でもチャット窓を開かせない）
   usage = {
     show_in_bar = true, refresh_after_task = true, -- 残量を winbar に表示
+    hide_quotas = { 'Premium requests' }, -- 表示しない枠（旧方式のリクエスト課金の枠）
     show_tokens = true, -- 実行中タスクのリクエスト数・トークン数・キャッシュヒット率を winbar に表示（`6req 48k c91%`）
     show_request_usage = true, -- 応答ごとの内訳（in / cached / out）をタイムラインに表示
     rates = nil,        -- クレジットの概算用（下記「利用量とクレジット」）
@@ -1119,7 +1123,10 @@ require('coagent').setup({
   -- （experiments.monitor.enabled の間、実験の実行には適用しない。そちらは max_hours を参照）
   background = { max_processes = 3, max_output_bytes = 1024 * 1024, max_lifetime_ms = 2 * 60 * 60 * 1000 },
   session = { persist = true, save_tool_output = true },
-  ui = { layout = 'vertical', width = 0.42, icons = 'unicode', show_reasoning = false },
+  -- width: パネルの初期幅（割合または列数）。手で変えた幅（マウス、<C-w><、:vertical resize、:CoagentWidth、
+  -- パネルの < / >）は、開き直し・端末のリサイズ・再起動をまたいで記憶します（remember_size）
+  ui = { layout = 'vertical', width = 0.42, min_width = 36, max_width = nil, min_editor_width = 30, remember_size = true,
+         icons = 'unicode', show_reasoning = false },
   prompts = {}, -- 独自のプロンプトテンプレート（「プロンプトテンプレート」参照）
   -- Agent Skills（「Agent Skills」参照）。paths は既定のリストを置き換える
   skills = { enabled = true, paths = { '~/.config/coagent/skills' }, repo = true, max_listed = 50, max_description = 200 },

@@ -104,6 +104,10 @@ Check the setup with |:checkhealth| coagent.
 :CoagentNew              New session.
 :CoagentSessions         Restore a saved session of this project.
 :CoagentLayout [layout]  vertical | float
+:CoagentWidth [spec]     Panel width: N (columns), N%, +N, -N, reset. A width
+                         set by hand (mouse, <C-w><, :vertical resize, < / >
+                         in the panel) is remembered across reopen, terminal
+                         resizes and restarts (`ui.remember_size`).
 :CoagentUsage [billing]  Copilot quota, plus requests/tokens of the last task
                               and the session (|coagent-usage|). "billing"
                               opens the GitHub billing page in the browser.

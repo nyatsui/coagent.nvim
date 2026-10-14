@@ -35,6 +35,9 @@ local defaults = {
 
   usage = {
     show_in_bar = true, -- remaining Copilot quota in the panel status bar
+    -- quotas never shown (status bar and :CoagentUsage). "Premium requests" is
+    -- the legacy request-based quota and does not describe token billing.
+    hide_quotas = { 'Premium requests' },
     refresh_after_task = true, -- re-fetch after every task (CopilotChat caches it for 5 minutes)
     show_tokens = true, -- requests/tokens of the running task ("6req 48k c91%") in the status bar
     -- token breakdown of each model response in the timeline
@@ -440,9 +443,14 @@ local defaults = {
 
   ui = {
     layout = 'vertical', -- 'vertical' | 'float'
-    width = 0.42, -- fraction of columns (vertical) or absolute when > 1
+    width = 0.42, -- initial width: fraction of columns (vertical) or absolute when > 1
     min_width = 36,
-    max_width = 100,
+    max_width = nil, -- nil = no cap (columns, or a fraction when <= 1)
+    min_editor_width = 30, -- columns always left for the editor
+    -- Remember the panel width / input height you set by hand (mouse, <C-w><,
+    -- :vertical resize, :CoagentWidth, < / > in the panel) across reopen,
+    -- terminal resizes and restarts (saved in stdpath('state')/coagent/ui_size.json).
+    remember_size = true,
     input_height = 5,
     float = { width = 0.8, height = 0.85, border = 'rounded' },
     icons = 'unicode', -- 'unicode' | 'ascii' | 'nerd'
@@ -492,6 +500,8 @@ local defaults = {
       next_item = ']]',
       prev_item = '[[',
       help = 'g?',
+      widen = '>', -- panel 5 columns wider (count: 3> = 15)
+      narrow = '<',
     },
     input = {
       submit = { n = '<CR>', i = '<C-s>' },

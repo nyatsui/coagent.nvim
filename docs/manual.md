@@ -17,6 +17,8 @@
 ```
 
 - 画面幅が `ui.min_width + 30` 未満なら自動で float レイアウトになります。`:CoagentLayout float` で手動切替
+- パネルの幅はマウスや `<C-w><` / `<C-w>>`、パネル内の `<` / `>`（5 列ずつ）、`:CoagentWidth 50%` / `+10` / `reset` で変えられます。
+  変えた幅は端末に対する割合として記憶し、開き直し・端末のリサイズ・再起動後も保たれます（`ui.remember_size = false` で無効）。入力欄の高さも同様
 - タイムラインのアイコン（unicode / ascii）
 
 | 表示 | unicode | ascii | 意味 |

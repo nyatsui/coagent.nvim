@@ -1957,7 +1957,7 @@ function M.usage(arg)
     if not usage then
       table.insert(lines, '  Quota unavailable: ' .. util.clip(tostring(err), 80))
     end
-    for _, q in ipairs(usage and usage.quotas or {}) do
+    for _, q in ipairs(usage and Usage.visible_quotas(usage.quotas, config.options.usage.hide_quotas) or {}) do
       if q.unlimited then
         table.insert(lines, string.format('  %-18s unlimited', q.name))
       elseif q.total == 0 then
@@ -2039,6 +2039,23 @@ function M.set_layout(name)
   M.view():set_layout(name)
 end
 
+--- Panel width: "60" (columns), "50%", "+10", "-10" or "reset" (back to
+--- `ui.width`). Without an argument, shows the current width.
+---@param spec string?
+function M.set_width(spec)
+  local v = M.view()
+  spec = vim.trim(spec or '')
+  if spec == '' then
+    local w = v:visible() and v.wins.layout ~= 'float' and vim.api.nvim_win_get_width(v.wins.panel) or require('coagent.ui.layout').panel_width(config.options.ui)
+    notify(string.format('panel width %d of %d columns (%d%%). :CoagentWidth N | N%% | +N | -N | reset', w, vim.o.columns, math.floor(w / vim.o.columns * 100 + 0.5)))
+    return
+  end
+  local ok, err = v:set_width(spec)
+  if not ok then
+    notify('CoagentWidth: ' .. tostring(err), vim.log.levels.WARN)
+  end
+end
+
 --- winbar expression entry point
 function M.winbar()
   return state.view and state.view:bar() or ''
@@ -2054,6 +2071,8 @@ end
 
 --- Reset all state (tests).
 function M._reset()
+  require('coagent.ui.layout').size = nil
+  pcall(vim.fn.delete, vim.fn.stdpath('state') .. '/coagent/ui_size.json')
   local inline = package.loaded['coagent.ui.inline']
   if inline and inline.active then
     inline.active:close()

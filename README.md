@@ -320,6 +320,7 @@ input history (`<C-p>`/`<C-n>`) like normal prompts.
 | `/resume` | Resume a paused task (after a limit: continues with fresh counters; same as `:CoagentResume`) |
 | `/stop` / `/processes` | Stop / background processes |
 | `/queue [clear]` | Messages queued while the agent works / `clear` discards them |
+| `/width [N\|N%\|+N\|-N\|reset]` | Panel width (same as `:CoagentWidth`) |
 | `/clear` / `/help` | Clear the input / list commands |
 
 - Unknown commands (`/foo`) only show an error; nothing is sent and the input is kept
@@ -997,6 +998,7 @@ delegate = {
 | `:CoagentEffort [level] [role]` | Reasoning effort: `minimal` / `low` / `medium` / `high` / `off` / `default` (same as `/effort`) |
 | `:CoagentNew` / `:CoagentSessions` | New session / saved sessions |
 | `:CoagentLayout [vertical\|float]` | Switch layout |
+| `:CoagentWidth [N\|N%\|+N\|-N\|reset]` | Panel width: columns, percent of the terminal, relative, or back to `ui.width`. Remembered (also when you resize by hand) |
 
 ### Keymaps (defaults; all can be changed or disabled in `keymaps`)
 
@@ -1013,6 +1015,7 @@ Panel (buffer-local):
 | `p` / `R` | Pause / resume | `gs` / `gn` | Sessions / new |
 | `gm` | Switch mode | `i` | Go to the input |
 | `gu` | Usage and quota | `gi` | Revise the plan waiting for approval (asks for feedback) |
+| `>` / `<` | Panel 5 columns wider / narrower (count: `3>`) | | |
 | `q` | Close | `g?` | Help |
 
 Input box: `<CR>` (Normal) / `<C-s>` (Insert) sends (queued while the agent works), `<C-c>` returns the queue / stops,
@@ -1117,6 +1120,7 @@ require('coagent').setup({
   hide_copilotchat_ui = true, -- use CopilotChat only behind the scenes (it never opens its chat window, even for login)
   usage = {
     show_in_bar = true, refresh_after_task = true, -- remaining quota in the winbar
+    hide_quotas = { 'Premium requests' }, -- never shown (legacy request-based quota)
     show_tokens = true, -- requests, tokens and prompt-cache hits of the running task in the winbar (`6req 48k c91%`)
     show_request_usage = true, -- per-response breakdown (in / cached / out) in the timeline
     rates = nil,        -- for the credit estimate (see "Usage and credits")
@@ -1157,7 +1161,10 @@ require('coagent').setup({
   -- (not for experiment runs while experiments.monitor.enabled; see max_hours there)
   background = { max_processes = 3, max_output_bytes = 1024 * 1024, max_lifetime_ms = 2 * 60 * 60 * 1000 },
   session = { persist = true, save_tool_output = true },
-  ui = { layout = 'vertical', width = 0.42, icons = 'unicode', show_reasoning = false },
+  -- width: initial panel width (fraction or columns). A width you set by hand (mouse, <C-w><, :vertical resize,
+  -- :CoagentWidth, < / > in the panel) is remembered across reopen, terminal resizes and restarts (remember_size)
+  ui = { layout = 'vertical', width = 0.42, min_width = 36, max_width = nil, min_editor_width = 30, remember_size = true,
+         icons = 'unicode', show_reasoning = false },
   prompts = {}, -- your own prompt templates (see "Prompt templates")
   -- Agent Skills (see "Agent Skills"); paths replace the default list
   skills = { enabled = true, paths = { '~/.config/coagent/skills' }, repo = true, max_listed = 50, max_description = 200 },

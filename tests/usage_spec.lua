@@ -77,6 +77,19 @@ describe('usage accounting', function()
     assert.are.equal('1req 100', Usage.short(acc2))
   end)
 
+  it('hides the legacy Premium requests quota and Completions', function()
+    local quotas = {
+      { name = 'Premium requests', total = 300, used = 120, remaining = 180 },
+      { name = 'Chat', unlimited = true },
+      { name = 'Completions', unlimited = true },
+    }
+    local names = vim.tbl_map(function(q)
+      return q.name
+    end, Usage.visible_quotas(quotas, { 'Premium requests' }))
+    assert.are.same({ 'Chat' }, names)
+    assert.are.equal(2, #Usage.visible_quotas(quotas, {}))
+  end)
+
   it('prices tokens like the models-and-pricing table (USD per 1M, 1 credit = $0.01)', function()
     local acc = Usage.new()
     -- 1M input of which 800k cached and 100k cache write, 100k output
