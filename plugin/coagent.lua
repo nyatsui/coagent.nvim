@@ -213,6 +213,15 @@ end, {
 cmd('CoagentProcesses', function()
   agent().processes()
 end, { desc = 'Show or stop background processes started by the agent' })
+cmd('CoagentBudget', function(a)
+  agent().budget(a.args)
+end, {
+  nargs = '*',
+  desc = 'Token budgets: [tokens|credits|session] <n|200k|off|default>',
+  complete = function()
+    return { 'tokens', 'credits', 'session', 'off', 'default' }
+  end,
+})
 cmd('CoagentWidth', function(a)
   agent().set_width(a.args)
 end, {

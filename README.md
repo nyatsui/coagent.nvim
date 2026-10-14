@@ -320,6 +320,7 @@ input history (`<C-p>`/`<C-n>`) like normal prompts.
 | `/resume` | Resume a paused task (after a limit: continues with fresh counters; same as `:CoagentResume`) |
 | `/stop` / `/processes` | Stop / background processes |
 | `/queue [clear]` | Messages queued while the agent works / `clear` discards them |
+| `/budget [tokens\|credits\|session] <n\|200k\|off\|default>` | Token budgets for this session (see "Per-task limits") |
 | `/width [N\|N%\|+N\|-N\|reset]` | Panel width (same as `:CoagentWidth`) |
 | `/clear` / `/help` | Clear the input / list commands |
 
@@ -363,6 +364,27 @@ repeating the same investigation or fix can burn a lot of tokens (money / quota)
 - The paused state is saved with the session, so you can quit Neovim, restore it with `:CoagentSessions` and resume
 - Pausing at a limit sends a notification (`'limit'`, on by default; see "Notifications")
 - If large tasks stop too often, raise `limits.max_steps` and friends; lower them to keep costs down
+
+**Token budgets** (for unattended work) bound what a task or session may spend. They are off by default:
+
+```lua
+limits = {
+  max_task_tokens = 300000,    -- per task, all roles (builder, explorers, advisor, judge, ledger, monitor checkpoints)
+  max_task_credits = nil,      -- per task, from the usage.rates estimate (only with rates)
+  max_session_tokens = nil,    -- per session
+  budget_counts = 'billed_equivalent', -- uncached input + cache writes + output + 0.1 x cached input; 'total' = all tokens
+  budget_warn_at = 0.8,        -- one notice at 80%
+},
+```
+
+- Reaching a budget **pauses** the agent at the next step boundary, like the limits above (`paused (limit)`, a `'limit'`
+  notification). `/resume` continues with a fresh budget. A training run the agent started keeps running while it is
+  paused, and waiting for it spends nothing
+- `billed_equivalent` counts cached input at a tenth, because the prompt cache makes it about ten times cheaper, so a
+  long, cache-friendly task is not stopped early. Responses without a token breakdown count with their total
+- `/budget` (or `:CoagentBudget`) shows the budgets and usage; `/budget 200k`, `/budget credits 50`, `/budget session 1m`,
+  `/budget off` and `/budget default` override them for this session (saved with the session)
+- The winbar shows the task budget next to the usage (`6req 48k c91% 31k/300k`), and `:CoagentUsage` lists all budgets
 
 ### Notifications (approval, done, failed)
 
@@ -998,6 +1020,7 @@ delegate = {
 | `:CoagentEffort [level] [role]` | Reasoning effort: `minimal` / `low` / `medium` / `high` / `off` / `default` (same as `/effort`) |
 | `:CoagentNew` / `:CoagentSessions` | New session / saved sessions |
 | `:CoagentLayout [vertical\|float]` | Switch layout |
+| `:CoagentBudget [tokens\|credits\|session] <n\|off\|default>` | Token budgets (same as `/budget`) |
 | `:CoagentWidth [N\|N%\|+N\|-N\|reset]` | Panel width: columns, percent of the terminal, relative, or back to `ui.width`. Remembered (also when you resize by hand) |
 
 ### Keymaps (defaults; all can be changed or disabled in `keymaps`)
@@ -1135,6 +1158,8 @@ require('coagent').setup({
     max_identical_calls = 4,      -- stop after repeating the same call with no change
     max_consecutive_denials = 3,
     max_tool_output_bytes = 24 * 1024, -- cap on output returned to the model (keeps head + tail)
+    max_task_tokens = nil, max_task_credits = nil, max_session_tokens = nil, -- token budgets (pause when reached)
+    budget_counts = 'billed_equivalent', budget_warn_at = 0.8,
   },
   commands = { default_timeout_ms = 120000, sandbox = 'auto', sandbox_all = false },
   auto = {
@@ -1313,10 +1338,22 @@ By default (`single`) the one model you picked with `:CoagentModel` does everyth
 
 ```lua
 opts = {
-  roles = { preset = 'full', explorer_model = 'gpt-4.1-mini', advisor_model = 'claude-sonnet' },
+  model = 'mid-tier-model-id',                -- builder: does most of the work (pick ids from :CoagentModel)
+  roles = {
+    preset = 'full',
+    explorer_model = 'cheap-fast-model-id',   -- parallel read-only searches
+    advisor_model = 'strongest-model-id',     -- only the three checkpoints
+    explorer_effort = 'low', advisor_effort = 'high',
+  },
   fallback_models = { 'auto' },
 }
 ```
+
+**Cost.** Most tokens go to the builder: every step resends its whole history (mostly from the prompt cache) plus tool
+output. The advisor only sees short briefs (task, plan, diff, failing output; capped at `roles.advisor.max_brief_bytes`)
+at most three times per task, in its own append-only history. A strong advisor next to a cheaper builder therefore costs
+far less than running the strong model as the builder, while it still reviews the decisions that matter. Compared with a
+single cheap model, it adds those few reviews. Explorers keep large search output out of the builder's history.
 
 ## Reasoning effort
 

@@ -1150,7 +1150,79 @@ end
 -- Size/time budgets: hitting one pauses the task (resumable with fresh
 -- counters) instead of failing it. The other limits stop the task because the
 -- user said no or the agent is looping.
-local RESUMABLE_LIMITS = { steps = true, tool_calls = true, duration = true }
+local RESUMABLE_LIMITS = { steps = true, tool_calls = true, duration = true, tokens = true, credits = true, session_tokens = true }
+
+--- Effective token budgets: the session override (`/budget`; false = off)
+--- over `limits.max_task_tokens` / `max_task_credits` / `max_session_tokens`.
+---@return {tokens:number?, credits:number?, session_tokens:number?}
+function Controller:budgets()
+  local l = self.config.limits
+  local o = self.session.budget or {}
+  local function pick(key, cfg)
+    if o[key] == false then
+      return nil
+    end
+    return tonumber(o[key]) or tonumber(cfg)
+  end
+  return {
+    tokens = pick('tokens', l.max_task_tokens),
+    credits = pick('credits', l.max_task_credits),
+    session_tokens = pick('session_tokens', l.max_session_tokens),
+  }
+end
+
+--- Usage counted against each budget since the last (re)start of its window.
+---@return {tokens:number, credits:number?, session_tokens:number}
+function Controller:budget_usage()
+  local mode = self.config.limits.budget_counts
+  local t = self.task or {}
+  local credits = t.usage and (Usage.estimate(t.usage, self.config.usage.rates)) or nil
+  return {
+    tokens = Usage.budget_tokens(t.usage, mode) - (t.budget_offset or 0),
+    credits = credits and (credits - (t.credit_offset or 0)) or nil,
+    session_tokens = Usage.budget_tokens(self.session.usage_totals, mode) - (self.session.budget_offset or 0),
+  }
+end
+
+--- Set a session budget override. kind: 'tokens' | 'credits' | 'session_tokens';
+--- value: number, false (off for this session) or nil (back to the config).
+function Controller:set_budget(kind, value)
+  self.session.budget = self.session.budget or {}
+  self.session.budget[kind] = value
+  if next(self.session.budget) == nil then
+    self.session.budget = nil
+  end
+  self.events:emit('usage', self.session.usage)
+  self:save()
+end
+
+local BUDGET_LABEL = { tokens = 'task token', credits = 'task credit', session_tokens = 'session token' }
+
+--- Budget check at a step boundary: the exceeded budget, or a one-time notice
+--- at `budget_warn_at`.
+function Controller:_check_budgets()
+  local b, u = self:budgets(), self:budget_usage()
+  local t = self.task
+  t.budget_warned = t.budget_warned or {}
+  local warn_at = tonumber(self.config.limits.budget_warn_at) or 0.8
+  for _, kind in ipairs({ 'tokens', 'credits', 'session_tokens' }) do
+    local max, used = b[kind], u[kind]
+    if max and used then
+      local fmt = kind == 'credits' and function(n)
+        return Usage.format_credits(n) .. ' credits (estimate)'
+      end or function(n)
+        return Usage.k(math.floor(n + 0.5)) .. ' tokens'
+      end
+      if used >= max then
+        return string.format('Reached the %s budget: %s of %s.', BUDGET_LABEL[kind], fmt(used), fmt(max)), kind
+      end
+      if used >= max * warn_at and not t.budget_warned[kind] then
+        t.budget_warned[kind] = true
+        self:notice('info', string.format('%s budget: %s of %s used (%d%%).', BUDGET_LABEL[kind]:gsub('^%l', string.upper), fmt(used), fmt(max), math.floor(used / max * 100)))
+      end
+    end
+  end
+end
 
 ---@return string? message, string? kind 'abort'|'steps'|'tool_calls'|'duration'|'denials'
 function Controller:_check_limits()
@@ -1171,6 +1243,7 @@ function Controller:_check_limits()
   if t.denials >= l.max_consecutive_denials then
     return string.format('The user denied %d actions in a row.', t.denials), 'denials'
   end
+  return self:_check_budgets()
 end
 
 --- Wait in PAUSED until resume (true) or stop / a new prompt (false).
@@ -1205,12 +1278,19 @@ function Controller:_pause_for_limit(gen, kind, message)
     t.steps, l.max_steps, t.tool_calls, l.max_tool_calls,
     util.format_duration(active), util.format_duration(l.max_duration_ms)
   )
-  self:notice('warn', table.concat({
+  local budget = BUDGET_LABEL[kind] ~= nil
+  local running = self.processes and self.processes:running_count() or 0
+  self:notice('warn', table.concat(vim.tbl_filter(function(x)
+    return x ~= nil
+  end, {
     'Paused: ' .. message,
     usage,
-    'These limits stop runaway loops (every request resends the whole history and costs tokens).',
-    ':CoagentResume or /resume continues this task with fresh counters; /stop ends it; a new message starts a new task.',
-  }, '\n'))
+    budget and 'Token budgets bound what an unattended task may spend (cached input counts a tenth with budget_counts = billed_equivalent).'
+      or 'These limits stop runaway loops (every request resends the whole history and costs tokens).',
+    (budget and running > 0) and string.format('%d background process(es) keep running; nothing is spent until you resume.', running) or nil,
+    budget and ':CoagentResume or /resume continues with a fresh budget; /budget changes it; /stop ends the task.'
+      or ':CoagentResume or /resume continues this task with fresh counters; /stop ends it; a new message starts a new task.',
+  }), '\n'))
   local resumed = self:_wait_resume(gen, { reason = 'limit', limit = kind, message = message })
   if not resumed then
     return false
@@ -1222,6 +1302,14 @@ function Controller:_pause_for_limit(gen, kind, message)
   t.tool_calls = 0
   t.started = util.now()
   t.waiting_ms = 0
+  -- fresh token budgets from here
+  local mode = self.config.limits.budget_counts
+  t.budget_offset = Usage.budget_tokens(t.usage, mode)
+  t.credit_offset = t.usage and (Usage.estimate(t.usage, self.config.usage.rates)) or nil
+  if kind == 'session_tokens' then
+    self.session.budget_offset = Usage.budget_tokens(self.session.usage_totals, mode)
+  end
+  t.budget_warned = {}
   self:notice('info', 'Resuming with fresh limits')
   return true
 end

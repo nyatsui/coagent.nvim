@@ -1932,6 +1932,20 @@ local function token_lines()
     if any_credits then
       table.insert(lines, '    credits are an ESTIMATE from usage.rates (1 credit = $0.01), not billing data')
     end
+    local b, bu = c:budgets(), c:budget_usage()
+    if b.tokens or b.credits or b.session_tokens then
+      table.insert(lines, '')
+      table.insert(lines, '  Budgets (' .. (config.options.limits.budget_counts or 'billed_equivalent') .. '; /budget to change)')
+      if b.tokens then
+        table.insert(lines, string.format('    task      %s / %s tokens', Usage.k(math.floor(bu.tokens + 0.5)), Usage.k(b.tokens)))
+      end
+      if b.credits then
+        table.insert(lines, string.format('    task      %s / %s credits (estimate)%s', bu.credits and Usage.format_credits(bu.credits) or '?', Usage.format_credits(b.credits), bu.credits and '' or ' (needs usage.rates)'))
+      end
+      if b.session_tokens then
+        table.insert(lines, string.format('    session   %s / %s tokens', Usage.k(math.floor(bu.session_tokens + 0.5)), Usage.k(b.session_tokens)))
+      end
+    end
   end
   return lines
 end
@@ -2037,6 +2051,47 @@ end
 
 function M.set_layout(name)
   M.view():set_layout(name)
+end
+
+--- `/budget [tokens|credits|session] <n|off|default>`: session token budgets.
+--- Without arguments, shows the budgets and their usage.
+---@param arg string?
+function M.budget(arg)
+  local c = M.controller()
+  local words = vim.split(vim.trim(arg or ''), '%s+', { trimempty = true })
+  if #words == 0 then
+    local b, u = c:budgets(), c:budget_usage()
+    local function line(label, max, used, unit)
+      return string.format('%s: %s', label, max and string.format('%s / %s %s', used and Usage.k(math.floor(used + 0.5)) or '?', Usage.k(max), unit) or 'none')
+    end
+    notify(table.concat({
+      line('task tokens', b.tokens, u.tokens, 'tokens'),
+      'task credits: ' .. (b.credits and string.format('%s / %s (estimate)', u.credits and Usage.format_credits(u.credits) or '?', Usage.format_credits(b.credits)) or 'none'),
+      line('session tokens', b.session_tokens, u.session_tokens, 'tokens'),
+      'usage: /budget [tokens|credits|session] <n|200k|off|default>',
+    }, '\n'))
+    return
+  end
+  local kind = ({ tokens = 'tokens', credits = 'credits', session = 'session_tokens' })[words[1]]
+  local value_word = kind and words[2] or words[1]
+  kind = kind or 'tokens'
+  local value
+  if value_word == 'off' then
+    value = false
+  elseif value_word == 'default' then
+    value = nil
+  else
+    local n, suffix = (value_word or ''):lower():match('^([%d%.]+)([km]?)$')
+    n = tonumber(n)
+    if not n then
+      notify('/budget: expected a number (e.g. 200000, 200k, 1.5m), off or default', vim.log.levels.WARN)
+      return
+    end
+    value = n * (suffix == 'k' and 1000 or suffix == 'm' and 1000000 or 1)
+  end
+  c:set_budget(kind, value)
+  local b = c:budgets()
+  notify(string.format('%s budget: %s', kind:gsub('_', ' '), b[kind] and (kind == 'credits' and Usage.format_credits(b[kind]) .. ' credits' or Usage.k(b[kind]) .. ' tokens') or 'none'))
 end
 
 --- Panel width: "60" (columns), "50%", "+10", "-10" or "reset" (back to

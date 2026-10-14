@@ -78,6 +78,30 @@ function M.add(acc, role, model, res)
   r.tokens = r.tokens + tokens
 end
 
+--- Tokens counted against a budget.
+---   'billed_equivalent' (default): uncached input + cache writes + output +
+---   0.1 x cached input (cached input costs about a tenth); requests without a
+---   breakdown count with their total tokens.
+---   'total': all tokens.
+---@param acc table? accumulator (task / session usage)
+---@param mode string?
+---@return number
+function M.budget_tokens(acc, mode)
+  if not acc then
+    return 0
+  end
+  local total = tonumber(acc.tokens) or 0
+  if mode == 'total' or not tonumber(acc.input_tokens) then
+    return total
+  end
+  local cached = acc.cached_tokens or 0
+  local write = acc.cache_write_tokens or 0
+  local fresh = math.max(0, (acc.input_tokens or 0) - cached - write)
+  local detailed = fresh + write + (acc.output_tokens or 0) + 0.1 * cached
+  local rest = math.max(0, total - (acc.detailed_tokens or 0))
+  return detailed + rest
+end
+
 --- Quotas worth showing: drops the ones named in `usage.hide_quotas` (by
 --- default the legacy "Premium requests", which does not describe token
 --- billing) and Completions (unlimited on paid plans).

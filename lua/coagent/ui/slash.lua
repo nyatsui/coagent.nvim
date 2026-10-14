@@ -198,6 +198,15 @@ M.COMMANDS = {
     end,
   },
   {
+    name = 'budget',
+    args = '[tokens|credits|session] <n|200k|off|default>',
+    desc = 'Token budgets for this session (pause when reached)',
+    complete = { 'tokens', 'credits', 'session', 'off', 'default' },
+    run = function(arg)
+      app().budget(arg)
+    end,
+  },
+  {
     name = 'width',
     args = '[N|N%|+N|-N|reset]',
     desc = 'Panel width (remembered; also < / > in the panel)',

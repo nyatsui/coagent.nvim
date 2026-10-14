@@ -102,6 +102,16 @@ local defaults = {
     max_consecutive_denials = 3, -- user rejected N actions in a row -> stop
     max_request_retries = 2, -- transient API errors
     max_tool_output_bytes = 24 * 1024, -- tool result size sent back to the model
+    -- Token budgets (nil = none). Reaching one pauses the agent at the next step
+    -- boundary (resumable with /resume; a running training process keeps going).
+    -- `/budget` overrides them for the session.
+    max_task_tokens = nil, -- per task (all roles: builder, explorers, advisor, judge, ledger, monitor checkpoints)
+    max_task_credits = nil, -- per task, from the usage.rates estimate (only with rates)
+    max_session_tokens = nil, -- per session
+    -- 'billed_equivalent': uncached input + cache writes + output + 0.1 x cached input
+    -- (what drives the bill); 'total': all tokens
+    budget_counts = 'billed_equivalent',
+    budget_warn_at = 0.8, -- one notice at this fraction of a budget
     max_read_bytes = 256 * 1024, -- largest file the model may read at once
     context_budget = nil, -- tokens; nil = 70% of model max input tokens (fallback 64k)
   },

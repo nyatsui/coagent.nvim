@@ -335,7 +335,17 @@ function View:bar()
     table.insert(segs, { 1, 2, 'step ' .. c.task.steps })
     local u = c.task.usage
     if self.config.usage.show_tokens ~= false and u and u.requests > 0 then
-      table.insert(segs, { 1.5, 3.5, Usage.short(u, self.config.usage.rates, ic.approx) })
+      local text = Usage.short(u, self.config.usage.rates, ic.approx)
+      local b = c:budgets()
+      if b.tokens or b.credits then
+        local used = c:budget_usage()
+        if b.tokens then
+          text = text .. ' ' .. Usage.k(math.floor(used.tokens + 0.5)) .. '/' .. Usage.k(b.tokens)
+        elseif used.credits then
+          text = text .. ' ' .. Usage.format_credits(used.credits) .. '/' .. Usage.format_credits(b.credits) .. 'cr'
+        end
+      end
+      table.insert(segs, { 1.5, 3.5, text })
     end
   end
   table.insert(segs, { 2, 1, mode_short })

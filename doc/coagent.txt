@@ -104,6 +104,14 @@ Check the setup with |:checkhealth| coagent.
 :CoagentNew              New session.
 :CoagentSessions         Restore a saved session of this project.
 :CoagentLayout [layout]  vertical | float
+:CoagentBudget [kind] {n}
+                         Token budgets for this session: tokens (per task),
+                         credits (per task, needs usage.rates), session; n
+                         like 200000 / 200k / 1m, or off / default. Reaching
+                         one pauses the agent (/resume continues with a fresh
+                         budget; running training keeps going). Config:
+                         limits.max_task_tokens / max_task_credits /
+                         max_session_tokens, limits.budget_counts.
 :CoagentWidth [spec]     Panel width: N (columns), N%, +N, -N, reset. A width
                          set by hand (mouse, <C-w><, :vertical resize, < / >
                          in the panel) is remembered across reopen, terminal

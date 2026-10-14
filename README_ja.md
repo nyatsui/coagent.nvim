@@ -310,6 +310,7 @@ vim.keymap.set('x', '<leader>ai', ':CoagentInline<CR>', { desc = 'Coagent inline
 | `/resume` | 一時停止したタスクを再開（上限で止まった場合はカウンタをリセットして続行。`:CoagentResume` と同じ） |
 | `/stop` / `/processes` | 停止 / バックグラウンドプロセス |
 | `/queue [clear]` | 作業中に送ったメッセージ（キュー）の一覧 / `clear` で破棄 |
+| `/budget [tokens\|credits\|session] <n\|200k\|off\|default>` | このセッションのトークン上限（「タスクごとの上限」参照） |
 | `/width [N\|N%\|+N\|-N\|reset]` | パネルの幅（`:CoagentWidth` と同じ） |
 | `/clear` / `/help` | 入力欄をクリア / コマンド一覧 |
 
@@ -352,6 +353,26 @@ Copilot はトークン単位で課金され、エージェントは**リクエ�
 - 一時停止はセッションに保存されるので、Neovim を終了しても `:CoagentSessions` で復元して再開できます
 - 上限で一時停止したときは通知（`'limit'`、既定で有効）が届きます（下記「通知」）
 - 大きな作業で頻繁に止まる場合は `limits.max_steps` などを上げてください。逆に費用を抑えたい場合は下げます
+
+**トークン上限**（任せきりにするとき向け）は、1 タスク・1 セッションで使えるトークンの上限です。既定は無効です:
+
+```lua
+limits = {
+  max_task_tokens = 300000,    -- 1 タスクあたり。全役割（作業担当・調査担当・アドバイザー・judge・台帳・学習の見守り）の合計
+  max_task_credits = nil,      -- 1 タスクあたりのクレジット（usage.rates の見積もり。rates がある場合だけ）
+  max_session_tokens = nil,    -- 1 セッションあたり
+  budget_counts = 'billed_equivalent', -- キャッシュなし入力 + キャッシュ書込 + 出力 + キャッシュ入力 × 0.1。'total' = 全トークン
+  budget_warn_at = 0.8,        -- 80% で 1 回お知らせ
+},
+```
+
+- 上限に達すると、上の回数・時間の上限と同じく次のステップの区切りで**一時停止**します（`paused (limit)`、`'limit'` 通知）。
+  `/resume` で上限をリセットして続行。エージェントが起動した学習は一時停止中も動き続け、待っている間はトークンを使いません
+- `billed_equivalent` はキャッシュから読んだ入力を 1/10 として数えます（プロンプトキャッシュで約 10 分の 1 の料金になるため）。
+  キャッシュが効く長いタスクが早く止まりすぎません。内訳が返らない応答は合計トークン数で数えます
+- `/budget`（または `:CoagentBudget`）で上限と使用量を表示。`/budget 200k`、`/budget credits 50`、`/budget session 1m`、
+  `/budget off`、`/budget default` でこのセッションだけ変更できます（セッションと一緒に保存）
+- winbar の使用量の横にタスクの上限（`6req 48k c91% 31k/300k`）、`:CoagentUsage` にすべての上限を表示
 
 ### 通知（承認待ち・完了・失敗）
 
@@ -967,6 +988,7 @@ delegate = {
 | `:CoagentEffort [level] [role]` | 推論の強さ: `minimal` / `low` / `medium` / `high` / `off` / `default`（`/effort` と同じ） |
 | `:CoagentNew` / `:CoagentSessions` | 新規セッション / 保存済みセッション一覧 |
 | `:CoagentLayout [vertical\|float]` | レイアウト切替 |
+| `:CoagentBudget [tokens\|credits\|session] <n\|off\|default>` | トークン上限（`/budget` と同じ） |
 | `:CoagentWidth [N\|N%\|+N\|-N\|reset]` | パネルの幅: 列数・端末幅に対する % ・相対・`ui.width` に戻す。手で変えた幅も含めて記憶します |
 
 ### キーマップ（既定値。すべて `keymaps` で変更・無効化可能）
@@ -1097,6 +1119,8 @@ require('coagent').setup({
     max_identical_calls = 4,      -- 変更なしで同一呼び出しを繰り返したら停止
     max_consecutive_denials = 3,
     max_tool_output_bytes = 24 * 1024, -- モデルへ返す出力の上限（先頭+末尾を保持）
+    max_task_tokens = nil, max_task_credits = nil, max_session_tokens = nil, -- トークン上限（達したら一時停止）
+    budget_counts = 'billed_equivalent', budget_warn_at = 0.8,
   },
   commands = { default_timeout_ms = 120000, sandbox = 'auto', sandbox_all = false },
   auto = {
@@ -1267,10 +1291,22 @@ Copilot のモデル一覧 API は旧方式（リクエスト回数による課�
 
 ```lua
 opts = {
-  roles = { preset = 'full', explorer_model = 'gpt-4.1-mini', advisor_model = 'claude-sonnet' },
+  model = '中くらいのモデルのID',              -- 作業担当: 作業の大部分（ID は :CoagentModel の一覧から）
+  roles = {
+    preset = 'full',
+    explorer_model = '安くて速いモデルのID',    -- 並列の読み取り専用の調査
+    advisor_model = '最も強いモデルのID',       -- 3 つの節目だけ
+    explorer_effort = 'low', advisor_effort = 'high',
+  },
   fallback_models = { 'auto' },
 }
 ```
+
+**費用について。** トークンの大半は作業担当が使います（毎ステップ、全履歴（ほとんどはキャッシュ）とツール出力を送るため）。
+アドバイザーが受け取るのは短い要約（依頼・計画・差分・失敗出力。`roles.advisor.max_brief_bytes` で上限）だけで、1 タスクに
+最大 3 回、専用の追記のみの履歴で動きます。そのため、強いモデルを作業担当にするよりずっと安く、重要な判断だけ強いモデルに
+見てもらえます。安いモデル 1 つだけの場合と比べると、その数回のレビュー分が増えます。調査担当は大きな検索結果を作業担当の
+履歴に入れないので、作業担当の消費を抑えます。
 
 ## 推論の強さ（reasoning effort）
 

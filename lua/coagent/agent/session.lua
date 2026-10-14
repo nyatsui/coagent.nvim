@@ -256,6 +256,8 @@ function Session:serialize(opts)
     roles = self.roles,
     role_stats = self.role_stats,
     usage_totals = self.usage_totals,
+    budget = self.budget,
+    budget_offset = self.budget_offset,
     rewind_note = self.rewind_note,
     plan = self.plan and vim.tbl_extend('force', self.plan, { advice = clean(self.plan.advice) }) or nil,
     waiting = self.waiting and vim.tbl_extend('force', self.waiting, {
@@ -294,6 +296,8 @@ function M.deserialize(data)
   s.roles = data.roles
   s.role_stats = data.role_stats
   s.usage_totals = data.usage_totals
+  s.budget = data.budget
+  s.budget_offset = data.budget_offset
   s.checkpoints = data.checkpoints or {}
   s.rewind_note = data.rewind_note
   s.plan = data.plan
