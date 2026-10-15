@@ -20,7 +20,12 @@ function View.new(config, actions)
   local self = setmetatable({ config = config, actions = actions, subs = {}, wins = nil, frame = 1 }, View)
   self.panel = Panel.new(config)
   self.input = Input.new(config, function(text)
-    return actions.submit(text)
+    local res, opts = actions.submit(text)
+    if res ~= false and self.config.ui.auto_scroll then
+      -- a new prompt: show its answer even if the panel was scrolled up
+      self.panel:follow_end()
+    end
+    return res, opts
   end)
   self.layout = config.ui.layout
   self:_keymaps()
@@ -90,6 +95,17 @@ function View:attach(c)
   on('state', function(e)
     self:refresh_bar()
     self:_spinner()
+    -- the user unblocked the agent (approved / denied, resumed, answered a plan
+    -- or an external subtask): its next output should be visible even if the
+    -- cursor was left on the item being decided
+    local unblocked = { WAITING_APPROVAL = true, PAUSED = true, WAITING_EXTERNAL = true }
+    if unblocked[e.prev] and (e.state == 'THINKING' or e.state == 'EXECUTING_TOOL' or e.state == 'STREAMING') and self.config.ui.auto_scroll then
+      vim.schedule(function()
+        if self:visible() then
+          self.panel:follow_end()
+        end
+      end)
+    end
     local busy = c:busy()
     local hint = nil
     if e.state == 'WAITING_APPROVAL' then
@@ -205,8 +221,7 @@ function View:open(opts)
     self:input_statusline()
 
     self:refresh_bar()
-    local last = vim.api.nvim_buf_line_count(self.panel.buf)
-    pcall(vim.api.nvim_win_set_cursor, self.wins.panel, { last, 0 })
+    self.panel:follow_end()
   end
   if opts.focus == 'input' then
     self:focus_input()

@@ -126,6 +126,46 @@ describe('ui', function()
     assert.are.equal(last, vim.api.nvim_win_get_cursor(view.wins.panel)[1])
   end)
 
+  it('a new prompt jumps to the end even after scrolling up', function()
+    setup({ { content = string.rep('first answer line\n', 60) }, { content = string.rep('second answer line\n', 60), chunks = 10 } })
+    agent.open({ focus = 'input' })
+    local view = agent.view()
+    local c = agent.controller()
+    c:submit('one')
+    h.wait(function()
+      return c:state() == 'COMPLETED'
+    end)
+    vim.api.nvim_win_set_cursor(view.wins.panel, { 1, 0 }) -- the user scrolled up to read
+    view.input:set_text('two')
+    view.input:submit()
+    h.wait(function()
+      return c:state() == 'COMPLETED' and #c.session.checkpoints == 2
+    end)
+    local last = vim.api.nvim_buf_line_count(view.panel.buf)
+    assert.are.equal(last, vim.api.nvim_win_get_cursor(view.wins.panel)[1])
+  end)
+
+  it('follows again after an approval made with the cursor on the item', function()
+    setup({
+      { tool_calls = { { name = 'edit_file', arguments = { path = 'a.txt', old_string = 'world', new_string = 'there' } } } },
+      { content = string.rep('after approval\n', 60), chunks = 10 },
+    })
+    agent.open({ focus = 'input' })
+    local view = agent.view()
+    local c = agent.controller()
+    c:submit('edit')
+    h.wait(function()
+      return c:state() == 'WAITING_APPROVAL'
+    end)
+    vim.api.nvim_win_set_cursor(view.wins.panel, { 2, 0 }) -- reading the diff above
+    c:approve(nil, { action = 'approve' })
+    h.wait(function()
+      return c:state() == 'COMPLETED'
+    end)
+    local last = vim.api.nvim_buf_line_count(view.panel.buf)
+    assert.are.equal(last, vim.api.nvim_win_get_cursor(view.wins.panel)[1])
+  end)
+
   it('expands and collapses tool details', function()
     setup({
       { tool_calls = { { name = 'read_file', arguments = { path = 'a.txt' } } } },

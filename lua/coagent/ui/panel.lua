@@ -125,15 +125,32 @@ local function followers(self)
   return out
 end
 
+--- Put the cursor at the end of the last line.
+local function to_end(self, win)
+  local last = vim.api.nvim_buf_line_count(self.buf)
+  local line = vim.api.nvim_buf_get_lines(self.buf, last - 1, last, false)[1] or ''
+  pcall(vim.api.nvim_win_set_cursor, win, { last, math.max(0, #line - 1) })
+end
+
 local function scroll(self, wins)
   if not self.config.ui.auto_scroll then
     return
   end
-  local last = vim.api.nvim_buf_line_count(self.buf)
   for _, win in ipairs(wins) do
     if vim.api.nvim_win_is_valid(win) then
-      pcall(vim.api.nvim_win_set_cursor, win, { last, 0 })
+      to_end(self, win)
     end
+  end
+end
+
+--- Jump every panel window to the end and follow from there (a new prompt
+--- was sent, so its answer should be visible even if the user had scrolled up).
+function Panel:follow_end()
+  if not self:valid() then
+    return
+  end
+  for _, win in ipairs(self:wins()) do
+    to_end(self, win)
   end
 end
 
