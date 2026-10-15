@@ -199,9 +199,9 @@ M.COMMANDS = {
   },
   {
     name = 'budget',
-    args = '[tokens|credits|session] <n|200k|off|default>',
-    desc = 'Token budgets for this session (pause when reached)',
-    complete = { 'tokens', 'credits', 'session', 'off', 'default' },
+    args = '[tokens|credits|session|month] <n|200k|off|default>',
+    desc = 'Token budgets for this session, and the monthly credit budget (pause when reached)',
+    complete = { 'tokens', 'credits', 'session', 'month', 'off', 'default' },
     run = function(arg)
       app().budget(arg)
     end,

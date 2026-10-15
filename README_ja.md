@@ -310,7 +310,7 @@ vim.keymap.set('x', '<leader>ai', ':CoagentInline<CR>', { desc = 'Coagent inline
 | `/resume` | 一時停止したタスクを再開（上限で止まった場合はカウンタをリセットして続行。`:CoagentResume` と同じ） |
 | `/stop` / `/processes` | 停止 / バックグラウンドプロセス |
 | `/queue [clear]` | 作業中に送ったメッセージ（キュー）の一覧 / `clear` で破棄 |
-| `/budget [tokens\|credits\|session] <n\|200k\|off\|default>` | このセッションのトークン上限（「タスクごとの上限」参照） |
+| `/budget [tokens\|credits\|session\|month] <n\|200k\|off\|default>` | このセッションのトークン上限と、月間クレジット上限（「タスクごとの上限」「月間の上限」参照） |
 | `/width [N\|N%\|+N\|-N\|reset]` | パネルの幅（`:CoagentWidth` と同じ） |
 | `/clear` / `/help` | 入力欄をクリア / コマンド一覧 |
 
@@ -373,6 +373,7 @@ limits = {
 - `/budget`（または `:CoagentBudget`）で上限と使用量を表示。`/budget 200k`、`/budget credits 50`、`/budget session 1m`、
   `/budget off`、`/budget default` でこのセッションだけ変更できます（セッションと一緒に保存）
 - winbar の使用量の横にタスクの上限（`6req 48k c91% 31k/300k`）、`:CoagentUsage` にすべての上限を表示
+- セッションやプロジェクトをまたぐ上限（プランの月間クレジット枠など）は「利用量とクレジット」の「月間の上限」を参照
 
 ### 通知（承認待ち・完了・失敗）
 
@@ -988,7 +989,7 @@ delegate = {
 | `:CoagentEffort [level] [role]` | 推論の強さ: `minimal` / `low` / `medium` / `high` / `off` / `default`（`/effort` と同じ） |
 | `:CoagentNew` / `:CoagentSessions` | 新規セッション / 保存済みセッション一覧 |
 | `:CoagentLayout [vertical\|float]` | レイアウト切替 |
-| `:CoagentBudget [tokens\|credits\|session] <n\|off\|default>` | トークン上限（`/budget` と同じ） |
+| `:CoagentBudget [tokens\|credits\|session\|month] <n\|off\|default>` | トークン上限（`/budget` と同じ） |
 | `:CoagentWidth [N\|N%\|+N\|-N\|reset]` | パネルの幅: 列数・端末幅に対する % ・相対・`ui.width` に戻す。手で変えた幅も含めて記憶します |
 
 ### キーマップ（既定値。すべて `keymaps` で変更・無効化可能）
@@ -1108,6 +1109,8 @@ require('coagent').setup({
     show_tokens = true, -- 実行中タスクのリクエスト数・トークン数・キャッシュヒット率を winbar に表示（`6req 48k c91%`）
     show_request_usage = true, -- 応答ごとの内訳（in / cached / out）をタイムラインに表示
     rates = nil,        -- クレジットの概算用（下記「利用量とクレジット」）
+    month_start_day = 1, -- 月間台帳: この日のローカル時刻 0 時に月が切り替わる（「月間の上限」参照）
+    dir = nil,          -- 月間台帳のフォルダ。nil = stdpath('state')/coagent/usage
   },
   mode = 'supervised',
   plan = { default = false }, -- true: 新しいタスクはすべて計画フェーズから（/go で省略。「計画を先に確認する」参照）
@@ -1120,6 +1123,7 @@ require('coagent').setup({
     max_consecutive_denials = 3,
     max_tool_output_bytes = 24 * 1024, -- モデルへ返す出力の上限（先頭+末尾を保持）
     max_task_tokens = nil, max_task_credits = nil, max_session_tokens = nil, -- トークン上限（達したら一時停止）
+    max_monthly_credits = nil, max_monthly_tokens = nil, -- セッション・プロジェクトをまたぐ月間上限（「月間の上限」参照）
     budget_counts = 'billed_equivalent', budget_warn_at = 0.8,
   },
   commands = { default_timeout_ms = 120000, sandbox = 'auto', sandbox_all = false },
@@ -1262,6 +1266,43 @@ opts = {
 - reasoning トークンは出力に含まれるものとして出力単価で計算されます（API の出力トークン数に含まれます）
 - Long context 料金（一定の入力量を超えた場合の割増）は反映しません
 - 以前の `{ per_1k_tokens = n }`（1,000 トークンあたりのクレジット）形式も引き続き使えます
+
+### 月間の上限
+
+プランには毎月の AI クレジット枠があります。coagent は**自分自身の**リクエストを月ごとの小さな台帳に記録し、
+すべてのセッション・プロジェクト・Neovim インスタンスをまたいで、1 か月に使う量が上限を超える前にエージェントを一時停止できます:
+
+```lua
+opts = {
+  usage = {
+    rates = { ... },        -- クレジットに必要（「クレジットの概算」参照）
+    month_start_day = 1,    -- この日のローカル時刻 0 時に月が切り替わる（31 = その月の末日）
+  },
+  limits = {
+    max_monthly_credits = 1900, -- 1 か月の推定クレジット（usage.rates がある場合だけ）
+    max_monthly_tokens = nil,   -- 1 か月のトークン数（budget_counts に従う）。rates なしでも使える
+  },
+}
+```
+
+- モデルの応答ごと（全役割）に、推定クレジットとトークン数を `stdpath('state')/coagent/usage/<YYYY-MM>.json`
+  （フォルダ 0700、ファイル 0600。`<YYYY-MM>` は期間が始まった月）に加算します。モデル別・プロジェクト別の合計も持ちます。
+  ファイルは全インスタンスで共有し、書き込みのたびに読み込み → 加算 → 一時ファイル + rename で丸ごと置き換えるので、
+  ファイルが壊れることはありません。2 つのインスタンスがまったく同時に書き込むと 1 回分の加算が失われることがありますが、
+  もともと概算なので許容しています
+- 今月の推定値が上限に達すると、ほかの上限と同じく次のステップの区切りで**一時停止**します（`paused (limit)`、`'limit'` 通知）。
+  エージェントが起動した学習は動き続けます。タスクごとの上限と違い、`/resume` しても月の集計はリセットされません。
+  先に上限を上げる（`/budget month 2500`）か今月だけ無効にして（`/budget month off`）ください。そのままだと何も使わずに再び一時停止します。
+  `budget_warn_at` で 1 回お知らせします
+- `/budget month <n|off|default>` で今月のクレジット上限を変更します。月のファイルに保存されるので全インスタンス・全プロジェクトに効き、
+  月が変わると設定値に戻ります（`default` で設定値に戻す）
+- `/budget` と `:CoagentUsage` に `this month (estimate): 312 / 1900 credits, since 2026-10-01` のように表示し、トークン数と
+  上位のモデル・プロジェクトも示します。月間上限があるときは winbar にも `mo 312/1900cr` を表示します（パネルが狭いと最初に省略）
+- **数えるのは coagent 自身のリクエストだけ**です。同じ枠を使う VS Code、CopilotChat のチャット、ほかのツールは含みません。
+  クレジットは `usage.rates` からの概算です。正確な数値は GitHub の請求ページ（`:CoagentUsage billing`）で確認してください
+- `usage.rates` がないとクレジットの概算はできません。`/budget` と `:CoagentUsage` にそう表示し、`max_monthly_credits` は効かず、
+  `max_monthly_tokens` があればそれを代わりに使います。rates なしで行ったリクエストは「rate のないトークン」として表示し、
+  クレジットの合計には含めません
 
 ### 旧方式の料金倍率（multiplier）
 

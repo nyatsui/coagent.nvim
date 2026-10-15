@@ -19,6 +19,7 @@ local subagent = require('coagent.agent.subagent')
 local Advisor = require('coagent.agent.advisor')
 local Judge = require('coagent.agent.judge')
 local Usage = require('coagent.agent.usage')
+local Monthly = require('coagent.agent.monthly')
 local Delegate = require('coagent.agent.delegate')
 
 local S = State
@@ -156,6 +157,8 @@ function Controller:_record_role(role, model, res)
   end
   self.session.usage_totals = self.session.usage_totals or Usage.new()
   Usage.add(self.session.usage_totals, role, model, res)
+  -- monthly ledger shared by every session, project and instance
+  pcall(Monthly.add, self.config.usage.dir, self:month_period(), Monthly.entry(role, model, res, self.config.usage.rates), self.ws and self.ws.root or self.session.root)
   -- `/compact summary` runs while idle or paused: it counts for the session only
   if self.task and self.task.usage and State.is_busy(self.machine.current) then
     Usage.add(self.task.usage, role, model, res)
@@ -1150,7 +1153,11 @@ end
 -- Size/time budgets: hitting one pauses the task (resumable with fresh
 -- counters) instead of failing it. The other limits stop the task because the
 -- user said no or the agent is looping.
-local RESUMABLE_LIMITS = { steps = true, tool_calls = true, duration = true, tokens = true, credits = true, session_tokens = true }
+local RESUMABLE_LIMITS = {
+  steps = true, tool_calls = true, duration = true, tokens = true, credits = true, session_tokens = true,
+  monthly_credits = true, monthly_tokens = true,
+}
+local MONTHLY = { monthly_credits = true, monthly_tokens = true }
 
 --- Effective token budgets: the session override (`/budget`; false = off)
 --- over `limits.max_task_tokens` / `max_task_credits` / `max_session_tokens`.
@@ -1196,7 +1203,76 @@ function Controller:set_budget(kind, value)
   self:save()
 end
 
-local BUDGET_LABEL = { tokens = 'task token', credits = 'task credit', session_tokens = 'session token' }
+local BUDGET_LABEL = {
+  tokens = 'task token', credits = 'task credit', session_tokens = 'session token',
+  monthly_credits = 'monthly credit', monthly_tokens = 'monthly token',
+}
+
+--- The current billing month (`usage.month_start_day`, local time).
+---@return Coagent.MonthPeriod
+function Controller:month_period()
+  return Monthly.period(self.config.usage.month_start_day)
+end
+
+--- This month's usage (all instances and projects) against the monthly budgets.
+--- `credits` is nil without `usage.rates` (no estimate); `budget.credits` then
+--- does not apply and only `limits.max_monthly_tokens` can.
+---@return {period:Coagent.MonthPeriod, data:table, budget:{credits:number?, tokens:number?, override:number|false|nil}, credits:number?, tokens:number, rates:boolean}
+function Controller:monthly()
+  local period = self:month_period()
+  local data = Monthly.read(self.config.usage.dir, period)
+  local rates = self.config.usage.rates
+  local has_rates = type(rates) == 'table' and next(rates) ~= nil
+  return {
+    period = period,
+    data = data,
+    budget = Monthly.budgets(self.config.limits, data),
+    credits = has_rates and (tonumber(data.credits) or 0) or nil,
+    tokens = Monthly.tokens(data, self.config.limits.budget_counts),
+    rates = has_rates,
+  }
+end
+
+--- Month-wide credit budget override (`/budget month`): credits, false (off)
+--- or nil (back to `limits.max_monthly_credits`). Stored in the month file, so
+--- it applies to every instance and project until the month ends.
+---@return boolean ok, string? err
+function Controller:set_month_budget(value)
+  local ok, err = Monthly.set_budget(self.config.usage.dir, self:month_period(), value)
+  self.events:emit('usage', self.session.usage)
+  return ok, err
+end
+
+--- Monthly budget check: the exceeded budget, or a one-time notice (per
+--- instance and month) at `budget_warn_at`.
+---@return string? message, string? kind 'monthly_credits'|'monthly_tokens'
+function Controller:_check_monthly()
+  local l = self.config.limits
+  local m = self:monthly()
+  local warn_at = tonumber(l.budget_warn_at) or 0.8
+  self.monthly_warned = self.monthly_warned or {}
+  local checks = {
+    { 'monthly_credits', m.budget.credits, m.credits, function(n)
+      return Usage.format_credits(n) .. ' credits (estimate)'
+    end },
+    { 'monthly_tokens', m.budget.tokens, m.tokens, function(n)
+      return Usage.k(math.floor(n + 0.5)) .. ' tokens'
+    end },
+  }
+  for _, c in ipairs(checks) do
+    local kind, max, used, fmt = c[1], c[2], c[3], c[4]
+    if max and used then
+      if used >= max then
+        return string.format('Reached the %s budget: %s of %s since %s.', BUDGET_LABEL[kind], fmt(used), fmt(max), m.period.since), kind
+      end
+      local key = m.period.key .. ':' .. kind .. ':' .. max
+      if used >= max * warn_at and not self.monthly_warned[key] then
+        self.monthly_warned[key] = true
+        self:notice('info', string.format('Monthly %s budget: %s of %s used (%d%%) since %s; %s.', kind == 'monthly_credits' and 'credit' or 'token', fmt(used), fmt(max), math.floor(used / max * 100), m.period.since, Monthly.SCOPE_NOTE))
+      end
+    end
+  end
+end
 
 --- Budget check at a step boundary: the exceeded budget, or a one-time notice
 --- at `budget_warn_at`.
@@ -1222,6 +1298,7 @@ function Controller:_check_budgets()
       end
     end
   end
+  return self:_check_monthly()
 end
 
 ---@return string? message, string? kind 'abort'|'steps'|'tool_calls'|'duration'|'denials'
@@ -1279,16 +1356,19 @@ function Controller:_pause_for_limit(gen, kind, message)
     util.format_duration(active), util.format_duration(l.max_duration_ms)
   )
   local budget = BUDGET_LABEL[kind] ~= nil
+  local monthly = MONTHLY[kind]
   local running = self.processes and self.processes:running_count() or 0
   self:notice('warn', table.concat(vim.tbl_filter(function(x)
     return x ~= nil
   end, {
     'Paused: ' .. message,
     usage,
-    budget and 'Token budgets bound what an unattended task may spend (cached input counts a tenth with budget_counts = billed_equivalent).'
+    monthly and ('The monthly budget ' .. Monthly.SCOPE_NOTE .. '.')
+      or budget and 'Token budgets bound what an unattended task may spend (cached input counts a tenth with budget_counts = billed_equivalent).'
       or 'These limits stop runaway loops (every request resends the whole history and costs tokens).',
     (budget and running > 0) and string.format('%d background process(es) keep running; nothing is spent until you resume.', running) or nil,
-    budget and ':CoagentResume or /resume continues with a fresh budget; /budget changes it; /stop ends the task.'
+    monthly and 'Raise it with /budget month <n> (or /budget month off) and then :CoagentResume or /resume; /stop ends the task.'
+      or budget and ':CoagentResume or /resume continues with a fresh budget; /budget changes it; /stop ends the task.'
       or ':CoagentResume or /resume continues this task with fresh counters; /stop ends it; a new message starts a new task.',
   }), '\n'))
   local resumed = self:_wait_resume(gen, { reason = 'limit', limit = kind, message = message })
@@ -1310,7 +1390,9 @@ function Controller:_pause_for_limit(gen, kind, message)
     self.session.budget_offset = Usage.budget_tokens(self.session.usage_totals, mode)
   end
   t.budget_warned = {}
-  self:notice('info', 'Resuming with fresh limits')
+  if not (MONTHLY[kind] and self:_check_monthly()) then
+    self:notice('info', 'Resuming with fresh limits')
+  end
   return true
 end
 
@@ -1337,13 +1419,15 @@ function Controller:_loop(gen)
     end
 
     local limit, kind = self:_check_limits()
-    if limit then
+    while limit do
       if not RESUMABLE_LIMITS[kind] then
         return self:_finish(gen, S.FAILED, { reason = 'limit', message = limit })
       end
       if not self:_pause_for_limit(gen, kind, limit) then
         return
       end
+      -- the monthly budget does not restart on resume: still over it -> pause again
+      limit, kind = self:_check_monthly()
     end
 
     if self.machine.current ~= S.THINKING then

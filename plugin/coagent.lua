@@ -217,9 +217,9 @@ cmd('CoagentBudget', function(a)
   agent().budget(a.args)
 end, {
   nargs = '*',
-  desc = 'Token budgets: [tokens|credits|session] <n|200k|off|default>',
+  desc = 'Token budgets: [tokens|credits|session|month] <n|200k|off|default>',
   complete = function()
-    return { 'tokens', 'credits', 'session', 'off', 'default' }
+    return { 'tokens', 'credits', 'session', 'month', 'off', 'default' }
   end,
 })
 cmd('CoagentWidth', function(a)

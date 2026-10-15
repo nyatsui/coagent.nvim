@@ -200,6 +200,19 @@ limits = { max_task_tokens = 300000 }  -- 1 タスクで使えるトークン（
 上限に達するとエージェントは一時停止して通知します（学習は止まらずに続きます）。続けるなら `/resume`、上限を変えるなら
 `/budget 500k`。使用量は winbar（`31k/300k`）と `:CoagentUsage` で確認できます。
 
+夜通しの実験をいくつも回すなら、**月間の上限**も付けておくと、セッションやプロジェクトをまたいでプランのクレジット枠を
+使いすぎずに済みます（クレジットは `usage.rates` からの概算。rates がなければ `max_monthly_tokens` を使います）:
+
+```lua
+usage = { rates = { ... }, month_start_day = 1 },
+limits = { max_task_tokens = 300000, max_monthly_credits = 1900 },
+```
+
+今月の推定値が上限に達すると同じように一時停止します（学習は続きます）。月の集計は `/resume` ではリセットされないので、
+続けるには `/budget month 2500` で上げるか `/budget month off` で今月だけ外してください。`:CoagentUsage` に
+`this month (estimate): 312 / 1900 credits, since 2026-10-01` のように表示されます。数えるのは coagent 自身のリクエストだけで
+（VS Code や CopilotChat のチャットなどは含まない）、正確な数値は `:CoagentUsage billing` の GitHub 請求ページで確認します。
+
 ---
 
 ## A. 既存の機械学習リポジトリに適用する

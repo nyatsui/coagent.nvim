@@ -53,6 +53,13 @@ local defaults = {
     --   }
     -- (The older { per_1k_tokens = credits } form still works.)
     rates = nil,
+    -- Monthly ledger (:CoagentUsage, /budget month, limits.max_monthly_*):
+    -- coagent's own requests summed across sessions, projects and Neovim
+    -- instances in stdpath('state')/coagent/usage/<YYYY-MM>.json (0600).
+    -- The month starts on this day (1-31, clamped to the month's last day) at
+    -- midnight local time.
+    month_start_day = 1,
+    dir = nil, -- nil = stdpath('state')/coagent/usage
   },
 
   -- Get the user's attention when the agent needs it. on: 'approval' | 'done'
@@ -108,6 +115,12 @@ local defaults = {
     max_task_tokens = nil, -- per task (all roles: builder, explorers, advisor, judge, ledger, monitor checkpoints)
     max_task_credits = nil, -- per task, from the usage.rates estimate (only with rates)
     max_session_tokens = nil, -- per session
+    -- Monthly budgets across sessions and projects (see usage.month_start_day).
+    -- Only coagent's own requests count (not VS Code, CopilotChat chats or other
+    -- tools). `/budget month` overrides the credit budget for the current month
+    -- in every instance.
+    max_monthly_credits = nil, -- from the usage.rates estimate (only with rates)
+    max_monthly_tokens = nil, -- works without rates (counted per budget_counts)
     -- 'billed_equivalent': uncached input + cache writes + output + 0.1 x cached input
     -- (what drives the bill); 'total': all tokens
     budget_counts = 'billed_equivalent',

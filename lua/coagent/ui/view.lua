@@ -376,6 +376,15 @@ function View:bar()
       end
     end
   end
+  -- monthly budget (all instances and projects), only when one is set
+  local mok, mo = pcall(c.monthly, c)
+  if mok and mo then
+    if mo.budget.credits and mo.credits then
+      table.insert(segs, { 6.5, 5, 'mo ' .. Usage.format_credits(mo.credits) .. '/' .. Usage.format_credits(mo.budget.credits) .. 'cr' })
+    elseif mo.budget.tokens then
+      table.insert(segs, { 6.5, 5, 'mo ' .. Usage.k(math.floor(mo.tokens + 0.5)) .. '/' .. Usage.k(mo.budget.tokens) })
+    end
+  end
   local bg = c.processes and c.processes:running_count() or 0
   if bg > 0 then
     table.insert(segs, { 4, 2, bg .. ' bg' })

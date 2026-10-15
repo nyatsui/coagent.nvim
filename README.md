@@ -320,7 +320,7 @@ input history (`<C-p>`/`<C-n>`) like normal prompts.
 | `/resume` | Resume a paused task (after a limit: continues with fresh counters; same as `:CoagentResume`) |
 | `/stop` / `/processes` | Stop / background processes |
 | `/queue [clear]` | Messages queued while the agent works / `clear` discards them |
-| `/budget [tokens\|credits\|session] <n\|200k\|off\|default>` | Token budgets for this session (see "Per-task limits") |
+| `/budget [tokens\|credits\|session\|month] <n\|200k\|off\|default>` | Token budgets for this session, and the monthly credit budget (see "Per-task limits", "Monthly budget") |
 | `/width [N\|N%\|+N\|-N\|reset]` | Panel width (same as `:CoagentWidth`) |
 | `/clear` / `/help` | Clear the input / list commands |
 
@@ -385,6 +385,8 @@ limits = {
 - `/budget` (or `:CoagentBudget`) shows the budgets and usage; `/budget 200k`, `/budget credits 50`, `/budget session 1m`,
   `/budget off` and `/budget default` override them for this session (saved with the session)
 - The winbar shows the task budget next to the usage (`6req 48k c91% 31k/300k`), and `:CoagentUsage` lists all budgets
+- For a cap across sessions and projects (for example your plan's monthly credit allowance), see "Monthly budget" under
+  "Usage and credits"
 
 ### Notifications (approval, done, failed)
 
@@ -1020,7 +1022,7 @@ delegate = {
 | `:CoagentEffort [level] [role]` | Reasoning effort: `minimal` / `low` / `medium` / `high` / `off` / `default` (same as `/effort`) |
 | `:CoagentNew` / `:CoagentSessions` | New session / saved sessions |
 | `:CoagentLayout [vertical\|float]` | Switch layout |
-| `:CoagentBudget [tokens\|credits\|session] <n\|off\|default>` | Token budgets (same as `/budget`) |
+| `:CoagentBudget [tokens\|credits\|session\|month] <n\|off\|default>` | Token budgets (same as `/budget`) |
 | `:CoagentWidth [N\|N%\|+N\|-N\|reset]` | Panel width: columns, percent of the terminal, relative, or back to `ui.width`. Remembered (also when you resize by hand) |
 
 ### Keymaps (defaults; all can be changed or disabled in `keymaps`)
@@ -1147,6 +1149,8 @@ require('coagent').setup({
     show_tokens = true, -- requests, tokens and prompt-cache hits of the running task in the winbar (`6req 48k c91%`)
     show_request_usage = true, -- per-response breakdown (in / cached / out) in the timeline
     rates = nil,        -- for the credit estimate (see "Usage and credits")
+    month_start_day = 1, -- monthly ledger: the month starts on this day, local time (see "Monthly budget")
+    dir = nil,          -- monthly ledger folder; nil = stdpath('state')/coagent/usage
   },
   mode = 'supervised',
   plan = { default = false }, -- true: every new task starts in the plan phase (/go skips it; see "Plan first")
@@ -1159,6 +1163,7 @@ require('coagent').setup({
     max_consecutive_denials = 3,
     max_tool_output_bytes = 24 * 1024, -- cap on output returned to the model (keeps head + tail)
     max_task_tokens = nil, max_task_credits = nil, max_session_tokens = nil, -- token budgets (pause when reached)
+    max_monthly_credits = nil, max_monthly_tokens = nil, -- across sessions and projects (see "Monthly budget")
     budget_counts = 'billed_equivalent', budget_warn_at = 0.8,
   },
   commands = { default_timeout_ms = 120000, sandbox = 'auto', sandbox_all = false },
@@ -1305,6 +1310,44 @@ credits = ( (input − cached − cache_write) × input
 - Reasoning tokens are part of the output token count and priced as output
 - Long-context surcharges (above a certain input size) are not modelled
 - The older `{ per_1k_tokens = n }` form (credits per 1,000 tokens) still works
+
+### Monthly budget
+
+Plans include a monthly allowance of AI credits. coagent keeps a small monthly ledger of **its own** requests and can pause
+the agent before it spends more than you allow in a month, across every session, project and Neovim instance:
+
+```lua
+opts = {
+  usage = {
+    rates = { ... },        -- needed for credits (see "Credit estimate")
+    month_start_day = 1,    -- the month starts on this day at midnight, local time (31 = the month's last day)
+  },
+  limits = {
+    max_monthly_credits = 1900, -- estimated credits per month (only with usage.rates)
+    max_monthly_tokens = nil,   -- tokens per month (per budget_counts); works without rates
+  },
+}
+```
+
+- After every model response (all roles), coagent adds the estimated credits and the tokens to
+  `stdpath('state')/coagent/usage/<YYYY-MM>.json` (folder 0700, file 0600; `<YYYY-MM>` is the month the period starts in),
+  with totals per model and per project. All instances share the file: each write reads it, adds, and replaces it
+  atomically (temp file + rename), so it is always complete. Two instances writing at the same moment can lose one
+  increment; the totals are an estimate anyway
+- When this month's estimate reaches the budget, the agent **pauses** at the next step boundary (`paused (limit)`, a
+  `'limit'` notification), like the other budgets. A training run the agent started keeps running. Unlike the per-task
+  budgets the month does not restart on `/resume`: raise the budget (`/budget month 2500`) or turn it off for the month
+  (`/budget month off`) first, otherwise it pauses again before spending anything. One notice at `budget_warn_at`
+- `/budget month <n|off|default>` overrides the credit budget for the current month. It is global: it is stored in the
+  month file, so every instance and project uses it, and it ends with the month (`default` goes back to the config)
+- `/budget` and `:CoagentUsage` show it, e.g. `this month (estimate): 312 / 1900 credits, since 2026-10-01`, with the
+  tokens and the largest models and projects; the winbar shows `mo 312/1900cr` while a monthly budget is set (dropped
+  first when the panel is narrow)
+- **It counts only coagent's own requests**, not VS Code, CopilotChat chats or other tools that use the same allowance, and
+  credits are an estimate from your `usage.rates`. The exact numbers are on GitHub's billing page (`:CoagentUsage billing`)
+- Without `usage.rates` there is no credit estimate: `/budget` and `:CoagentUsage` say so, `max_monthly_credits` does not
+  apply, and `max_monthly_tokens` (if set) is the fallback. Requests made without a rate are listed as tokens without a
+  rate and are not in the credit total
 
 ### Legacy multiplier
 

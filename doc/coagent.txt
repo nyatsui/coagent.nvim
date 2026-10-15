@@ -112,6 +112,9 @@ Check the setup with |:checkhealth| coagent.
                          budget; running training keeps going). Config:
                          limits.max_task_tokens / max_task_credits /
                          max_session_tokens, limits.budget_counts.
+                         "month {n|off|default}" sets the monthly credit
+                         budget for every instance and project until the
+                         month ends (|coagent-monthly|).
 :CoagentWidth [spec]     Panel width: N (columns), N%, +N, -N, reset. A width
                          set by hand (mouse, <C-w><, :vertical resize, < / >
                          in the panel) is remembered across reopen, terminal
@@ -153,6 +156,36 @@ credits = ((input - cached - cache_write) * input_price + cached * cached_price
 Missing prices fall back to `input`. Responses without a breakdown are priced
 at the input rate and labelled "rough estimate". Long-context surcharges are
 not modelled. The older `{ per_1k_tokens = n }` form still works.
+
+                                                       *coagent-monthly*
+Monthly budget. coagent adds the estimated credits and the tokens of every
+model response (all roles) to a per-month file shared by every session,
+project and Neovim instance:
+  stdpath('state')/coagent/usage/<YYYY-MM>.json   (folder 0700, file 0600)
+with totals per model and per project. The month starts on
+`usage.month_start_day` (default 1; 31 = the month's last day) at midnight
+local time; <YYYY-MM> is the month the period starts in. Each write reads the
+file, adds, and replaces it atomically (temp file + rename), so it is always
+complete JSON; two instances writing at the same moment can lose one
+increment (accepted: the totals are an estimate). >lua
+  limits = {
+    max_monthly_credits = 1900, -- estimated credits per month (needs usage.rates)
+    max_monthly_tokens = nil,   -- tokens per month (budget_counts); no rates needed
+  }
+<
+When this month's estimate reaches a budget the agent pauses at the next step
+boundary (reason 'limit'); background training keeps running. One notice at
+`limits.budget_warn_at`. The month does not restart on /resume: raise the
+budget with "/budget month {n}" or turn it off for the month with
+"/budget month off" first. That override is global: it is stored in the month
+file and ends with the month ("default" goes back to the config).
+/budget and :CoagentUsage show "this month (estimate): 312 / 1900 credits,
+since 2026-10-01"; the status bar shows "mo 312/1900cr" while a monthly budget
+is set. It counts only coagent's own requests (not VS Code, CopilotChat chats
+or other tools), and credits are an estimate from `usage.rates`; exact numbers
+are on GitHub's billing page (":CoagentUsage billing"). Without usage.rates
+there is no credit estimate: /budget and :CoagentUsage say so,
+max_monthly_credits does not apply and max_monthly_tokens (if set) does.
 
 `ui.show_multiplier = true` shows the legacy request-billing multiplier
 ("(legacy x1)") in the model picker; it does not describe token billing.

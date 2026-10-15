@@ -2,6 +2,7 @@
 local config = require('coagent.config')
 local util = require('coagent.core.util')
 local Usage = require('coagent.agent.usage')
+local Monthly = require('coagent.agent.monthly')
 
 local M = {}
 
@@ -1889,6 +1890,73 @@ function M.open_billing()
   return true
 end
 
+--- This month's estimated usage (all sessions, projects and instances).
+---@return string[]
+local function month_lines()
+  local c = state.controller
+  if not c then
+    return {}
+  end
+  local ok, m = pcall(c.monthly, c)
+  if not ok then
+    return {}
+  end
+  local d, b = m.data, m.budget
+  local lines = { '' }
+  if m.credits then
+    local text = string.format('  this month (estimate): %s, since %s', Monthly.credits_text(m.credits, b.credits), m.period.since)
+    if b.credits and b.credits > 0 then
+      text = text .. string.format(' (%d%%)', math.floor(m.credits / b.credits * 100 + 0.5))
+    end
+    table.insert(lines, text)
+    if (d.unpriced_tokens or 0) > 0 then
+      table.insert(lines, string.format('    %s tokens had no rate (not in the estimate)', Usage.k(d.unpriced_tokens)))
+    end
+  else
+    table.insert(lines, string.format('  this month: no credit estimate (set usage.rates), since %s', m.period.since))
+  end
+  local tokens = string.format('    %d requests, %s tokens (%s)', d.requests or 0, Usage.k(math.floor(m.tokens + 0.5)), config.options.limits.budget_counts or 'billed_equivalent')
+  if b.tokens then
+    tokens = tokens .. ' / ' .. Usage.k(b.tokens) .. ' budget'
+  end
+  table.insert(lines, tokens)
+  if b.override == false then
+    table.insert(lines, '    budget: off this month (/budget month default to restore)')
+  elseif b.override then
+    table.insert(lines, '    budget: ' .. Usage.format_credits(b.override) .. ' credits this month (/budget month)')
+  elseif b.credits and not m.credits then
+    table.insert(lines, '    the credit budget needs usage.rates' .. (b.tokens and '; max_monthly_tokens applies' or '; set limits.max_monthly_tokens for a token budget'))
+  end
+  local function breakdown(label, t, name_of)
+    local names = vim.tbl_keys(t or {})
+    if #names < 2 then
+      return
+    end
+    table.sort(names, function(x, y)
+      return (t[x].tokens or 0) > (t[y].tokens or 0)
+    end)
+    local parts = {}
+    for i, name in ipairs(names) do
+      if i > 5 then
+        table.insert(parts, '+' .. (#names - 5) .. ' more')
+        break
+      end
+      local e = t[name]
+      table.insert(parts, string.format('%s %s', name_of(name), m.credits and (Usage.format_credits(e.credits or 0) .. 'cr') or Usage.k(math.floor((e.tokens or 0) + 0.5))))
+    end
+    table.insert(lines, '    ' .. label .. ': ' .. table.concat(parts, ', '))
+  end
+  breakdown('by model', d.models, function(n)
+    return n
+  end)
+  breakdown('by project', d.projects, function(n)
+    return vim.fs.basename(n)
+  end)
+  table.insert(lines, "    coagent's own requests only (not VS Code, CopilotChat chats or other tools)")
+  table.insert(lines, '    exact numbers: :CoagentUsage billing')
+  return lines
+end
+
 --- Requests/tokens of the current (or last) task and of the session.
 ---@return string[]
 local function token_lines()
@@ -1963,6 +2031,7 @@ function M.usage(arg)
   end
   M.refresh_usage(function(usage, err)
     local tokens = token_lines()
+    vim.list_extend(tokens, month_lines())
     if not usage and #tokens == 0 then
       notify('cannot get usage: ' .. tostring(err), vim.log.levels.WARN)
       return
@@ -2053,7 +2122,60 @@ function M.set_layout(name)
   M.view():set_layout(name)
 end
 
---- `/budget [tokens|credits|session] <n|off|default>`: session token budgets.
+--- Monthly budget lines for `/budget`.
+---@return string[]
+function M.month_budget_lines(c)
+  local m = c:monthly()
+  local b = m.budget
+  local scope = '(' .. Monthly.SCOPE_NOTE .. ')'
+  local out = {}
+  local credits = 'month credits: '
+  if b.override == false then
+    credits = credits .. 'off this month'
+  elseif not m.credits then
+    credits = credits .. (b.credits and (Usage.format_credits(b.credits) .. ' set, but ') or '') .. 'no estimate without usage.rates'
+  else
+    credits = credits .. Monthly.credits_text(m.credits, b.credits) .. ' (estimate)' .. (b.override and ' [/budget month]' or '')
+  end
+  table.insert(out, credits .. ', since ' .. m.period.since)
+  if b.tokens then
+    table.insert(out, string.format('month tokens: %s / %s tokens', Usage.k(math.floor(m.tokens + 0.5)), Usage.k(b.tokens)))
+  end
+  table.insert(out, scope)
+  return out
+end
+
+--- `/budget month <n|off|default>`: the monthly credit budget for every
+--- instance and project until the month ends (stored in the month file).
+function M.month_budget(c, word)
+  local value
+  if word == 'off' then
+    value = false
+  elseif word == 'default' then
+    value = nil
+  else
+    local n, suffix = (word or ''):lower():match('^([%d%.]+)(k?)$')
+    n = tonumber(n)
+    if not n then
+      notify('/budget month: expected credits (e.g. 1900, 1.9k), off or default', vim.log.levels.WARN)
+      return
+    end
+    value = n * (suffix == 'k' and 1000 or 1)
+  end
+  local ok, err = c:set_month_budget(value)
+  if not ok then
+    notify('/budget month: cannot write the month file: ' .. tostring(err), vim.log.levels.ERROR)
+    return
+  end
+  local out = M.month_budget_lines(c)
+  local m = c:monthly()
+  if type(value) == 'number' and not m.credits then
+    table.insert(out, 'No credit estimate without usage.rates: this budget applies once rates are set' .. (m.budget.tokens and '; limits.max_monthly_tokens applies meanwhile.' or '.'))
+  end
+  notify(table.concat(out, '\n'), type(value) == 'number' and not m.credits and vim.log.levels.WARN or nil)
+end
+
+--- `/budget [tokens|credits|session|month] <n|off|default>`: token budgets.
 --- Without arguments, shows the budgets and their usage.
 ---@param arg string?
 function M.budget(arg)
@@ -2064,13 +2186,18 @@ function M.budget(arg)
     local function line(label, max, used, unit)
       return string.format('%s: %s', label, max and string.format('%s / %s %s', used and Usage.k(math.floor(used + 0.5)) or '?', Usage.k(max), unit) or 'none')
     end
-    notify(table.concat({
+    local out = {
       line('task tokens', b.tokens, u.tokens, 'tokens'),
       'task credits: ' .. (b.credits and string.format('%s / %s (estimate)', u.credits and Usage.format_credits(u.credits) or '?', Usage.format_credits(b.credits)) or 'none'),
       line('session tokens', b.session_tokens, u.session_tokens, 'tokens'),
-      'usage: /budget [tokens|credits|session] <n|200k|off|default>',
-    }, '\n'))
+    }
+    vim.list_extend(out, M.month_budget_lines(c))
+    table.insert(out, 'usage: /budget [tokens|credits|session|month] <n|200k|off|default>')
+    notify(table.concat(out, '\n'))
     return
+  end
+  if words[1] == 'month' then
+    return M.month_budget(c, words[2])
   end
   local kind = ({ tokens = 'tokens', credits = 'credits', session = 'session_tokens' })[words[1]]
   local value_word = kind and words[2] or words[1]

@@ -140,6 +140,14 @@
   （API は呼ばず、追加のトークンも不要）
 - `usage.rates` に料金表の単価（USD / 100 万トークン）を `{ input = 3, cached = 0.3, cache_write = 3.75, output = 15 }` の形で書くと
   `≈N credits (estimate)` の **概算**（1 クレジット = $0.01）を併記し、`:CoagentModel` に単価を表示します
+- 月間の集計: 全セッション・全プロジェクト・全インスタンスの coagent のリクエストを `stdpath('state')/coagent/usage/<YYYY-MM>.json`
+  （0600）に月ごとに加算し、`:CoagentUsage` に `this month (estimate): 312 / 1900 credits, since 2026-10-01` のように表示します。
+  月の始まりは `usage.month_start_day`（既定 1、ローカル時刻）。数えるのは coagent 自身のリクエストだけで、VS Code や
+  CopilotChat のチャット、ほかのツールは含みません（正確な数値は `:CoagentUsage billing`）
+- `limits.max_monthly_credits`（`usage.rates` が必要）/ `limits.max_monthly_tokens`（rates なしでも使える）で月間の上限。
+  達すると次のステップの区切りで一時停止し（学習は続く）、`/resume` では月の集計はリセットされません。
+  `/budget month <n|off|default>` で今月の上限を全インスタンス共通で変更します（月のファイルに保存、月が変わると設定値に戻る）。
+  上限があるときは winbar に `mo 312/1900cr`。rates がないとクレジットの概算はなく、そう表示して `max_monthly_tokens` を使います
 
 ### プロンプトテンプレート
 
