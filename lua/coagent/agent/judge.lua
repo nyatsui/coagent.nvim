@@ -209,6 +209,13 @@ function M.build_input(req, max_bytes)
   if prepared.timeout_ms then
     table.insert(lines, '- timeout: ' .. util.format_duration(prepared.timeout_ms))
   end
+  if prepared.terminal then
+    -- the user's own terminal session (e.g. ssh to a GPU server): not a network send by coagent
+    table.insert(lines, string.format('- runs in: the developer\'s own interactive terminal on host %s (cwd %s), which the developer prepared '
+      .. '(ssh session, conda / venv); the developer watches it live; no OS sandbox there%s',
+      vim.json.encode(prepared.terminal.host or '?'), vim.json.encode(prepared.terminal.cwd or '?'),
+      prepared.terminal.shared and '; the workspace directory is shared with that host' or ''))
+  end
   vim.list_extend(lines, {
     '',
     'COMMAND ANALYSIS (computed by coagent; values JSON-quoted):',

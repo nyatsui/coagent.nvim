@@ -67,6 +67,10 @@ I'll find the `add` implementation and its tests.
   `.coagent/delegate/<id>/`（または `~/coagent/`）に書き出し、`/receive` がダウンロードしたファイルを
   対応付けて（改名・ベースのずれに対応）通常のレビューを通して適用します。エージェントも（必ず承認付きで）任せられ、`WAITING_EXTERNAL`
   で待ちます。coagent が別のチャットを自動操作することはありません
+- **自分のターミナルで実行（`:CoagentTerminal attach`）** — 自分で用意した Neovim の `:terminal`（GPU サーバーへ ssh、conda / venv を有効化、
+  このマシンと共有しているプロジェクトディレクトリへ cd 済み）でエージェントのコマンドを実行します。その環境そのままで動き、
+  実行の様子をその場で見られます。長い実行は `.coagent/logs/` に書くバックグラウンドジョブになり、coagent が手元で読むので
+  見守り・`/exp`・出力パネルもそのまま使えます。承認ルールは同じで、ホストやパスの設定は不要です
 - **`#url` / `#clipboard`** — 入力した URL のページ本文やクリップボードを添付
 - **インライン編集** — `:'<,'>CoagentInline 指示` で選択範囲だけを 1 リクエスト（ツールなし）で書き換え、
   バッファ内に diff プレビュー（`ga` 適用 / `gr` 破棄 / `gi` 追加指示）。適用した変更は巻き戻し可能
@@ -311,6 +315,7 @@ vim.keymap.set('x', '<leader>ai', ':CoagentInline<CR>', { desc = 'Coagent inline
 | `/format [changed\|file]` | このセッションで AI が変更したファイルを整形（既定 `changed` = AI が変更した行だけ。下記「AI が編集したファイルの整形」） |
 | `/resume` | 一時停止したタスクを再開（上限で止まった場合はカウンタをリセットして続行。`:CoagentResume` と同じ） |
 | `/stop` / `/processes` | 停止 / バックグラウンドプロセス |
+| `/terminal [attach\|detach\|status]` | コマンドを自分の `:terminal` で実行（「自分のターミナルで実行」参照） |
 | `/queue [clear]` | 作業中に送ったメッセージ（キュー）の一覧 / `clear` で破棄 |
 | `/budget [tokens\|credits\|session\|month] <n\|200k\|off\|default>` | このセッションのトークン上限と、月間クレジット上限（「タスクごとの上限」「月間の上限」参照） |
 | `/width [N\|N%\|+N\|-N\|reset]` | パネルの幅（`:CoagentWidth` と同じ） |
@@ -939,6 +944,58 @@ delegate = {
 },
 ```
 
+### 自分のターミナルで実行（:CoagentTerminal）
+
+GPU サーバーでの実行を Neovim の `:terminal` からすでに行っている場合の使い方です。ssh でサーバーに入り、conda / venv を有効化し、
+module や環境変数を設定し、このマシンと（Samba / NFS で）共有しているプロジェクトディレクトリに cd してあるとします。
+そのターミナルをアタッチすると、エージェントのコマンドはその中で、あなたの環境のまま、目に見える形で実行されます。
+
+1. `:terminal` → `ssh gpu-server` → `conda activate exp` → `cd /mnt/share/myproject`（いつもどおり）
+2. そのターミナルバッファで `:CoagentTerminal attach`（ほかの場所からなら開いているターミナルから選択。入力欄では
+   `/terminal attach`）。coagent は `pwd`・`hostname`・`python -V` を実行し、ターミナルの作業ディレクトリがこのワークスペースか
+   確認します（ここで `.coagent/term-probe-<乱数>` を作り、ターミナル側から見えるかを聞く）。見えなければ警告し（相対パスが
+   合わない可能性）、入力したパスへ `cd` するか尋ねます
+3. winbar に `term:<ホスト名>`、承認には `→ terminal (host X, cwd Y)` が表示されます。`:CoagentTerminal status` / `detach`
+
+実行のしかた:
+
+- `run_command` はターミナルが空くのを待ってから（coagent のコマンドが実行中でない、`terminal.idle_ms` の間出力がない、
+  `terminal.user_idle_ms` の間あなたが入力していない）1 行を送ります:
+  `printf START; ( export PAGER=cat ...; cd <dir> && eval '<command>' ) </dev/null 2>&1; printf END $?`。
+  START と END のマーカーの間の出力をターミナルバッファから読み取り（実行中は 'scrollback' を引き上げ、折り返し行はつなぎ直す）、
+  終了コードは END マーカーから取得し、エコーされたコマンドとマーカーは取り除きます。シークレットはいつもどおりマスクします。
+  行頭が空白なので `HISTCONTROL=ignorespace` なら履歴に残りません
+- 実行中はターミナルのウィンドウの winbar に `coagent running: <command>` と表示されます
+- タイムアウト（またはパネルの `<C-c>`）では Ctrl-C を送ります。あなた自身がターミナルで押す Ctrl-C もいつもどおり効きます。
+  coagent のコマンドの実行中にターミナルへ何か入力すると取り込みを終え、中断されたことをエージェントに伝えます。
+  あなたが入力している最中に coagent が送ることはありません
+- プロンプトらしい行（`Password:`、`[y/N]`、`...?`、`...:`）のあと `terminal.input_wait_ms` の間出力がないコマンドは、ターミナルで
+  答えるよう求めるエラーで止まります。**coagent がパスワードや回答を入力することはありません**。そのコマンドが終わるまで
+  ターミナルは使用中として扱います
+- 長い実行（`start_process`、`/exp run`）: ディレクトリを共有していれば、あなたのシェルのバックグラウンドジョブになります
+  （`( trap '' HUP; ... ) > .coagent/logs/<id>.log 2>&1 &` と `<id>.pid`・`<id>.exit`）。ターミナルは空いたままで、ssh が切れても
+  実行は続きます。coagent は共有ディレクトリ越しにログを読むので、`wait_process`、見守りのチェックポイント、メトリクスの解析、
+  `/exp`、出力パネルはローカルの実行と同じように動きます。`stop_process` はターミナルから `kill -TERM -- -<pgid>` を送ります。
+  共有していなければ（警告のうえ）ターミナルのフォアグラウンドで実行し、ほかのターミナルコマンドはその終了を待ちます
+- `git`・`rg`・`grep`・`ls` など（`terminal.local_commands`。これだけでできたコマンド）と、`on = "local"` を付けた `run_command` は
+  このマシンで実行します。`commands.target = 'local'` にすると、ターミナルをアタッチしたままでもすべてローカルで実行します
+- 権限はローカルのコマンドとまったく同じです（同じ解析・ハードルール・judge）。ssh の経路はあなた自身のセッションなので
+  エージェントによるネットワーク送信とはみなしませんが、コマンドの中の `ssh` / `scp` は judge モードでは引き続きハードルールです。
+  judge には「ホスト X のあなたのターミナルで実行する」と伝えます。リモートホストではローカルの OS サンドボックスは効きません
+- `/delegate` の `03_context.md` の環境情報（OS、Python、PyTorch / CUDA、`nvidia-smi`）はターミナルで取得し、実験ログには
+  実行したホスト（と Python のバージョン）を記録します
+- アタッチはセッションに保存され、そのターミナルバッファが開いたままならセッションの復元時に再アタッチします
+
+```lua
+commands = { target = 'terminal' }, -- 'local': アタッチしたターミナルを使わない
+terminal = {
+  local_commands = { 'git', 'rg', 'grep', 'fd', 'find', 'ls', 'cat', 'head', 'tail', 'wc' },
+  idle_ms = 400, busy_wait_ms = 30000, user_idle_ms = 2000,
+  input_wait_ms = 10000, -- プロンプト検出
+  scrollback = 100000, log_poll_ms = 500, probe_wait_s = 3,
+},
+```
+
 ### エージェントが使うツール
 
 | 種類 | ツール | 承認（supervised） |
@@ -949,7 +1006,7 @@ delegate = {
 | 委任 | `delegate`（重いサブタスクを別のチャット向けにバンドル。タスクは `/receive` まで待つ） | **常に必要**（auto モードでも） |
 | 言語サーバー | `lsp_definition`（定義）, `lsp_references`（参照）, `lsp_symbols`（アウトライン / シンボル検索）, `lsp_hover`（型・ドキュメント） | 不要 |
 | 編集 | `edit_file`, `write_file`, `delete_file` | 必要（diff 表示） |
-| コマンド | `run_command`（終了するコマンド） | 必要 |
+| コマンド | `run_command`（終了するコマンド。ターミナルをアタッチしていればその中で実行、`on = "local"` でこのマシン） | 必要 |
 | バックグラウンド | `start_process`（開発サーバー、長い学習・評価。`experiment = true` で実験として記録） | 必要 |
 | | `wait_process`（終了・パターン・見守りのチェックポイントまで待つ。待つ間モデルへのリクエストなし）, `read_process_output`, `list_processes`, `stop_process`（実行には理由つき） | 不要（自分が起動したプロセスと、`/exp watch` で渡された実行のみ対象） |
 
@@ -983,6 +1040,7 @@ delegate = {
 | `:CoagentFormat [changed\|file]` | AI が変更したファイルを整形（`/format` と同じ。既定 `changed`） |
 | `:CoagentOutput` | 直近のコマンド出力を下部パネルに表示 |
 | `:CoagentProcesses` | エージェントが起動したバックグラウンドプロセスの出力表示・停止 |
+| `:CoagentTerminal [attach [buf]\|detach\|status]` | エージェントのコマンドを自分の `:terminal` で実行（ssh / conda はそこで用意。「自分のターミナルで実行」参照） |
 | `:CoagentUsage [billing]` | Copilot が返す利用量・残量とリセット日、タスク・セッションのリクエスト数とトークン数。`billing` で GitHub の請求ページをブラウザで開く |
 | `:CoagentMode [supervised\|readonly\|auto\|judge]` | 承認モード切替 |
 | `:CoagentJudge [log [n]\|clear]` | judge モードの判定ログ / キャッシュ消去（`/judge` と同じ） |
@@ -1130,7 +1188,8 @@ require('coagent').setup({
     max_monthly_credits = nil, max_monthly_tokens = nil, -- セッション・プロジェクトをまたぐ月間上限（「月間の上限」参照）
     budget_counts = 'billed_equivalent', budget_warn_at = 0.8,
   },
-  commands = { default_timeout_ms = 120000, sandbox = 'auto', sandbox_all = false },
+  commands = { default_timeout_ms = 120000, sandbox = 'auto', sandbox_all = false, target = 'terminal' },
+  terminal = { local_commands = { 'git', 'rg', 'grep', 'ls' }, input_wait_ms = 10000 }, -- 「自分のターミナルで実行」参照
   auto = {
     workspaces = { '~/work/sandbox-repo' },
     allowed_commands = { { 'pytest' }, { 'npm', 'test' }, { 'cargo', 'test' } },

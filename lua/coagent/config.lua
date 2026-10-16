@@ -173,6 +173,30 @@ local defaults = {
     sandbox = 'auto',
     sandbox_all = false,
     sandbox_writable = {}, -- extra writable paths besides workspace and temp dirs
+    -- With a terminal attached (:CoagentTerminal attach): 'terminal' runs
+    -- run_command / start_process in it (except terminal.local_commands and
+    -- on = 'local'); 'local' keeps every command local.
+    target = 'terminal',
+  },
+
+  -- Your own terminal (:CoagentTerminal attach): run the agent's commands in a
+  -- Neovim :terminal you prepared (ssh to a GPU server, conda / venv, cd to
+  -- the project directory shared with this machine). Same permission checks
+  -- as local commands; the OS sandbox does not apply there. coagent never
+  -- types passwords or answers prompts.
+  terminal = {
+    -- programs that always run locally (a command made only of these)
+    local_commands = { 'git', 'rg', 'grep', 'fd', 'find', 'ls', 'cat', 'head', 'tail', 'wc' },
+    idle_ms = 400, -- no output for this long: the shell is at its prompt
+    busy_wait_ms = 30000, -- wait this long for an idle terminal, then fail
+    user_idle_ms = 2000, -- never send within this long after you typed into it
+    -- no output for this long and a prompt-like last line ("Password:",
+    -- "[y/N]", "...?"): stop and ask you to answer in the terminal
+    input_wait_ms = 10000,
+    scrollback = 100000, -- 'scrollback' of the terminal while a command runs
+    poll_ms = 100,
+    log_poll_ms = 500, -- background runs: read .coagent/logs/<id>.log this often
+    probe_wait_s = 3, -- attach probe: wait for the probe file to show up (network share caching)
   },
 
   lsp = {
@@ -617,6 +641,14 @@ function M.setup(opts)
   end
   if opts and opts.delegate and opts.delegate.env_commands then
     M.options.delegate.env_commands = opts.delegate.env_commands
+  end
+  if opts and opts.terminal and opts.terminal.local_commands then
+    M.options.terminal.local_commands = opts.terminal.local_commands
+  end
+  local target = (M.options.commands or {}).target
+  if target ~= nil and target ~= 'terminal' and target ~= 'local' then
+    vim.notify(string.format("[coagent] commands.target = %q is not 'terminal' | 'local'; 'terminal' is used", tostring(target)), vim.log.levels.WARN)
+    M.options.commands.target = 'terminal'
   end
   for _, k in ipairs({ 'commands', 'exclude', 'metrics', 'metric_prefixes', 'patterns', 'log_files', 'lower_is_better', 'neutral', 'columns' }) do
     if opts and opts.experiments and opts.experiments[k] then

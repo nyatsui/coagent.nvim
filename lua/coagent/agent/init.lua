@@ -61,6 +61,17 @@ function M.build(opts)
         item.summary = item.meta.bg_id .. ' not running (session restored)'
       end
     end
+    -- the user's terminal: re-attach while the same terminal buffer is open
+    if session.terminal then
+      local term = require('coagent.tools.terminal').restore(config, ws, session.terminal)
+      if term then
+        c:attach_terminal(term, { restored = true })
+        c:notice('info', 'Commands run in the attached terminal again: ' .. term:describe() .. '.')
+      else
+        session.terminal = nil
+        c:notice('warn', 'The terminal attached to this session is no longer open; commands run locally (:CoagentTerminal attach).')
+      end
+    end
     if session.waiting then
       -- the task waits for a delegated subtask (/receive, /delegate detach)
       c.machine:reset('WAITING_EXTERNAL')

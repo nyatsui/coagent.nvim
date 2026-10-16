@@ -225,6 +225,9 @@ local function tool(b, item, o)
       end
     elseif item.kind == 'exec' and item.preview then
       b.line(p .. '$ ' .. item.preview.command, 'CoagentKey')
+      if item.preview.terminal then
+        b.line(p .. o.icons.arrow .. ' ' .. item.preview.terminal, item.status == 'awaiting_approval' and 'CoagentWarn' or 'CoagentDim')
+      end
       local meta = { 'cwd: ' .. tostring(item.preview.cwd or '.') }
       if item.preview.timeout_ms then
         table.insert(meta, 'timeout: ' .. util.format_duration(item.preview.timeout_ms))

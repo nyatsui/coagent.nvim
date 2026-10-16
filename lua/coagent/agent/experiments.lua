@@ -864,7 +864,7 @@ end
 --- model's experiment = true, /exp run).
 ---@param command string
 ---@param cwd string absolute working directory
----@param opts {source:string?, force:boolean?, name:string?}?
+---@param opts {source:string?, force:boolean?, name:string?, host:string?, python:string?}?
 ---@return Coagent.ExperimentRun?
 function Log:begin(command, cwd, opts)
   opts = opts or {}
@@ -891,6 +891,8 @@ function Log:begin(command, cwd, opts)
     time = started_s,
     command = util.redact(command),
     cwd = self.ws:display(cwd or self.ws.root),
+    host = opts.host, -- where it ran (the attached terminal's host, else this machine)
+    python = opts.python,
     source = opts.source or 'agent',
     name = name,
     detected = detected,
@@ -1242,7 +1244,7 @@ function M.show_text(log, e, opts)
     string.format('- When: %s  (%s, %s%s%s)', os.date('%Y-%m-%d %H:%M:%S', e.time), e.source or '?', status_text(e),
       e.duration_ms and (', ' .. util.format_duration(e.duration_ms)) or '', e.detected and (', recorded: ' .. (M.DETECTED[e.detected] or e.detected)) or ''),
     '- Command: `' .. e.command .. '`',
-    '- Cwd: ' .. (e.cwd or '.'),
+    '- Cwd: ' .. (e.cwd or '.') .. (e.host and ('  (host ' .. e.host .. (e.python and (', ' .. e.python) or '') .. ')') or ''),
     '- ' .. git_line(e),
     '- Metrics: ' .. metrics_line(e, best),
   }

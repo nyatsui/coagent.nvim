@@ -188,6 +188,15 @@ M.COMMANDS = {
     end,
   },
   {
+    name = 'terminal',
+    args = '[attach|detach|status]',
+    desc = 'Run commands in your own :terminal (ssh / conda env prepared there)',
+    complete = { 'attach', 'detach', 'status' },
+    run = function(arg)
+      return app().terminal(arg)
+    end,
+  },
+  {
     name = 'roles',
     args = '[preset]',
     desc = 'Model roles preset: single | advisor | explorers | full',

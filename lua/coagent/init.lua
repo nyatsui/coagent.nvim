@@ -865,7 +865,9 @@ end
 local function exp_run(c, command)
   local tool = c.registry:get('start_process')
   local args = { command = command, wait_ms = 1000 }
-  local probe = { ws = c.ws, config = c.config, processes = c.processes }
+  local probe = { ws = c.ws, config = c.config, processes = c.processes, terminal = function()
+    return c:attached_terminal()
+  end }
   local prepared, err = tool.prepare(args, probe)
   if not prepared then
     c:notice('error', '/exp run: ' .. tostring(err))
@@ -883,7 +885,7 @@ local function exp_run(c, command)
       kind = 'exec',
       title = 'exp run: ' .. command,
       status = 'running',
-      preview = { command = prepared.command, cwd = prepared.cwd_rel },
+      preview = { command = prepared.command, cwd = prepared.cwd_rel, terminal = prepared.terminal and prepared.terminal.label or nil },
       meta = {},
     })
     local ctx = c:_tool_ctx(item, c.gen)
@@ -2003,6 +2005,137 @@ function M.processes()
       end
     end)
   end)
+end
+
+------------------------------------------------------------------------------
+-- :CoagentTerminal (run the agent's commands in your own terminal)
+------------------------------------------------------------------------------
+
+--- Status of the attached terminal, as lines.
+---@param c Coagent.Controller
+---@return string
+function M._terminal_status(c)
+  local t = c:attached_terminal()
+  if not t then
+    return 'No terminal attached: commands run on this machine. Open a :terminal, ssh to your server, activate the environment, '
+      .. 'cd to the project directory (shared with this machine), then :CoagentTerminal attach (or /terminal attach).'
+  end
+  local cfg = config.options
+  return table.concat({
+    string.format('Attached terminal: buffer %d, host %s, cwd %s', t.buf, t:host_label(), t:dir() or '?'),
+    'Python: ' .. (t.python or '(not found)'),
+    'Workspace shared with the terminal: ' .. (t.shared and 'yes (background runs write .coagent/logs/, read here)'
+      or 'NO (relative paths may not match; background runs use the terminal foreground)'),
+    string.format('Commands run %s; these stay local: %s (or on = "local")',
+      (cfg.commands.target or 'terminal') == 'local' and 'LOCALLY (commands.target = "local")' or 'in the terminal',
+      table.concat((cfg.terminal or {}).local_commands or {}, ', ')),
+  }, '\n')
+end
+
+--- Attach terminal buffer `buf`: probe it (pwd, hostname, python, shared
+--- workspace), offer to cd when its directory is not this workspace.
+---@param c Coagent.Controller
+---@param buf integer
+function M._terminal_attach_buf(c, buf)
+  local T = require('coagent.tools.terminal')
+  local term, err = T.new(c.config, c.ws, buf)
+  if not term then
+    notify('CoagentTerminal: ' .. tostring(err), vim.log.levels.ERROR)
+    return
+  end
+  notify('probing the terminal (pwd, hostname, python, shared workspace)...')
+  local function done(info)
+    term:apply_probe(info)
+    c:attach_terminal(term)
+    local msg = string.format('Commands now run in %s%s.', term:describe(), term.python and (' · ' .. term.python) or '')
+    if term.shared then
+      c:notice('info', msg)
+      notify(msg)
+    else
+      local warn = msg .. ' WARNING: the terminal\'s directory is not this workspace (' .. c.ws.root .. ' is not visible there): '
+        .. 'relative paths may not match, and long runs use the terminal\'s foreground instead of .coagent/logs.'
+      c:notice('warn', warn)
+      notify(warn, vim.log.levels.WARN)
+    end
+  end
+  local function probe(retried)
+    term:probe(function(info)
+      if info.error then
+        notify('CoagentTerminal: probe failed: ' .. info.error, vim.log.levels.ERROR)
+        return
+      end
+      if info.shared or retried then
+        return done(info)
+      end
+      vim.ui.input({
+        prompt = string.format('The terminal is in %s, which is not this workspace. Its path there (empty: keep): ', info.pwd or '?'),
+      }, function(path)
+        path = path and vim.trim(path) or ''
+        if path == '' then
+          return done(info)
+        end
+        -- the user typed this path: cd in the user's shell (not a subshell)
+        term:exec({ body = 'cd ' .. T.quote(path), timeout_ms = 10000, input_wait_ms = false, label = 'cd ' .. path }, function()
+          probe(true)
+        end)
+      end)
+    end)
+  end
+  probe(false)
+end
+
+--- :CoagentTerminal [attach [buf]|detach|status]
+---@param arg string?
+function M.terminal(arg)
+  local c = M.controller()
+  local words = vim.split(vim.trim(arg or ''), '%s+', { trimempty = true })
+  local sub = words[1] or 'status'
+  if sub == 'status' then
+    notify(M._terminal_status(c))
+    return true
+  elseif sub == 'detach' then
+    if c:detach_terminal() then
+      notify('terminal detached: commands run on this machine again')
+      c:notice('info', 'Terminal detached: commands run on this machine again.')
+    else
+      notify('no terminal attached')
+    end
+    return true
+  elseif sub ~= 'attach' then
+    notify('CoagentTerminal: expected attach | detach | status', vim.log.levels.WARN)
+    return false
+  end
+  local T = require('coagent.tools.terminal')
+  local want = tonumber(words[2] or '')
+  if want then
+    M._terminal_attach_buf(c, want)
+    return true
+  end
+  local cur = vim.api.nvim_get_current_buf()
+  if vim.bo[cur].buftype == 'terminal' then
+    M._terminal_attach_buf(c, cur)
+    return true
+  end
+  local bufs = T.list_buffers()
+  if #bufs == 0 then
+    notify('CoagentTerminal: no terminal is open. Open one with :terminal (ssh, activate the environment, cd), then attach.', vim.log.levels.WARN)
+    return false
+  elseif #bufs == 1 then
+    M._terminal_attach_buf(c, bufs[1])
+    return true
+  end
+  vim.ui.select(bufs, {
+    prompt = 'Attach which terminal?',
+    format_item = function(b)
+      local title = vim.b[b].term_title or vim.api.nvim_buf_get_name(b)
+      return string.format('buffer %d: %s', b, title)
+    end,
+  }, function(b)
+    if b then
+      M._terminal_attach_buf(c, b)
+    end
+  end)
+  return true
 end
 
 --- Open GitHub's billing page (exact premium request / credit usage). Only a

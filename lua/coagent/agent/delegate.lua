@@ -742,6 +742,7 @@ end
 ---@field session Coagent.Session?
 ---@field ledger table?
 ---@field experiments table?
+---@field terminal Coagent.Terminal? the attached terminal: environment commands run there
 
 --- Pick and read the source files (in full; nothing is cut).
 ---@param env Coagent.DelegateEnv
@@ -947,17 +948,77 @@ local function python(root)
   end
 end
 
+--- The environment commands run in the user's attached terminal (where the
+--- agent's commands run: the GPU server, its conda / venv).
+---@param env Coagent.DelegateEnv
+---@param term Coagent.Terminal
+---@return string[]? lines nil when the terminal did not answer
+local function terminal_environment(env, term)
+  local cfg = env.config.delegate or {}
+  local T = require('coagent.tools.terminal')
+  local lines = { string.format('- Host: %s (the user\'s terminal, where commands run; cwd %s%s)', term:host_label(), term:dir() or '?',
+    term.shared and ', workspace shared' or '') }
+  local uname = term:exec_sync({ body = '( uname -srm ) </dev/null 2>&1', timeout_ms = 5000, input_wait_ms = false, label = 'uname' })
+  if uname.error then
+    return nil
+  end
+  if uname.code == 0 and vim.trim(uname.output) ~= '' then
+    table.insert(lines, '- OS: ' .. util.redact(vim.trim(uname.output)))
+  end
+  for _, e in ipairs(cfg.env_commands or {}) do
+    local words = {}
+    for _, a in ipairs(e.cmd or {}) do
+      -- {python}: the python of the environment activated there
+      table.insert(words, a == '{python}' and '"$py"' or T.quote(a))
+    end
+    if #words > 0 then
+      local prog = (e.cmd[1] == '{python}') and 'python' or e.cmd[1]
+      local check = e.cmd[1] == '{python}' and 'py="$(command -v python || command -v python3)" && [ -n "$py" ]'
+        or ('command -v ' .. T.quote(prog) .. ' >/dev/null 2>&1')
+      local body = string.format('( %s && %s ) </dev/null 2>&1', check, table.concat(words, ' '))
+      local res = term:exec_sync({ body = body, timeout_ms = e.timeout_ms or 10000, input_wait_ms = false, label = e.label or prog })
+      local out = vim.trim(res.output or '')
+      if not res.error and out ~= '' and not res.timed_out then
+        if out:find('\n') then
+          table.insert(lines, '')
+          table.insert(lines, '### ' .. (e.label or prog))
+          table.insert(lines, '')
+          table.insert(lines, fenced(util.redact(out), 'text'))
+        else
+          table.insert(lines, '- ' .. (e.label or prog) .. ': ' .. util.redact(out) .. ((res.code and res.code ~= 0) and (' (exit ' .. res.code .. ')') or ''))
+        end
+      end
+    end
+  end
+  return lines
+end
+
 --- Run the configured environment commands (cached for 10 minutes).
 ---@param env Coagent.DelegateEnv
 ---@return string[] lines
 local function environment(env)
   local cfg = env.config.delegate or {}
   local root = env.ws.root
+  local term = env.terminal
+  if term and not term:valid() then
+    term = nil
+  end
+  local key = vim.inspect(cfg.env_commands) .. (term and ('\0' .. term.tag .. '\0' .. tostring(term.root)) or '')
   local hit = env_cache[root]
-  if hit and vim.uv.now() - hit.at < 10 * 60 * 1000 and hit.key == vim.inspect(cfg.env_commands) then
+  if hit and vim.uv.now() - hit.at < 10 * 60 * 1000 and hit.key == key then
     return hit.lines
   end
+  if term then
+    local tl = terminal_environment(env, term)
+    if tl then
+      env_cache[root] = { at = vim.uv.now(), lines = tl, key = key }
+      return tl
+    end
+  end
   local lines = {}
+  if term then
+    table.insert(lines, '- (the attached terminal did not answer; environment of this machine)')
+  end
   local uname = vim.uv.os_uname()
   table.insert(lines, string.format('- OS: %s %s (%s)', uname.sysname, uname.release, uname.machine))
   table.insert(lines, '- Neovim: ' .. tostring(vim.version()))
@@ -992,7 +1053,7 @@ local function environment(env)
       end
     end
   end
-  env_cache[root] = { at = vim.uv.now(), lines = lines, key = vim.inspect(cfg.env_commands) }
+  env_cache[root] = { at = vim.uv.now(), lines = lines, key = key }
   return lines
 end
 

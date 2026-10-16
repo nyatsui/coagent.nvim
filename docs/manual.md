@@ -119,6 +119,7 @@
 | `/new` `/sessions` `/model [role]` `/mode [mode]` `/roles [preset]` | 対応する `:Coagent*` コマンドと同じ |
 | `/judge [log [n]\|clear]` | judge モードの判定一覧 / キャッシュした判定を忘れる（`:CoagentJudge` と同じ。[6. モードとモデル](#6-モードとモデル)。ローカルのみ） |
 | `/usage [billing]` `/changes` `/diff` `/review` `/stop` `/processes` | 同上（`/usage billing` は GitHub の請求ページを開く） |
+| `/terminal [attach\|detach\|status]` | コマンドを自分の `:terminal` で実行（`:CoagentTerminal` と同じ。[9. 自分のターミナルで実行](#9-自分のターミナルで実行coagentterminal)） |
 | `/resume` | 一時停止したタスクを再開（`:CoagentResume` と同じ。上限による一時停止ならカウンタをリセット） |
 | `/effort <level\|off\|default> [role]` | 推論の強さをこのセッションだけ変更（`:CoagentEffort` と同じ。[6. モードとモデル](#6-モードとモデル)） |
 | `/rewind` | 過去のプロンプトの直前まで巻き戻す（`:CoagentRewind` と同じ。[4. 変更の確認と巻き戻し](#4-変更の確認と巻き戻し)） |
@@ -533,7 +534,31 @@ Neovim にフォーカスが無いとき、承認待ち・完了・失敗・上�
 - タイムラインの展開表示（`<Tab>`）では末尾 20 行
 - モデルへ返す出力は `limits.max_tool_output_bytes`（既定 24KB）で先頭と末尾を残して切り詰め
 
-## 9. トラブルシューティング
+## 9. 自分のターミナルで実行（`:CoagentTerminal`）
+
+ssh で GPU サーバーに入り、conda / venv を有効化し、手元と共有しているプロジェクトディレクトリに cd した Neovim の `:terminal` を
+用意してあるなら、エージェントのコマンドをその中で実行させられます（ホストやパスの設定は不要）。
+
+- `:CoagentTerminal attach` — そのターミナルバッファで実行（ほかの場所からなら開いているターミナルから選ぶ。番号指定も可:
+  `:CoagentTerminal attach 12`）。`pwd`・`hostname`・`python -V` を実行し、ターミナルの作業ディレクトリがこのワークスペースか
+  確かめます（`.coagent/term-probe-<乱数>` を手元で作り、ターミナルから見えるか確認）。違えば警告し、入力したパスへ `cd` します
+- `:CoagentTerminal status` / `:CoagentTerminal detach` — 状態の表示 / 手元での実行に戻す。入力欄では `/terminal ...`
+- アタッチ中は winbar に `term:<ホスト名>`、承認には `→ terminal (host X, cwd Y)`、実行中はターミナル側の winbar に
+  `coagent running: <コマンド>` が出ます
+- `run_command` はターミナルが空く（出力が止まり、あなたが入力していない）のを待ってから 1 行で送り、START / END マーカーの間を
+  ターミナルバッファから読みます。終了コードは END マーカーから。タイムアウトでは Ctrl-C を送ります
+- 実行中にあなたがターミナルへ入力すると取り込みをやめ、中断として扱います。あなたの Ctrl-C もいつもどおり効きます
+- `Password:` や `[y/N]` のような行のあと `terminal.input_wait_ms` の間出力がなければ止まり、ターミナルで答えるよう通知します。
+  coagent はパスワードや回答を入力しません
+- `start_process` は共有ディレクトリがあればサーバー側のバックグラウンドジョブになり、`.coagent/logs/<id>.log`（と `.pid`・`.exit`）を
+  手元で読みます。`wait_process`・見守り・`/exp`・出力パネルはそのまま使えます。`stop_process` はターミナルから `kill` を送ります。
+  共有していなければターミナルのフォアグラウンドで実行します
+- `git`・`rg`・`ls` など `terminal.local_commands` だけのコマンドと `on = "local"` は手元で実行。`commands.target = 'local'` で
+  すべて手元に戻せます
+- 承認の判定はローカルのコマンドと同じ。judge にはターミナルのホストで実行することが伝わります
+- アタッチはセッションに保存され、同じターミナルが開いていれば復元時に再アタッチします
+
+## 10. トラブルシューティング
 
 | 症状 | 対処 |
 |---|---|
@@ -545,4 +570,6 @@ Neovim にフォーカスが無いとき、承認待ち・完了・失敗・上�
 | `paused (limit)` で止まった | `max_steps` / `max_tool_calls` / `max_duration_ms` に到達。`R` / `/resume` で続行、`/stop` で終了。頻繁なら `limits` を上げる |
 | 編集後の診断が付かない | 言語サーバーがそのファイルに接続しているか `:checkhealth vim.lsp` で確認。起動直後や大きなプロジェクトでは報告が `timeout_ms` に間に合わないことがあるので `diagnostics_after_edit.timeout_ms` を上げる |
 | モデルがツールを使わない | `:CoagentModel` で tool calling 対応モデルを選択 |
+| `the terminal is busy` | アタッチしたターミナルで前のコマンドが入力待ち・実行中、またはあなたが入力中。ターミナルで終わらせる（答える / Ctrl-C）と次から送れる |
+| ターミナルの出力が `(output truncated...)` | 出力が `terminal.scrollback`（既定 100000 行）を超えた。長い出力はファイルに書かせるか `start_process` を使う |
 | 通知（ベル）が来ない | tmux なら `set -g focus-events on`（フォーカス判定）と `monitor-bell on`。または `notify.only_when_unfocused = false` |

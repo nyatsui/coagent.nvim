@@ -5,6 +5,7 @@ local process = require('coagent.tools.process')
 local sandbox = require('coagent.tools.sandbox')
 local cmdparse = require('coagent.agent.cmdparse')
 local Workspace = require('coagent.tools.workspace')
+local Terminal = require('coagent.tools.terminal')
 
 local M = {}
 
@@ -83,6 +84,7 @@ M.run_command = {
       purpose = { type = 'string', description = 'One short sentence explaining why the command is needed.' },
       experiment = { type = 'boolean', description = 'true for a training / evaluation run: record it in the experiment log.' },
       name = { type = 'string', description = 'Short name of the experiment run (with experiment = true), e.g. "baseline-seed1".' },
+      on = { type = 'string', enum = { 'terminal', 'local' }, description = 'With the user\'s terminal attached: "local" runs this command on this machine instead (git, rg, file tools). Default: the terminal.' },
     },
   },
   title = function(args)
@@ -101,15 +103,30 @@ M.run_command = {
     end
     local limits = ctx.config.commands
     local timeout = math.min(tonumber(args.timeout_ms) or limits.default_timeout_ms, limits.max_timeout_ms)
-    return {
+    if args.on ~= nil and args.on ~= 'terminal' and args.on ~= 'local' then
+      return nil, 'on must be "terminal" or "local"'
+    end
+    local term = ctx.terminal and ctx.terminal() or nil
+    if args.on == 'terminal' and not (term and term:valid()) then
+      return nil, 'no terminal is attached (the user attaches one with :CoagentTerminal attach); omit `on` to run locally'
+    end
+    local prepared = {
       command = args.command,
       cwd = info.real,
       cwd_rel = info.rel,
       timeout_ms = timeout,
       analysis = cmdparse.analyze(args.command, info.real, ctx.ws),
     }
+    -- the user's attached terminal (same permission checks, shown in the approval)
+    if Terminal.routes_here(term, ctx.config, args.command, args.on) then
+      prepared.terminal = { host = term:host_label(), cwd = term:dir(info.rel), shared = term.shared, label = term:describe(info.rel) }
+    end
+    return prepared
   end,
   run = function(args, ctx, prepared)
+    if prepared.terminal then
+      return M.run_in_terminal(args, ctx, prepared)
+    end
     local cfg = ctx.config.commands
     local shell = process.shell(cfg.shell)
     local argv = { shell, '-c', prepared.command }
@@ -126,7 +143,7 @@ M.run_command = {
     end
     -- training / evaluation runs go to the experiment log (experiment = true:
     -- the model says it is one, whatever the file names)
-    local exp = ctx.experiments and ctx.experiments:begin(prepared.command, prepared.cwd, { source = 'agent', force = args.experiment == true, name = args.name })
+    local exp = ctx.experiments and ctx.experiments:begin(prepared.command, prepared.cwd, { source = 'agent', force = args.experiment == true, name = args.name, host = Terminal.local_host() })
     local res = run_process({
       argv = argv,
       cwd = prepared.cwd,
@@ -191,6 +208,94 @@ M.run_command = {
     }
   end,
 }
+
+--- run_command in the user's attached terminal (prepared.terminal).
+function M.run_in_terminal(args, ctx, prepared)
+  local term = ctx.terminal and ctx.terminal() or nil
+  if not (term and term:valid()) then
+    return { ok = false, output = 'Error: the attached terminal is no longer open; the command did not run.', summary = 'terminal closed', meta = { code = nil } }
+  end
+  local cfg = ctx.config.commands
+  local where = term:describe(prepared.cwd_rel)
+  if ctx.on_output then
+    ctx.on_output(string.format('$ %s\n# %s\n', prepared.command, where))
+  end
+  local exp = ctx.experiments and ctx.experiments:begin(prepared.command, prepared.cwd, { source = 'agent', force = args.experiment == true, name = args.name, host = term.host, python = term.python })
+  local env = vim.tbl_extend('force', {}, cfg.env or {}, { COAGENT = '1' })
+  local res = term:exec_async({
+    body = Terminal.command_body(prepared.command, term:dir(prepared.cwd_rel), env),
+    label = prepared.command,
+    timeout_ms = prepared.timeout_ms,
+    on_output = ctx.on_output,
+  }, function(h)
+    if ctx.set_cancel then
+      ctx.set_cancel(function()
+        h.cancel('cancel')
+      end)
+    end
+  end)
+  async.main()
+  local recorded = exp and exp.finish({ code = res.code, output = res.output, duration_ms = res.duration_ms, timed_out = res.timed_out, killed = res.killed or res.interrupted ~= nil, error = res.error })
+  if res.error then
+    return { ok = false, output = 'Error: ' .. res.error .. ' (' .. where .. '); the command did not run or its result is unknown.', summary = util.ellipsize(res.error, 60), meta = { code = nil, terminal = term.host } }
+  end
+  local max = ctx.config.limits.max_tool_output_bytes
+  local text = util.redact(res.output)
+  local shown, truncated = util.truncate_middle(text, max)
+  local header, summary
+  if res.interrupted == 'input' then
+    header = string.format('The command is waiting for interactive input (last line: %s). coagent stopped capturing it; it is still running '
+      .. 'in the user\'s terminal and the user was asked to answer there. Never try to answer prompts or type passwords; '
+      .. 'prefer non-interactive flags (e.g. --yes, -y) or ask the user.', vim.json.encode(util.redact(res.prompt or '')))
+    summary = 'waiting for input'
+    if term.notice then
+      term.notice('warn', string.format('A command in the terminal (%s) is waiting for input: %s. Answer it in the terminal; coagent does not type answers or passwords.', term:host_label(), util.redact(res.prompt or '')))
+    end
+  elseif res.interrupted == 'ctrl-c' then
+    header = 'The user interrupted the command with Ctrl-C in the terminal.'
+    summary = 'interrupted by the user'
+  elseif res.interrupted then
+    header = 'The user typed into the terminal while the command ran: coagent stopped capturing it (treat it as interrupted; the user took over).'
+    summary = 'interrupted (user typed)'
+  elseif res.timed_out then
+    header = string.format('Command timed out after %s; coagent sent Ctrl-C.', util.format_duration(prepared.timeout_ms))
+    summary = 'timed out'
+  elseif res.killed then
+    header = 'Command was cancelled by the user (Ctrl-C sent).'
+    summary = 'cancelled'
+  else
+    header = 'Exit code: ' .. tostring(res.code)
+    summary = M.summarize(res.output, res.code)
+  end
+  local output = string.format(
+    '%s\nRan in: %s\nDuration: %s\n%s\n%s',
+    header,
+    where,
+    util.format_duration(res.duration_ms),
+    (truncated or res.truncated) and '(output truncated, showing head and tail)' or '',
+    shown == '' and '(no output)' or shown
+  )
+  if recorded then
+    output = output .. '\n' .. require('coagent.agent.experiments').brief(ctx.experiments, recorded)
+  end
+  local ok = res.code == 0 and not res.timed_out and not res.killed and not res.interrupted
+  return {
+    ok = ok,
+    output = output,
+    display = res.output,
+    summary = summary,
+    meta = {
+      code = res.code,
+      timed_out = res.timed_out,
+      killed = res.killed,
+      interrupted = res.interrupted,
+      duration_ms = res.duration_ms,
+      truncated = res.truncated or truncated,
+      terminal = term.host or term:host_label(),
+      experiment = recorded and recorded.id or nil,
+    },
+  }
+end
 
 local function git(ctx, args)
   local res = run_process({ argv = vim.list_extend({ 'git', '-C', ctx.ws.root, '--no-pager' }, args), cwd = ctx.ws.root, timeout_ms = 30000, max_output_bytes = 1024 * 1024 }, function() end)

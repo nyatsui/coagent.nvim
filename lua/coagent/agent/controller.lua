@@ -101,10 +101,63 @@ end
 function Controller:dispose()
   self:stop('dispose')
   self.processes:kill_all()
+  if self.terminal then
+    -- stays attached in the saved session; the next controller re-attaches it
+    self.terminal:unregister()
+  end
   for _, u in ipairs(self.unsubscribe) do
     pcall(u)
   end
   self.unsubscribe = {}
+end
+
+------------------------------------------------------------------------------
+-- The user's terminal (:CoagentTerminal attach)
+------------------------------------------------------------------------------
+
+--- The attached terminal while it is still open.
+---@return Coagent.Terminal?
+function Controller:attached_terminal()
+  local t = self.terminal
+  if t and t:valid() then
+    return t
+  end
+  return nil
+end
+
+--- Attach `term` (probed) for this session.
+---@param term Coagent.Terminal
+---@param opts {restored:boolean?}?
+function Controller:attach_terminal(term, opts)
+  if self.terminal and self.terminal ~= term then
+    self.terminal:unregister()
+  end
+  self.terminal = term
+  term.notice = function(level, text)
+    vim.schedule(function()
+      self:notice(level, text)
+    end)
+  end
+  term:register()
+  self.session.terminal = term:serialize()
+  self.events:emit('terminal', term)
+  if not (opts and opts.restored) then
+    self:save(true)
+  end
+end
+
+--- Detach the terminal (commands run locally again).
+---@return boolean was_attached
+function Controller:detach_terminal()
+  local t = self.terminal
+  self.terminal = nil
+  self.session.terminal = nil
+  if t then
+    t:unregister()
+  end
+  self.events:emit('terminal', nil)
+  self:save(true)
+  return t ~= nil
 end
 
 ---@return string
@@ -2486,6 +2539,10 @@ function Controller:_tool_ctx(item, gen)
     source = self.source,
     item = item,
     processes = self.processes,
+    -- the user's attached terminal (nil: commands run locally)
+    terminal = function()
+      return self:attached_terminal()
+    end,
     -- background output keeps flowing after the task ends, so it is not gen-gated
     on_bg_output = function(_, chunk)
       item.live = (item.live or '') .. chunk
@@ -2629,7 +2686,7 @@ function Controller:_execute(gen, tc)
   elseif tool.kind == 'write' then
     item.preview = { diff = prepared.diff, added = prepared.added, removed = prepared.removed, path = prepared.path.rel, abs = prepared.path.real, op = prepared.op, hunks = prepared.hunks }
   elseif tool.kind == 'exec' then
-    item.preview = { command = prepared.command, cwd = prepared.cwd_rel, timeout_ms = prepared.timeout_ms }
+    item.preview = { command = prepared.command, cwd = prepared.cwd_rel, timeout_ms = prepared.timeout_ms, terminal = prepared.terminal and prepared.terminal.label or nil }
   end
 
   -- Supervision before anything runs (and before the user is asked).
@@ -3108,7 +3165,7 @@ end
 
 ---@return Coagent.DelegateEnv
 function Controller:_delegate_env()
-  return { ws = self.ws, config = self.config, session = self.session, ledger = self.ledger, experiments = self.experiments }
+  return { ws = self.ws, config = self.config, session = self.session, ledger = self.ledger, experiments = self.experiments, terminal = self:attached_terminal() }
 end
 
 --- Write the bundle of `plan`, register the subtask (store, ledger), copy

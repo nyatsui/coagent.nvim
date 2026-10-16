@@ -74,6 +74,10 @@ I'll find the `add` implementation and its tests.
   file to attach) in a git-ignored `.coagent/delegate/<id>/` (or `~/coagent/`) for a web chat you operate by hand; `/receive` maps the downloaded files back (renames, base drift) and applies them through the normal
   review. The agent can delegate too (always with approval) and waits in `WAITING_EXTERNAL`. coagent never automates
   the other chat
+- **Your own terminal (`:CoagentTerminal attach`)** — the agent runs its commands in a Neovim `:terminal` you prepared
+  (ssh to a GPU server, conda / venv activated, cd to the project directory shared with this machine), so they run in
+  exactly that environment and you watch them live. Long runs become background jobs writing `.coagent/logs/`, which
+  coagent tails locally (monitoring, `/exp`, the output panel keep working). Same approval rules; no host or path settings
 - **`#url` / `#clipboard`** — attach the text of a web page you typed, or the clipboard
 - **Inline edit** — `:'<,'>CoagentInline <instruction>` rewrites just the selection with one request (no tools) and previews
   the diff in the buffer (`ga` apply / `gr` discard / `gi` follow-up). Applied edits can be rewound
@@ -321,6 +325,7 @@ input history (`<C-p>`/`<C-n>`) like normal prompts.
 | `/format [changed\|file]` | Format files the AI changed in this session (default `changed` = only the lines the AI changed; see "Formatting AI-edited files") |
 | `/resume` | Resume a paused task (after a limit: continues with fresh counters; same as `:CoagentResume`) |
 | `/stop` / `/processes` | Stop / background processes |
+| `/terminal [attach\|detach\|status]` | Run commands in your own `:terminal` (see "Your own terminal") |
 | `/queue [clear]` | Messages queued while the agent works / `clear` discards them |
 | `/budget [tokens\|credits\|session\|month] <n\|200k\|off\|default>` | Token budgets for this session, and the monthly credit budget (see "Per-task limits", "Monthly budget") |
 | `/width [N\|N%\|+N\|-N\|reset]` | Panel width (same as `:CoagentWidth`) |
@@ -972,6 +977,59 @@ delegate = {
 },
 ```
 
+### Your own terminal (:CoagentTerminal)
+
+You already run code on a GPU server from a Neovim `:terminal`: you ssh'ed there, activated conda / a venv, set module
+paths and environment variables, and cd'ed into the project directory, which is shared with this machine (Samba / NFS).
+Attach that terminal and the agent's commands run in it — in your environment, visible as they run:
+
+1. `:terminal`, `ssh gpu-server`, `conda activate exp`, `cd /mnt/share/myproject` (as you always do)
+2. `:CoagentTerminal attach` in that terminal buffer (or from anywhere: pick it from the open terminals; `/terminal attach`
+   in the input box). coagent probes it with `pwd`, `hostname`, `python -V` and checks that the terminal's directory is
+   this workspace: it creates `.coagent/term-probe-<random>` here and asks the terminal whether it sees it. If not, it warns
+   (relative paths may not match) and offers to `cd` to a path you type
+3. The winbar shows `term:<hostname>`; approvals show `→ terminal (host X, cwd Y)`. `:CoagentTerminal status` / `detach`
+
+How commands run there:
+
+- `run_command` waits until the terminal is idle (no coagent command in flight, no output for `terminal.idle_ms`, you have
+  not typed for `terminal.user_idle_ms`), then sends one line:
+  `printf START; ( export PAGER=cat ...; cd <dir> && eval '<command>' ) </dev/null 2>&1; printf END $?`.
+  The output between the START and END markers is read from the terminal buffer ('scrollback' is raised while it runs;
+  wrapped lines are rejoined), the exit code comes from the END marker, and the echoed command and markers are stripped.
+  Secrets are masked as usual. The line starts with a space, so `HISTCONTROL=ignorespace` keeps it out of your history
+- While it runs, the terminal window's winbar says `coagent running: <command>`
+- A timeout (or `<C-c>` in the panel) sends Ctrl-C. Your own Ctrl-C in the terminal interrupts as usual, and anything you
+  type into the terminal while a coagent command runs ends the capture: the agent is told it was interrupted. coagent never
+  sends while you are typing
+- A command that prints a prompt-like line (`Password:`, `[y/N]`, `...?`, `...:`) and then nothing for
+  `terminal.input_wait_ms` stops with an error asking you to answer in the terminal. **coagent never types passwords or
+  answers**; the terminal counts as busy until that command ends
+- Long runs (`start_process`, `/exp run`): with the shared directory, the run becomes a background job of your shell
+  (`( trap '' HUP; ... ) > .coagent/logs/<id>.log 2>&1 &`, plus `<id>.pid` and `<id>.exit` files), so the terminal stays
+  free and the run survives a dropped ssh connection. coagent reads the log through the share, so `wait_process`,
+  monitoring checkpoints, metric parsing, `/exp` and the output panel work as for local runs. `stop_process` sends
+  `kill -TERM -- -<pgid>` through the terminal. Without a shared directory the run uses the terminal's foreground (with a
+  warning) and other terminal commands wait for it
+- `git`, `rg`, `grep`, `ls`, ... (`terminal.local_commands`: commands made only of these) and `run_command` with
+  `on = "local"` run on this machine. `commands.target = 'local'` keeps everything local while a terminal stays attached
+- Permissions are exactly those of local commands (the same analysis, hard rules and judge). The ssh hop is your own
+  session, not a network send by the agent, but `ssh` / `scp` inside a command are still hard rules in judge mode. The judge
+  is told that the command runs in your terminal on host X. The local OS sandbox does not apply on the remote host
+- `/delegate` collects the environment of `03_context.md` (OS, Python, PyTorch / CUDA, `nvidia-smi`) in the terminal, and
+  experiment entries record the host (and the Python version) they ran on
+- The attachment is saved with the session and re-attached when you restore it while that terminal buffer is still open
+
+```lua
+commands = { target = 'terminal' }, -- 'local': never use the attached terminal
+terminal = {
+  local_commands = { 'git', 'rg', 'grep', 'fd', 'find', 'ls', 'cat', 'head', 'tail', 'wc' },
+  idle_ms = 400, busy_wait_ms = 30000, user_idle_ms = 2000,
+  input_wait_ms = 10000, -- prompt detection
+  scrollback = 100000, log_poll_ms = 500, probe_wait_s = 3,
+},
+```
+
 ### Tools the agent uses
 
 | Kind | Tools | Approval (supervised) |
@@ -982,7 +1040,7 @@ delegate = {
 | Delegation | `delegate` (bundle a heavy subtask for another chat; the task waits for `/receive`) | **Always**, also in auto mode |
 | Language server | `lsp_definition`, `lsp_references`, `lsp_symbols` (outline / symbol search), `lsp_hover` (types / docs) | No |
 | Editing | `edit_file`, `write_file`, `delete_file` | Yes (with diff) |
-| Commands | `run_command` (commands that exit) | Yes |
+| Commands | `run_command` (commands that exit; in your attached terminal when there is one, `on = "local"` keeps it here) | Yes |
 | Background | `start_process` (dev servers, long training / evaluation runs; `experiment = true` records a run) | Yes |
 | | `wait_process` (blocks until exit / a pattern / a monitoring checkpoint, no model requests while waiting), `read_process_output`, `list_processes`, `stop_process` (with a reason for runs) | No (only processes the agent started, or a run handed over with `/exp watch`) |
 
@@ -1016,6 +1074,7 @@ delegate = {
 | `:CoagentFormat [changed\|file]` | Format files the AI changed (same as `/format`; default `changed`) |
 | `:CoagentOutput` | Show the latest command output in a bottom panel |
 | `:CoagentProcesses` | Show output of / stop background processes the agent started |
+| `:CoagentTerminal [attach [buf]\|detach\|status]` | Run the agent's commands in your own `:terminal` (ssh / conda prepared there; see "Your own terminal") |
 | `:CoagentUsage [billing]` | Copilot usage and remaining quota as reported by Copilot (and the reset date), requests and tokens of the task and session. `billing` opens GitHub's billing page in the browser |
 | `:CoagentMode [supervised\|readonly\|auto\|judge]` | Switch the approval mode |
 | `:CoagentJudge [log [n]\|clear]` | Judge mode decision log / forget cached verdicts (same as `/judge`) |
@@ -1170,7 +1229,8 @@ require('coagent').setup({
     max_monthly_credits = nil, max_monthly_tokens = nil, -- across sessions and projects (see "Monthly budget")
     budget_counts = 'billed_equivalent', budget_warn_at = 0.8,
   },
-  commands = { default_timeout_ms = 120000, sandbox = 'auto', sandbox_all = false },
+  commands = { default_timeout_ms = 120000, sandbox = 'auto', sandbox_all = false, target = 'terminal' },
+  terminal = { local_commands = { 'git', 'rg', 'grep', 'ls' }, input_wait_ms = 10000 }, -- see "Your own terminal"
   auto = {
     workspaces = { '~/work/sandbox-repo' },
     allowed_commands = { { 'pytest' }, { 'npm', 'test' }, { 'cargo', 'test' } },

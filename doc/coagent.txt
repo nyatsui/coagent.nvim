@@ -15,6 +15,7 @@ CONTENTS                                              *coagent-contents*
      Experiment log .......................... |coagent-experiments|
      Project ledger .......................... |coagent-ledger|
      Delegating subtasks ..................... |coagent-delegate|
+     Your own terminal ....................... |coagent-terminal|
      Queue ................................... |coagent-queue|
      Notifications ........................... |coagent-notify|
      Limits .................................. |coagent-limits|
@@ -91,6 +92,10 @@ Check the setup with |:checkhealth| coagent.
                               session: changed (default, only the agent's
                               lines) | file. See |coagent-format|.
 :CoagentOutput           Show the last command output.
+:CoagentTerminal [attach [buf]|detach|status]
+                         Run the agent's commands in your own :terminal
+                              (ssh / conda prepared there). See
+                              |coagent-terminal|.
 :CoagentMode [mode]      supervised | readonly | auto | judge
 :CoagentJudge [log [n]|clear]
                          Judge mode: list the judge's decisions / forget
@@ -321,6 +326,8 @@ Commands go into the input history like prompts.
                       Same as the matching :Coagent* command.
   /effort <level> [role]
                       Same as :CoagentEffort (|coagent-effort|).
+  /terminal [attach|detach|status]
+                      Same as :CoagentTerminal (|coagent-terminal|).
   /judge [log [n]|clear]
                       Judge decisions of this session / forget cached
                       verdicts (|coagent-judge|; local).
@@ -986,6 +993,55 @@ Example (ML): /delegate analyze why does val_acc plateau? @metrics.csv
 @loss.png -> paste, /receive 4 -> run the suggested experiment locally ->
 /delegate implement add a cosine schedule as planned in #4 @train.py ->
 /receive 5 maps train.py from ~/Downloads and applies it after review.
+
+                                                      *coagent-terminal*
+Your own terminal ~
+
+Run the agent's commands in a Neovim |:terminal| you prepared: you ssh'ed to
+a GPU server, activated conda / a venv and cd'ed into the project directory,
+which is shared with this machine (Samba / NFS). No host or path settings.
+
+  :terminal, ssh gpu-server, conda activate exp, cd /mnt/share/proj
+  :CoagentTerminal attach        (in that buffer; elsewhere: pick one)
+
+Attaching probes the terminal (pwd, hostname, python -V) and checks that its
+directory is this workspace: it creates .coagent/term-probe-<random> here and
+asks the terminal whether it sees it. If not, it warns (relative paths may
+not match) and offers to cd to a path you type. The winbar shows
+"term:<host>", approvals show "-> terminal (host X, cwd Y)".
+:CoagentTerminal status / detach. The attachment is saved with the session
+and re-attached on restore while that terminal buffer is still open.
+
+run_command waits until the terminal is idle (no coagent command in flight,
+no output for `terminal.idle_ms`, you have not typed for
+`terminal.user_idle_ms`), then sends one line:
+>sh
+   printf START; ( export PAGER=cat ...; cd DIR && eval 'CMD' ) </dev/null 2>&1; printf END $?
+<
+The output between the markers is read from the terminal buffer
+('scrollback' is raised while it runs, wrapped rows are rejoined), the exit
+code comes from the END marker, the echo and the markers are stripped and
+secrets masked. While it runs the terminal's winbar says "coagent running".
+A timeout or <C-c> in the panel sends Ctrl-C. Typing into the terminal (or
+your own Ctrl-C) ends the capture: the agent is told it was interrupted.
+A prompt-like last line ("Password:", "[y/N]", "...?") with no output for
+`terminal.input_wait_ms` stops with an error asking you to answer in the
+terminal. coagent never types passwords or answers.
+
+start_process with the shared directory runs a background job of your shell
+writing .coagent/logs/<id>.log, .pid and .exit (HUP ignored: it survives a
+dropped ssh). coagent tails the log locally, so wait_process, monitoring,
+/exp and the output panel work as for local runs; stop_process sends
+"kill -TERM -- -<pgid>" through the terminal. Without a shared directory the
+run uses the terminal's foreground (with a warning).
+
+Commands made only of `terminal.local_commands` (git, rg, grep, ls, ...) and
+run_command with on = "local" run here; `commands.target = 'local'` keeps
+everything local. Permissions are those of local commands; the judge is told
+the command runs in your terminal on host X. ssh / scp inside a command are
+still hard rules. The local OS sandbox does not apply on the remote host.
+/delegate collects the 03_context.md environment there, and experiment
+entries record the host.
 
                                                          *coagent-queue*
 Messages sent while the agent is busy (responding, running a tool or waiting

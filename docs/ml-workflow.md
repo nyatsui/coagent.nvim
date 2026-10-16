@@ -47,6 +47,9 @@ nvim
 
 conda の場合は `conda activate <env>` の後に起動します。`/delegate` の環境情報（`03_context.md`）は `.venv/bin/python` があればそれを使います。
 
+学習は GPU サーバーで、編集は手元で、という場合は下の「6. 自分の ssh ターミナルを使う」を参照してください（ターミナルで用意した
+環境がそのまま使われます）。
+
 ### 3. 設定（ML 向けの例）
 
 ```lua
@@ -279,6 +282,63 @@ limits = { max_task_tokens = 300000, max_monthly_credits = 1900 },
 続けるには `/budget month 2500` で上げるか `/budget month off` で今月だけ外してください。`:CoagentUsage` に
 `this month (estimate): 312 / 1900 credits, since 2026-10-01` のように表示されます。数えるのは coagent 自身のリクエストだけで
 （VS Code や CopilotChat のチャットなどは含まない）、正確な数値は `:CoagentUsage billing` の GitHub 請求ページで確認します。
+
+### 6. 自分の ssh ターミナルを使う（GPU サーバー）
+
+手元で編集し、プロジェクトディレクトリを Samba（や NFS）で GPU サーバーと共有して、Neovim の `:terminal` から ssh して
+実行している場合は、そのターミナルをそのまま coagent に使わせます。ホストやパスの設定は要りません。conda / venv、module、
+環境変数はいつもどおり自分で用意し、エージェントはその中でコマンドを実行します。実行の様子はターミナルでそのまま見えます。
+
+1. ターミナルを開いて、いつもどおり環境を用意します
+
+   ```vim
+   :terminal
+   ```
+
+   ```bash
+   ssh gpu-server
+   ```
+
+   ```bash
+   conda activate exp
+   ```
+
+   ```bash
+   cd /mnt/share/my-ml-project
+   ```
+
+2. そのターミナルのバッファで `:CoagentTerminal attach`（入力欄からなら `/terminal attach` で開いているターミナルから選ぶ）。
+   coagent が `pwd`・`hostname`・`python -V` を実行し、ターミナルの作業ディレクトリがこのワークスペースと同じ（共有されている）か
+   を確かめます（手元で `.coagent/term-probe-<乱数>` を作り、ターミナル側から見えるかを聞く）。見えないときは警告が出て、
+   サーバー側のパスを入力すれば `cd` します
+3. winbar に `term:gpu-server` と表示されれば準備完了です。あとは judge モード（上の 5.）で任せます
+
+   ```vim
+   :CoagentMode judge
+   ```
+
+動き方:
+
+- `run_command`（テスト、短い評価など）はターミナルで実行され、出力と終了コードがエージェントに返ります。実行中はターミナルの
+  winbar に `coagent running: ...` と出ます。タイムアウトでは Ctrl-C を送ります
+- 学習などの長い実行（`start_process`）はサーバー側のバックグラウンドジョブになり、ログは共有ディレクトリの
+  `.coagent/logs/<id>.log` に書かれます。coagent はそれを手元で読むので、`wait_process` の見守り（20 分ごとのチェックポイント、
+  NaN・OOM などの異常検知）、`/exp` のメトリクス、出力パネルはローカルと同じように使えます。ターミナルは空いたままなので、
+  学習中も自分でコマンドを打てます。ssh が切れてもジョブは続きます（`trap '' HUP`）
+- `git`・`rg`・`ls` など（`terminal.local_commands`）は手元で実行します
+- 権限の判定はローカルと同じです。judge には「ホスト gpu-server のあなたのターミナルで実行する」と伝わります。ssh の経路は
+  あなた自身のセッションなので問題にしませんが、コマンドの中の `ssh` / `scp` は引き続き確認が出ます
+- パスワードや `[y/N]` の確認を求めるコマンドは、`terminal.input_wait_ms`（既定 10 秒）出力がないと止まり、ターミナルで
+  答えるよう通知されます。**coagent はパスワードや回答を入力しません**
+- コマンドの実行中にあなたがターミナルに入力すると、coagent はそのコマンドの取り込みをやめ、中断として扱います。
+  あなたが入力している最中に coagent が送ることはありません
+- `/delegate` の環境情報（`03_context.md` の Python・PyTorch / CUDA・`nvidia-smi`）はサーバー側で取得し、`/exp` の記録には
+  ホスト名が入ります
+- `:CoagentTerminal status` で状態を、`:CoagentTerminal detach` で手元の実行に戻します。セッションを読み込み直しても、
+  同じターミナルが開いていれば自動で再アタッチします
+
+共有していない（作業ディレクトリが違う）ままアタッチした場合、相対パスがずれる可能性があり、長い実行はターミナルの
+フォアグラウンドで動きます（その間、ほかのコマンドは終わるのを待ちます）。
 
 ---
 

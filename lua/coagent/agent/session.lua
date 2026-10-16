@@ -28,6 +28,7 @@ local M = {}
 ---@field plan table? plan phase: {phase='planning'|'ready', start, item, reviewed, advice}
 ---@field skills_disabled table<string,true> skills disabled for this session (/skills)
 ---@field judge_log table[]? judge mode: every judge verdict {at, item, tool, command, cwd, decision, risk, reason, model, cached, error, ms, outcome}
+---@field terminal table? the attached terminal (:CoagentTerminal): {buf, chan, tag, host, root, python, shared}; re-attached on restore while that buffer is open
 ---@field waiting table? the task waits for a delegated subtask: {id, kind, call_id, results = {{call_id, content}}, since}
 ---@class Coagent.Checkpoint
 ---@field id integer
@@ -266,6 +267,7 @@ function Session:serialize(opts)
       end, self.waiting.results or {}),
     }) or nil,
     skills_disabled = next(self.skills_disabled or {}) and vim.tbl_keys(self.skills_disabled) or nil,
+    terminal = self.terminal,
     judge_log = self.judge_log and vim.tbl_map(function(e)
       return vim.tbl_extend('force', e, { command = clean(e.command, 2000), reason = clean(e.reason) })
     end, self.judge_log) or nil,
@@ -303,6 +305,7 @@ function M.deserialize(data)
   s.plan = data.plan
   s.waiting = data.waiting
   s.judge_log = data.judge_log
+  s.terminal = data.terminal
   for _, name in ipairs(data.skills_disabled or {}) do
     s.skills_disabled[name] = true
   end

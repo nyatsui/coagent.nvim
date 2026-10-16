@@ -226,6 +226,15 @@ end, {
     return { 'billing' }
   end,
 })
+cmd('CoagentTerminal', function(a)
+  agent().terminal(a.args)
+end, {
+  nargs = '*',
+  desc = 'Run the agent\'s commands in your own :terminal (attach [buf] | detach | status)',
+  complete = function()
+    return { 'attach', 'detach', 'status' }
+  end,
+})
 cmd('CoagentProcesses', function()
   agent().processes()
 end, { desc = 'Show or stop background processes started by the agent' })

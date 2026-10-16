@@ -110,7 +110,7 @@ end
 
 function Manager:status_line(p)
   local s = p.status == 'running' and 'running' or ('exited ' .. tostring(p.code))
-  return string.format('%s  %s  (%s, cwd %s, %s)', p.id, p.command, s, p.cwd_rel, util.format_duration(util.now() - p.started))
+  return string.format('%s  %s  (%s, cwd %s%s, %s)', p.id, p.command, s, p.cwd_rel, p.terminal and (', terminal ' .. p.terminal) or '', util.format_duration(util.now() - p.started))
 end
 
 function Manager:get(id)
@@ -170,24 +170,18 @@ function Manager:start(spec)
   end
   p.lifetime_ms = lifetime
   p.lifetime_name = spec.lifetime_name
-  p.handle = process.spawn({
-    argv = spec.argv,
-    cwd = spec.cwd,
-    env = spec.env,
-    timeout_ms = lifetime,
-    max_output_bytes = 64 * 1024, -- process.lua's own buffer; we keep our own tail below
-    on_output = function(_, chunk)
-      vim.schedule(function()
-        append(p, chunk, cfg.max_output_bytes)
-        if p.series then
-          p.series:feed(chunk)
-        end
-        if spec.on_output then
-          spec.on_output(p, chunk)
-        end
-      end)
-    end,
-  }, function(res)
+  local function on_output(_, chunk)
+    vim.schedule(function()
+      append(p, chunk, cfg.max_output_bytes)
+      if p.series then
+        p.series:feed(chunk)
+      end
+      if spec.on_output then
+        spec.on_output(p, chunk)
+      end
+    end)
+  end
+  local function on_exit(res)
     p.status = 'exited'
     p.ended = util.now()
     p.code = res.code
@@ -209,7 +203,32 @@ function Manager:start(spec)
       end
       p.finalized = true
     end)
-  end)
+  end
+  if spec.terminal then
+    -- the user's attached terminal: a background job writing .coagent/logs
+    -- (shared workspace) or the terminal's foreground
+    local info
+    p.handle, info = spec.terminal:spawn_bg({
+      id = p.id,
+      command = spec.command,
+      cwd_rel = spec.cwd_rel,
+      env = spec.env,
+      timeout_ms = lifetime,
+      on_output = on_output,
+    }, on_exit)
+    p.terminal = spec.terminal:host_label()
+    p.terminal_mode = info.mode
+    p.log = info.log
+  else
+    p.handle = process.spawn({
+      argv = spec.argv,
+      cwd = spec.cwd,
+      env = spec.env,
+      timeout_ms = lifetime,
+      max_output_bytes = 64 * 1024, -- process.lua's own buffer; we keep our own tail below
+      on_output = on_output,
+    }, on_exit)
+  end
   self.procs[p.id] = p
   table.insert(self.order, p.id)
   self:_changed(p)
@@ -294,7 +313,13 @@ M.start_process = {
     local cfg = ctx.config.commands
     local argv = { process.shell(cfg.shell), '-c', prepared.command }
     local sandboxed
-    if ctx.sandbox then
+    local term = prepared.terminal and ctx.terminal and ctx.terminal() or nil
+    if prepared.terminal and not (term and term:valid()) then
+      return { ok = false, output = 'Error: the attached terminal is no longer open; the process was not started.', summary = 'terminal closed' }
+    end
+    if term then
+      -- runs on the terminal's host: the local OS sandbox does not apply
+    elseif ctx.sandbox then
       local wrapped, backend = sandbox.wrap(argv, ctx.ws.root, cfg.sandbox_writable)
       if wrapped then
         argv, sandboxed = wrapped, backend
@@ -306,7 +331,8 @@ M.start_process = {
     -- the result (or here, when it ran while git was being read)
     -- (/exp run records any command: ctx.experiment = { source, force })
     -- (experiment = true: the model says it is a run, whatever the file names)
-    local opts = vim.tbl_extend('force', { source = 'agent:bg', force = args.experiment == true, name = args.name }, ctx.experiment or {})
+    local opts = vim.tbl_extend('force', { source = 'agent:bg', force = args.experiment == true, name = args.name,
+      host = term and term.host or require('coagent.tools.terminal').local_host(), python = term and term.python or nil }, ctx.experiment or {})
     local is_exp = log ~= nil and log:enabled() and (opts.force or log:matches(prepared.command)) or false
     -- monitored experiment runs: no lifetime cap (max_hours: optional net)
     local lifetime, lifetime_name, series
@@ -338,6 +364,7 @@ M.start_process = {
       lifetime_name = lifetime_name,
       series = series,
       user_started = opts.source == 'user',
+      terminal = term,
       on_output = ctx.on_bg_output,
       on_exit = function(proc, res)
         exited = { proc, res }
@@ -366,6 +393,15 @@ M.start_process = {
     else
       head = string.format('Process %s is running in the background%s.', p.id, state == 'ready' and ' and is ready' or '')
     end
+    if term then
+      if p.terminal_mode == 'log' then
+        head = head .. string.format('\nIt runs in %s as a background job of the user\'s shell; output goes to %s (read here).',
+          term:describe(prepared.cwd_rel), ctx.ws:display(p.log))
+      else
+        head = head .. string.format('\nIt runs in the foreground of %s (the workspace is not shared with the terminal, so no log file): '
+          .. 'the terminal is busy until it ends; other terminal commands wait.', term:describe(prepared.cwd_rel))
+      end
+    end
     if exp and series then
       head = head .. string.format('\n[experiment #%d: metrics are recorded when %s exits. Monitored run without a time limit: wait_process '
         .. 'returns at checkpoints (every %s with new metrics) and on anomalies with the metric trends; then continue or stop it]',
@@ -377,7 +413,7 @@ M.start_process = {
       ok = state ~= 'exited' or p.code == 0,
       output = head .. '\nOutput so far:\n' .. (out ~= '' and out or '(none yet)'),
       summary = state == 'exited' and ('exited ' .. tostring(p.code)) or (p.id .. ' running'),
-      meta = { bg_id = p.id, sandbox = sandboxed, experiment = exp and exp.entry.id or nil },
+      meta = { bg_id = p.id, sandbox = sandboxed, experiment = exp and exp.entry.id or nil, terminal = p.terminal },
     }
   end,
 }
