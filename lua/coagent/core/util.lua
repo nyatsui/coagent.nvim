@@ -218,6 +218,51 @@ function M.lines(s)
   return out
 end
 
+--- Remove ANSI escape sequences (colors, cursor movement).
+---@param s string
+---@return string
+function M.strip_ansi(s)
+  return (s:gsub('\27%[[%d;?]*[%a]', ''))
+end
+
+--- One output line as a terminal shows it: `\r` returns to the start of the
+--- line and the text after it rewrites what was there (tqdm progress bars).
+--- Keeps the last part with content (a trailing `\r` erases nothing).
+---@param line string one line, without its `\n`
+---@return string
+function M.cr_line(line)
+  if not line:find('\r', 1, true) then
+    return line
+  end
+  local parts = vim.split(line, '\r', { plain = true })
+  for i = #parts, 1, -1 do
+    if parts[i]:find('%S') then
+      return parts[i]
+    end
+  end
+  return ''
+end
+
+--- Output text with the `\r` line discipline applied to every line (see
+--- M.cr_line): a progress bar redrawn 1000 times is one line, in its final
+--- state. ANSI escapes are removed. Keeps a final newline.
+---@param s string
+---@return string
+function M.cr_text(s)
+  if type(s) ~= 'string' or s == '' then
+    return s
+  end
+  s = M.strip_ansi(s)
+  if not s:find('\r', 1, true) then
+    return s
+  end
+  local out = vim.split(s, '\n', { plain = true })
+  for i, line in ipairs(out) do
+    out[i] = M.cr_line(line)
+  end
+  return table.concat(out, '\n')
+end
+
 --- Read a whole file synchronously.
 ---@param path string
 ---@return string?, string?

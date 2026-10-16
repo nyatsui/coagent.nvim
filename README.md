@@ -324,7 +324,7 @@ input history (`<C-p>`/`<C-n>`) like normal prompts.
 | `/rewind` | Rewind to just before an earlier prompt (code + conversation / conversation / code; see "Rewind") |
 | `/format [changed\|file]` | Format files the AI changed in this session (default `changed` = only the lines the AI changed; see "Formatting AI-edited files") |
 | `/resume` | Resume a paused task (after a limit: continues with fresh counters; same as `:CoagentResume`) |
-| `/stop` / `/processes` | Stop / background processes |
+| `/stop` / `/processes` | Stop / background processes (output, log, stop) |
 | `/terminal [attach\|detach\|status]` | Run commands in your own `:terminal` (see "Your own terminal") |
 | `/queue [clear]` | Messages queued while the agent works / `clear` discards them |
 | `/budget [tokens\|credits\|session\|month] <n\|200k\|off\|default>` | Token budgets for this session, and the monthly credit budget (see "Per-task limits", "Monthly budget") |
@@ -751,6 +751,40 @@ full diff), a comparison (`"compare"` or `"3 7"`) or runs whose command / notes 
 note, `/exp compare`, paste into Microsoft 365 Copilot / any chat to reason about the next change, then give coagent the
 concrete change to make.
 
+### Watching background processes (training runs)
+
+Processes the agent starts with `start_process` (and `/exp run`) keep running in the background. Three ways to watch
+them:
+
+- **`gp`** in the panel (or in the input's Normal mode) opens the output of the running process — a picker when several
+  run, the most recent one that ended when none does. `<CR>` on a `start_process` item and `:CoagentProcesses` /
+  `/processes` → "Show output" open the same bottom panel.
+- **The output panel** shows lines as a terminal does: a tqdm progress bar redrawn with `\r` is one line in its current
+  state, not thousands of lines. It **follows the end** while output arrives (`[follow]` in its header); moving or
+  scrolling up pauses that (`[paused]`) so you can read, and `G` or `f` resumes it (`f` toggles, `q` closes).
+- **A log file per process** with the full raw output: `.coagent/logs/<id>-<date>-<time>.log` in a git repository
+  (`.coagent/` is git-ignored locally, never listed or searched by the agent, and not writable by it), else
+  `stdpath('state')/coagent/logs/<project>-<hash>/` (or `background.log_dir`). The path is shown on the tool item, in the
+  output panel and in `:CoagentProcesses`, which also offers "Open log in a split" (`:split +$ <log>` with `autoread`)
+  and "Copy tail -f command". Follow a training run from another tmux pane:
+
+  ```sh
+  tail -f .coagent/logs/bg1-20261016-221530.log
+  ```
+
+  The log keeps the raw bytes (every `\r` redraw, colors); `less -R` or `tail -f` shows it as the terminal would. A log
+  that reaches `background.max_log_bytes` (50 MB) is rotated once with a note (`<name>.log.1` holds the previous part,
+  so a run takes at most twice that; use `tail -F` to follow across the rotation). Logs stay after the process ends;
+  only the newest `background.keep_logs` (50) runs are kept (never a running one). `background.log_files = false` turns
+  them off. A process started in your own terminal (`:CoagentTerminal`, shared workspace) already writes its log
+  there; that file is used as is.
+
+What the model sees uses the same line discipline: `read_process_output`, the `wait_process` tails and the checkpoint
+tails contain each progress bar once, in its last state (secrets masked as before), and metrics are parsed from the
+final state of each line — `loss=0.41` in a tqdm postfix still counts, once per finished bar. While a bar is still being
+redrawn, the monitor reads its progress / ETA and anomalies (`loss=nan`) live and takes a metric point from it at most
+every `experiments.monitor.bar_sample_ms` (60 s), so a long epoch still reaches checkpoints.
+
 ### Project ledger (/ledger)
 
 Long chats get slow and forget. The ledger is the single source of truth about the ongoing work of a project — what the
@@ -1073,7 +1107,7 @@ terminal = {
 | `:CoagentRewind` | Rewind code and conversation to just before an earlier prompt (same as `/rewind`) |
 | `:CoagentFormat [changed\|file]` | Format files the AI changed (same as `/format`; default `changed`) |
 | `:CoagentOutput` | Show the latest command output in a bottom panel |
-| `:CoagentProcesses` | Show output of / stop background processes the agent started |
+| `:CoagentProcesses` | Background processes the agent started: show output, open the log in a split, copy a `tail -f` command, stop |
 | `:CoagentTerminal [attach [buf]\|detach\|status]` | Run the agent's commands in your own `:terminal` (ssh / conda prepared there; see "Your own terminal") |
 | `:CoagentUsage [billing]` | Copilot usage and remaining quota as reported by Copilot (and the reset date), requests and tokens of the task and session. `billing` opens GitHub's billing page in the browser |
 | `:CoagentMode [supervised\|readonly\|auto\|judge]` | Switch the approval mode |
@@ -1103,14 +1137,15 @@ Panel (buffer-local):
 | `p` / `R` | Pause / resume | `gs` / `gn` | Sessions / new |
 | `gm` | Switch mode | `i` | Go to the input |
 | `gu` | Usage and quota | `gi` | Revise the plan waiting for approval (asks for feedback) |
-| `>` / `<` | Panel 5 columns wider / narrower (count: `3>`) | | |
+| `>` / `<` | Panel 5 columns wider / narrower (count: `3>`) | `gp` | Watch a background process's output (the running one / a picker / the latest) |
 | `q` | Close | `g?` | Help |
 
 Input box: `<CR>` (Normal) / `<C-s>` (Insert) sends (queued while the agent works), `<C-c>` returns the queue / stops,
 `<C-k>` goes to the panel, `<C-p>`/`<C-n>` history. In the input box's Normal mode, `a`, `d`, `i` and friends stay normal
 editing keys, so panel actions are available with a `g` prefix:
 `ga` approve / `gA` always approve / `gx` deny / `gX` deny and stop / `gr` hunk review / `gd` diff / `gc` changes /
-`gu` usage / `gs` sessions / `gn` new / `gm` mode / `g?` help (also shown in the statusline while an approval is pending).
+`gu` usage / `gp` process output / `gs` sessions / `gn` new / `gm` mode / `g?` help (also shown in the statusline while an
+approval is pending).
 No global keys are set by default (set `keymaps.global.toggle` / `keymaps.global.inline`). Terminal-dependent keys such as
 Alt are not used as defaults.
 
@@ -1253,7 +1288,10 @@ require('coagent').setup({
   diagnostics_after_edit = { enabled = true, min_severity = 'error', timeout_ms = 1500, max_items = 10 },
   -- max_lifetime_ms: background processes are killed after it; also the longest wait_process
   -- (not for experiment runs while experiments.monitor.enabled; see max_hours there)
-  background = { max_processes = 3, max_output_bytes = 1024 * 1024, max_lifetime_ms = 2 * 60 * 60 * 1000 },
+  -- log files (see "Watching background processes"): log_files = false turns them off; log_dir = another folder
+  -- (default .coagent/logs in a git repository, else stdpath('state')/coagent/logs/<project>)
+  background = { max_processes = 3, max_output_bytes = 1024 * 1024, max_lifetime_ms = 2 * 60 * 60 * 1000,
+    log_files = true, log_dir = nil, max_log_bytes = 50 * 1024 * 1024, keep_logs = 50 },
   session = { persist = true, save_tool_output = true },
   -- width: initial panel width (fraction or columns). A width you set by hand (mouse, <C-w><, :vertical resize,
   -- :CoagentWidth, < / > in the panel) is remembered across reopen, terminal resizes and restarts (remember_size)
@@ -1282,6 +1320,7 @@ require('coagent').setup({
       worse_margin = 0.05,          -- relative gap to the best run at the same epoch called "clearly worse"
       max_hours = nil,              -- optional absolute safety net (nil = none)
       max_points = 100, trend_points = 5, tail_lines = 20,
+      bar_sample_ms = 60 * 1000,    -- a tqdm bar still being redrawn gives a metric point at most this often
     },
   },
   ledger = {

@@ -32,6 +32,10 @@ M.DEFAULTS = {
   trend_points = 5,
   tail_lines = 20,
   max_keys = 8,
+  -- a line redrawn with \r (tqdm) is parsed in its final state; while it is
+  -- still being redrawn its metrics (set_postfix loss=...) give a point at
+  -- most this often, so a long epoch still reaches checkpoints
+  bar_sample_ms = 60 * 1000,
 }
 
 --- experiments.monitor with defaults.
@@ -277,8 +281,9 @@ end
 
 local NONFINITE = { nan = 'NaN', inf = 'Inf', infinity = 'Inf' }
 
---- Parse one output line.
-function Series:_line(line)
+--- Parse one output line. `live`: the current state of a line still being
+--- redrawn with \r (progress, epoch and anomalies; metric points sampled).
+function Series:_line(line, live)
   line = line:gsub('\27%[[%d;?]*%a', '')
   if vim.trim(line) == '' then
     return
@@ -354,6 +359,14 @@ function Series:_line(line)
   if #m.order == 0 then
     return
   end
+  local sample = true
+  if live then
+    local now = util.now()
+    sample = now - (self.bar_sampled or self.started) >= (self.mcfg.bar_sample_ms or 60000)
+    if sample then
+      self.bar_sampled = now
+    end
+  end
   -- position first, so the metrics of this line carry it
   for _, k in ipairs(m.order) do
     if EPOCH_KEYS[k] then
@@ -363,7 +376,7 @@ function Series:_line(line)
     end
   end
   for _, k in ipairs(m.order) do
-    if not EPOCH_KEYS[k] and not STEP_KEYS[k] then
+    if sample and not EPOCH_KEYS[k] and not STEP_KEYS[k] then
       self:_add(k, m.values[k])
     end
   end
@@ -379,14 +392,33 @@ function Series:feed(chunk)
   local text = self.pending .. chunk
   local start = 1
   while true do
-    local s = text:find('[\r\n]', start)
+    local s = text:find('\n', start, true)
     if not s then
       break
     end
-    self:_line(text:sub(start, s - 1))
+    -- the line in its final state (the last \r-redraw of a progress bar)
+    local line = util.cr_line(text:sub(start, s - 1))
+    if not line:find('%S') and self.bar_line then
+      line = self.bar_line -- "...\r" then "\n" in the next chunk
+    end
+    self.bar_line = nil
+    self:_line(line)
     start = s + 1
   end
-  self.pending = text:sub(start)
+  local rest = text:sub(start)
+  -- a line still being redrawn: its current state (the text between the
+  -- last two \r) for progress / anomalies; only the part after the last \r
+  -- is kept, so a bar redrawn for hours does not pile up
+  local last_cr = rest:match('.*()\r')
+  if last_cr then
+    local cur = util.cr_line(rest:sub(1, last_cr - 1))
+    if cur:find('%S') then
+      self.bar_line = cur
+      self:_line(cur, true)
+    end
+    rest = rest:sub(last_cr)
+  end
+  self.pending = rest
   if #self.pending > 65536 then
     self.pending = self.pending:sub(-4096)
   end

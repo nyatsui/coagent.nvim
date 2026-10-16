@@ -1976,7 +1976,36 @@ function M.output()
   notify('no command has run yet')
 end
 
---- Pick a background process: show its output or stop it.
+--- Log path of a background process for messages (workspace-relative).
+local function log_label(c, p)
+  return p.log and c.ws:display(p.log) or nil
+end
+
+--- Open a process's log file in a split at its end; `autoread` reloads it
+--- as the process writes (on focus / :checktime).
+---@param path string
+function M.open_log(path)
+  if not (path and vim.uv.fs_stat(path)) then
+    notify('the log file is gone: ' .. tostring(path), vim.log.levels.WARN)
+    return
+  end
+  vim.cmd('split +$ ' .. vim.fn.fnameescape(path))
+  vim.bo.autoread = true
+  vim.bo.swapfile = false
+end
+
+--- Show the output panel of a background process.
+local function show_process(c, p)
+  if p.item then
+    require('coagent.ui.output').show(p.item, config.options.ui.output_height)
+  elseif p.log then
+    M.open_log(p.log)
+  else
+    notify('no output to show for ' .. p.id)
+  end
+end
+
+--- Pick a background process: show its output, open its log or stop it.
 function M.processes()
   local c = M.controller()
   local list = c.processes:list()
@@ -1987,24 +2016,72 @@ function M.processes()
   vim.ui.select(list, {
     prompt = 'Background processes',
     format_item = function(p)
-      return c.processes:status_line(p)
+      local log = log_label(c, p)
+      return c.processes:status_line(p) .. (log and ('  log: ' .. log) or '')
     end,
   }, function(p)
     if not p then
       return
     end
     local choices = { 'Show output' }
+    local log = log_label(c, p)
+    if log then
+      vim.list_extend(choices, { 'Open log in a split', 'Copy tail -f command' })
+    end
     if p.status == 'running' then
       table.insert(choices, 'Stop')
     end
-    vim.ui.select(choices, { prompt = p.id }, function(action)
+    local prompt = p.id .. (log and ('  log: ' .. log .. ' — tail -f it in another tmux pane') or '')
+    vim.ui.select(choices, { prompt = prompt }, function(action)
       if action == 'Stop' then
         c.processes:stop(p.id)
-      elseif action == 'Show output' and p.item then
-        require('coagent.ui.output').show(p.item, config.options.ui.output_height)
+      elseif action == 'Show output' then
+        show_process(c, p)
+      elseif action == 'Open log in a split' then
+        M.open_log(p.log)
+      elseif action == 'Copy tail -f command' then
+        local cmd = 'tail -f ' .. vim.fn.shellescape(p.log)
+        vim.fn.setreg('"', cmd)
+        pcall(vim.fn.setreg, '+', cmd)
+        notify('copied: ' .. cmd)
       end
     end)
   end)
+end
+
+--- Watch a background process (panel / input key gp): the running one, a
+--- picker when several run, else the most recent one that ended.
+function M.process_output()
+  local c = M.controller()
+  local list = c.processes:list()
+  if #list == 0 then
+    notify('no background processes')
+    return
+  end
+  local running = vim.tbl_filter(function(p)
+    return p.status == 'running'
+  end, list)
+  if #running == 1 then
+    return show_process(c, running[1])
+  elseif #running > 1 then
+    return vim.ui.select(running, {
+      prompt = 'Watch which process?',
+      format_item = function(p)
+        return c.processes:status_line(p)
+      end,
+    }, function(p)
+      if p then
+        show_process(c, p)
+      end
+    end)
+  end
+  local last = list[1]
+  for _, p in ipairs(list) do
+    if (p.ended or 0) >= (last.ended or 0) then
+      last = p
+    end
+  end
+  show_process(c, last)
 end
 
 ------------------------------------------------------------------------------

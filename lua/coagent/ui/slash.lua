@@ -329,7 +329,7 @@ M.COMMANDS = {
   },
   {
     name = 'processes',
-    desc = 'Show or stop background processes',
+    desc = 'Watch, open the log of, or stop background processes',
     run = function()
       app().processes()
     end,

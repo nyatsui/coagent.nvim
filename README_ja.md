@@ -314,7 +314,7 @@ vim.keymap.set('x', '<leader>ai', ':CoagentInline<CR>', { desc = 'Coagent inline
 | `/rewind` | 過去のプロンプトの直前まで巻き戻す（コード + 会話 / 会話のみ / コードのみ。下記「巻き戻し」） |
 | `/format [changed\|file]` | このセッションで AI が変更したファイルを整形（既定 `changed` = AI が変更した行だけ。下記「AI が編集したファイルの整形」） |
 | `/resume` | 一時停止したタスクを再開（上限で止まった場合はカウンタをリセットして続行。`:CoagentResume` と同じ） |
-| `/stop` / `/processes` | 停止 / バックグラウンドプロセス |
+| `/stop` / `/processes` | 停止 / バックグラウンドプロセス（出力・ログ・停止） |
 | `/terminal [attach\|detach\|status]` | コマンドを自分の `:terminal` で実行（「自分のターミナルで実行」参照） |
 | `/queue [clear]` | 作業中に送ったメッセージ（キュー）の一覧 / `clear` で破棄 |
 | `/budget [tokens\|credits\|session\|month] <n\|200k\|off\|default>` | このセッションのトークン上限と、月間クレジット上限（「タスクごとの上限」「月間の上限」参照） |
@@ -730,6 +730,38 @@ val_acc を上げて」のようなタスクを、何も再実行せずに始め
 → メモを追加 → `/exp compare` → Microsoft 365 Copilot などのチャットに貼って次の変更を検討 → 決めた具体的な変更を
 coagent に指示。
 
+### バックグラウンドプロセスを見る（学習の実行）
+
+エージェントが `start_process`（と `/exp run`）で起動したプロセスはバックグラウンドで動き続けます。見る方法は 3 つ:
+
+- **`gp`**（パネル、または入力欄の Normal mode）: 実行中のプロセスの出力を開きます。複数動いていれば選択、
+  何も動いていなければ最後に終わったものを開きます。`start_process` の項目で `<CR>`、`:CoagentProcesses` /
+  `/processes` →「Show output」でも同じ下部パネルが開きます。
+- **出力パネル** はターミナルと同じように行を表示します: `\r` で再描画される tqdm のプログレスバーは何千行にもならず、
+  現在の状態の 1 行です。出力が届く間は **末尾を追いかけ**（ヘッダーに `[follow]`）、上へ移動・スクロールすると
+  止まります（`[paused]`）。`G` か `f` で再開（`f` は切り替え、`q` で閉じる）。
+- **プロセスごとのログファイル**（生の出力すべて）: git リポジトリでは `.coagent/logs/<id>-<日付>-<時刻>.log`
+  （`.coagent/` はこのクローンだけで git から除外され、エージェントの一覧・検索の対象外で、書き込みもできません）、
+  それ以外では `stdpath('state')/coagent/logs/<プロジェクト>-<hash>/`（または `background.log_dir`）。パスはツール項目、
+  出力パネル、`:CoagentProcesses` に表示されます。`:CoagentProcesses` には「Open log in a split」
+  （`:split +$ <log>`、`autoread` 付き）と「Copy tail -f command」もあります。tmux の別ペインで学習を追うには:
+
+  ```sh
+  tail -f .coagent/logs/bg1-20261016-221530.log
+  ```
+
+  ログは生のバイト列（`\r` の再描画や色も含む）なので、`tail -f` や `less -R` でターミナルと同じに見えます。
+  `background.max_log_bytes`（50 MB）に達したログは注記付きで 1 回ローテーションされます（`<name>.log.1` に直前の部分。
+  1 回の実行で最大その 2 倍。ローテーションをまたいで追うなら `tail -F`）。ログはプロセス終了後も残り、新しい
+  `background.keep_logs`（50）件の実行分だけ保持されます（実行中のものは消しません）。`background.log_files = false`
+  で無効。自分のターミナル（`:CoagentTerminal`、ワークスペース共有）で起動したプロセスはそちらが書くログをそのまま使います。
+
+モデルが見るものも同じ行の扱いです: `read_process_output`、`wait_process` の末尾、チェックポイントの末尾には
+プログレスバーが最後の状態で 1 回だけ入ります（秘密情報のマスクはこれまで通り）。指標も各行の最終状態から読むので、
+tqdm の postfix の `loss=0.41` は終わったバーごとに 1 回数えられます。再描画中のバーからは進捗 / ETA と異常
+（`loss=nan`）をその場で読み、指標の点は最短 `experiments.monitor.bar_sample_ms`（60 秒）ごとに取るので、長いエポックでも
+チェックポイントに届きます。
+
 ### プロジェクト台帳（/ledger）
 
 長いチャットは遅くなり、前のことを忘れます。台帳（ledger）は、プロジェクトで進行中の作業についての唯一の情報源です。
@@ -1039,7 +1071,7 @@ terminal = {
 | `:CoagentRewind` | 過去のプロンプトの直前までコード・会話を巻き戻す（`/rewind` と同じ） |
 | `:CoagentFormat [changed\|file]` | AI が変更したファイルを整形（`/format` と同じ。既定 `changed`） |
 | `:CoagentOutput` | 直近のコマンド出力を下部パネルに表示 |
-| `:CoagentProcesses` | エージェントが起動したバックグラウンドプロセスの出力表示・停止 |
+| `:CoagentProcesses` | エージェントが起動したバックグラウンドプロセス: 出力表示、ログを split で開く、`tail -f` コマンドのコピー、停止 |
 | `:CoagentTerminal [attach [buf]\|detach\|status]` | エージェントのコマンドを自分の `:terminal` で実行（ssh / conda はそこで用意。「自分のターミナルで実行」参照） |
 | `:CoagentUsage [billing]` | Copilot が返す利用量・残量とリセット日、タスク・セッションのリクエスト数とトークン数。`billing` で GitHub の請求ページをブラウザで開く |
 | `:CoagentMode [supervised\|readonly\|auto\|judge]` | 承認モード切替 |
@@ -1069,13 +1101,13 @@ terminal = {
 | `p` / `R` | 一時停止 / 再開 | `gs` / `gn` | セッション一覧 / 新規 |
 | `gm` | モード切替 | `i` | 入力欄へ |
 | `gu` | 利用量・残量 | `gi` | 承認待ちの計画を修正（フィードバックを入力） |
-| `>` / `<` | パネルを 5 列広く / 狭く（回数指定可: `3>`） | | |
+| `>` / `<` | パネルを 5 列広く / 狭く（回数指定可: `3>`） | `gp` | バックグラウンドプロセスの出力（実行中のもの / 選択 / 直近） |
 | `q` | 閉じる | `g?` | ヘルプ |
 
 入力欄: `<CR>`（ノーマル）/ `<C-s>`（インサート）送信（作業中はキューへ）、`<C-c>` キューを戻す / 停止、`<C-k>` パネルへ、`<C-p>`/`<C-n>` 履歴。
 入力欄の Normal mode では `a` `d` `i` などは通常の編集キーのままなので、パネル操作は `g` 付きで使えます:
 `ga` 承認 / `gA` 常に承認 / `gx` 拒否 / `gX` 拒否して停止 / `gr` hunk レビュー / `gd` diff / `gc` 変更一覧 /
-`gu` 利用量 / `gs` セッション / `gn` 新規 / `gm` モード / `g?` ヘルプ（承認待ちの間はステータスラインにも表示）。
+`gu` 利用量 / `gp` プロセスの出力 / `gs` セッション / `gn` 新規 / `gm` モード / `g?` ヘルプ（承認待ちの間はステータスラインにも表示）。
 グローバルキーは既定で設定しません（`keymaps.global.toggle` / `keymaps.global.inline` で設定）。Alt キーなどターミナル依存の
 キーは既定値に使っていません。
 
@@ -1212,7 +1244,10 @@ require('coagent').setup({
   diagnostics_after_edit = { enabled = true, min_severity = 'error', timeout_ms = 1500, max_items = 10 },
   -- max_lifetime_ms: バックグラウンドのプロセスはこの時間で終了。wait_process の最長の待ち時間でもある
   -- （experiments.monitor.enabled の間、実験の実行には適用しない。そちらは max_hours を参照）
-  background = { max_processes = 3, max_output_bytes = 1024 * 1024, max_lifetime_ms = 2 * 60 * 60 * 1000 },
+  -- ログファイル（「バックグラウンドプロセスを見る」参照）: log_files = false で無効、log_dir で別のフォルダ
+  -- （既定: git リポジトリでは .coagent/logs、それ以外は stdpath('state')/coagent/logs/<プロジェクト>）
+  background = { max_processes = 3, max_output_bytes = 1024 * 1024, max_lifetime_ms = 2 * 60 * 60 * 1000,
+    log_files = true, log_dir = nil, max_log_bytes = 50 * 1024 * 1024, keep_logs = 50 },
   session = { persist = true, save_tool_output = true },
   -- width: パネルの初期幅（割合または列数）。手で変えた幅（マウス、<C-w><、:vertical resize、:CoagentWidth、
   -- パネルの < / >）は、開き直し・端末のリサイズ・再起動をまたいで記憶します（remember_size）
@@ -1241,6 +1276,7 @@ require('coagent').setup({
       worse_margin = 0.05,          -- 同じエポックの過去のベストとの相対差がこれを超えたら「明らかに悪い」
       max_hours = nil,              -- 任意の絶対的な安全網（nil = なし）
       max_points = 100, trend_points = 5, tail_lines = 20,
+      bar_sample_ms = 60 * 1000,    -- 再描画中の tqdm バーから指標の点を取るのは最短でこの間隔ごと
     },
   },
   ledger = {

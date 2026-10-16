@@ -80,7 +80,11 @@ describe('metric series', function()
     assert.are.equal('epoch 1/3, batch 200/1000, 10 it/s', text)
     -- 80 s left in this epoch + 2 more epochs of 100 s
     assert.are.equal(280000, math.floor(eta))
-    assert.are.equal(2, s.tracks.loss.n)
+    -- the bar is still being redrawn: no point yet (sampled every bar_sample_ms)
+    assert.is_nil(s.tracks.loss)
+    s:feed('\n') -- the bar's final state is one point
+    assert.are.equal(1, s.tracks.loss.n)
+    assert.are.equal(0.8, s.tracks.loss.points[1].v)
 
     local s2 = Monitor.new_series(cfg)
     s2:feed("{'loss': 0.6931, 'learning_rate': 4.5e-05, 'epoch': 0.5}\n")

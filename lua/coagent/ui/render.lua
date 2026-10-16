@@ -244,8 +244,13 @@ local function tool(b, item, o)
         table.insert(meta, 'sandboxed')
       end
       b.line(p .. table.concat(meta, ' ' .. o.icons.dot .. ' '), 'CoagentDim')
+      if item.meta and item.meta.log then
+        -- background process: the full output, for tail -f in another pane
+        b.line(p .. 'log: ' .. (item.meta.log_rel or item.meta.log) .. ' ' .. o.icons.dot .. ' tail -f it in another tmux pane', 'CoagentDim')
+      end
       local out = item.live or item.output
       if out and out ~= '' then
+        out = util.cr_text(out)
         indent_block(b, out, p .. o.icons.bar .. ' ', nil, o.max_output_lines or 20, true)
       end
     elseif item.kind == 'write' and item.preview and item.preview.diff then

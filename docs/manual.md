@@ -531,6 +531,19 @@ Neovim にフォーカスが無いとき、承認待ち・完了・失敗・上�
 ## 8. コマンド出力
 
 - コマンド項目で `<CR>`、または `:CoagentOutput` で下部パネルに全出力（実行中はライブ更新、`q` で閉じる）
+- 出力パネルは `\r` をターミナルと同じに扱います（tqdm のバーは最新の状態の 1 行）。末尾を自動で追いかけ（ヘッダーに
+  `[follow]`）、上へ移動・スクロールすると止まる（`[paused]`）。`G` / `f` で再開（`f` は切り替え）
+- バックグラウンドプロセス（学習など）:
+  - `gp`（パネル / 入力欄の Normal mode）— 実行中のプロセスの出力を開く（複数なら選択、なければ最後に終わったもの）
+  - `:CoagentProcesses` / `/processes` — 出力表示、「Open log in a split」（`:split +$ <log>`、`autoread`）、
+    「Copy tail -f command」、停止
+  - 全出力をログファイルに保存: git リポジトリでは `.coagent/logs/<id>-<日付>-<時刻>.log`（git から除外、エージェントの
+    検索対象外）、それ以外は `stdpath('state')/coagent/logs/<プロジェクト>/`（`background.log_dir` で変更）。
+    パスはツール項目・出力パネル・`:CoagentProcesses` に表示。tmux の別ペインで `tail -f <ログ>`
+  - ログは生の出力のまま。`background.max_log_bytes`（50 MB）で 1 回ローテーション（`.log.1`、追うなら `tail -F`）、
+    終了後も新しい `background.keep_logs`（50）件分を保持、`background.log_files = false` で無効
+  - モデルに渡る出力（`read_process_output`・`wait_process`・チェックポイントの末尾）と指標の読み取りも各行の最終状態
+    （tqdm の postfix の `loss=0.41` も読む。再描画中のバーからは `experiments.monitor.bar_sample_ms` ごとに 1 点）
 - タイムラインの展開表示（`<Tab>`）では末尾 20 行
 - モデルへ返す出力は `limits.max_tool_output_bytes`（既定 24KB）で先頭と末尾を残して切り詰め
 

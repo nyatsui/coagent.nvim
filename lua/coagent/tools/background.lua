@@ -17,6 +17,7 @@ local util = require('coagent.core.util')
 local process = require('coagent.tools.process')
 local sandbox = require('coagent.tools.sandbox')
 local Monitor = require('coagent.agent.monitor')
+local ProcLog = require('coagent.tools.proclog')
 
 local M = {}
 
@@ -43,6 +44,8 @@ local M = {}
 ---@field watched boolean? a user-started run handed to the agent (/exp watch)
 ---@field released boolean? the user ended monitoring (/exp unwatch): no more waits or stops by the agent
 ---@field stop_reason string? why the agent stopped it
+---@field log string? log file with the full raw output (tools/proclog.lua; or the terminal job's log)
+---@field logw Coagent.ProcLog? writer of `log` (nil for a terminal job, whose shell writes it)
 
 ---@class Coagent.BgManager
 local Manager = {}
@@ -53,7 +56,7 @@ function M.new(config)
 end
 
 function Manager:cfg()
-  return vim.tbl_extend('force', { max_processes = 3, max_output_bytes = 1024 * 1024, max_lifetime_ms = 2 * 60 * 60 * 1000 }, self.config.background or {})
+  return vim.tbl_extend('force', { max_processes = 3, max_output_bytes = 1024 * 1024, max_lifetime_ms = 2 * 60 * 60 * 1000 }, ProcLog.DEFAULTS, self.config.background or {})
 end
 
 function Manager:running_count()
@@ -93,7 +96,8 @@ function Manager:read(p, opts)
   local total = p.base + #p.out
   local from = opts.all and p.base or math.max(p.read_pos, p.base)
   local dropped = (not opts.all and p.read_pos < p.base) and (p.base - p.read_pos) or 0
-  local text = p.out:sub(from - p.base + 1)
+  -- as a terminal shows it: a progress bar redrawn with \r is one line
+  local text = util.cr_text(p.out:sub(from - p.base + 1))
   p.read_pos = total
   local lines = util.lines(text)
   local tail = opts.tail or 200
@@ -142,9 +146,21 @@ function Manager:kill_all()
   end
 end
 
+--- Log paths of the running processes (never pruned).
+function Manager:active_logs()
+  local out = {}
+  for _, p in pairs(self.procs) do
+    if p.status == 'running' and p.log then
+      table.insert(out, p.log)
+    end
+  end
+  return out
+end
+
 --- Start a process. Returns the BgProcess or nil, err.
 --- spec.lifetime_ms: nil = background.max_lifetime_ms, false = no cap.
 --- spec.series: metric series fed with the output.
+--- spec.root: workspace root, for the log file (none without it).
 function Manager:start(spec)
   local cfg = self:cfg()
   if self:running_count() >= cfg.max_processes then
@@ -173,6 +189,9 @@ function Manager:start(spec)
   local function on_output(_, chunk)
     vim.schedule(function()
       append(p, chunk, cfg.max_output_bytes)
+      if p.logw then
+        p.logw:write(chunk)
+      end
       if p.series then
         p.series:feed(chunk)
       end
@@ -186,10 +205,14 @@ function Manager:start(spec)
     p.ended = util.now()
     p.code = res.code
     p.killed = res.killed
+    local note
     if res.error then
-      append(p, '\n[failed to start: ' .. res.error .. ']\n', cfg.max_output_bytes)
+      note = '\n[failed to start: ' .. res.error .. ']\n'
     elseif res.timed_out then
-      append(p, '\n[stopped: reached ' .. (spec.lifetime_name or 'background.max_lifetime_ms') .. ']\n', cfg.max_output_bytes)
+      note = '\n[stopped: reached ' .. (spec.lifetime_name or 'background.max_lifetime_ms') .. ']\n'
+    end
+    if note then
+      append(p, note, cfg.max_output_bytes)
     end
     self:_changed(p)
     -- after the output chunks that are still scheduled; `finalized` tells
@@ -198,11 +221,24 @@ function Manager:start(spec)
       if p.series and p.series.pending ~= '' then
         p.series:feed('\n') -- a last line without a newline
       end
+      if p.logw then
+        if note then
+          p.logw:write(note)
+        end
+        p.logw:close(string.format('[coagent] %s %s after %s', p.id,
+          p.killed and 'was stopped' or ('exited with code ' .. tostring(p.code)), util.format_duration(p.ended - p.started)))
+      end
       if spec.on_exit then
         pcall(spec.on_exit, p, res)
       end
       p.finalized = true
     end)
+  end
+  local function open_log()
+    local w = spec.root and ProcLog.open(self.config, spec.root, p.id, ProcLog.header(p.id, spec.command, spec.cwd_rel)) or nil
+    if w then
+      p.logw, p.log = w, w.path
+    end
   end
   if spec.terminal then
     -- the user's attached terminal: a background job writing .coagent/logs
@@ -219,7 +255,11 @@ function Manager:start(spec)
     p.terminal = spec.terminal:host_label()
     p.terminal_mode = info.mode
     p.log = info.log
+    if not p.log then
+      open_log() -- terminal foreground: the output comes back here
+    end
   else
+    open_log()
     p.handle = process.spawn({
       argv = spec.argv,
       cwd = spec.cwd,
@@ -231,6 +271,10 @@ function Manager:start(spec)
   end
   self.procs[p.id] = p
   table.insert(self.order, p.id)
+  if p.log and spec.root then
+    -- keep the newest background.keep_logs runs
+    pcall(ProcLog.prune, vim.fs.dirname(p.log), cfg.keep_logs, self:active_logs())
+  end
   self:_changed(p)
   return p
 end
@@ -365,6 +409,7 @@ M.start_process = {
       series = series,
       user_started = opts.source == 'user',
       terminal = term,
+      root = ctx.ws.root,
       on_output = ctx.on_bg_output,
       on_exit = function(proc, res)
         exited = { proc, res }
@@ -413,7 +458,8 @@ M.start_process = {
       ok = state ~= 'exited' or p.code == 0,
       output = head .. '\nOutput so far:\n' .. (out ~= '' and out or '(none yet)'),
       summary = state == 'exited' and ('exited ' .. tostring(p.code)) or (p.id .. ' running'),
-      meta = { bg_id = p.id, sandbox = sandboxed, experiment = exp and exp.entry.id or nil, terminal = p.terminal },
+      meta = { bg_id = p.id, sandbox = sandboxed, experiment = exp and exp.entry.id or nil, terminal = p.terminal,
+        log = p.log, log_rel = p.log and ctx.ws:display(p.log) or nil },
     }
   end,
 }
@@ -506,18 +552,7 @@ end
 --- Output tail for a checkpoint: the last `n` lines, each as a terminal
 --- shows it (the last part of a \r-redrawn progress bar).
 local function screen_tail(text, n)
-  local out = {}
-  for _, l in ipairs(util.lines(text)) do
-    local parts = vim.split(l, '\r', { plain = true })
-    local shown = parts[#parts]
-    for i = #parts, 1, -1 do
-      if vim.trim(parts[i]) ~= '' then
-        shown = parts[i]
-        break
-      end
-    end
-    table.insert(out, shown)
-  end
+  local out = util.lines(util.cr_text(text))
   return table.concat(vim.list_slice(out, math.max(1, #out - n + 1)), '\n')
 end
 M.screen_tail = screen_tail

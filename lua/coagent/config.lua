@@ -238,6 +238,14 @@ local defaults = {
     -- killed automatically after this (also the longest wait_process); not for
     -- experiment runs while experiments.monitor is enabled (see max_hours there)
     max_lifetime_ms = 2 * 60 * 60 * 1000,
+    -- full raw output of every process in a log file, for `tail -f` in another
+    -- terminal: <workspace>/.coagent/logs/<id>-<date>-<time>.log in a git
+    -- repository (git-ignored locally, never searched by the agent), else
+    -- stdpath('state')/coagent/logs/<project>/; log_dir = another folder
+    log_files = true,
+    log_dir = nil,
+    max_log_bytes = 50 * 1024 * 1024, -- then rotated once (<name>.log.1 has the previous part)
+    keep_logs = 50, -- logs of the newest runs kept after they end; older ones are deleted
   },
 
   auto = {
@@ -400,6 +408,9 @@ local defaults = {
       max_points = 100, -- points per metric stored in the experiment entry
       trend_points = 5, -- last k points per metric in a checkpoint
       tail_lines = 20, -- output lines in a checkpoint
+      -- a progress bar line counts once it ends (\n); while it is redrawn with \r
+      -- its metrics give a point at most this often (long epochs still checkpoint)
+      bar_sample_ms = 60 * 1000,
       max_keys = 8, -- metrics shown in a checkpoint
     },
   },
@@ -575,6 +586,7 @@ local defaults = {
       new_session = 'gn',
       mode = 'gm',
       usage = 'gu',
+      processes = 'gp', -- watch a background process's output (one running / picker / latest)
       -- plan waiting for approval: approve / deny (above) approve or discard it
       plan_revise = 'gi', -- revise the plan with feedback
       next_item = ']]',
@@ -600,6 +612,7 @@ local defaults = {
       diff = 'gd',
       changes = 'gc',
       usage = 'gu',
+      processes = 'gp',
       sessions = 'gs',
       new_session = 'gn',
       mode = 'gm',

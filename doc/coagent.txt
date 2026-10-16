@@ -92,6 +92,9 @@ Check the setup with |:checkhealth| coagent.
                               session: changed (default, only the agent's
                               lines) | file. See |coagent-format|.
 :CoagentOutput           Show the last command output.
+:CoagentProcesses        Background processes: show output, open the log
+                              in a split, copy a `tail -f` command, stop.
+                              See |coagent-watch|.
 :CoagentTerminal [attach [buf]|detach|status]
                          Run the agent's commands in your own :terminal
                               (ssh / conda prepared there). See
@@ -239,11 +242,12 @@ client identity and URLs stay CopilotChat's.
   p  pause            R  resume             gs sessions
   gn new session      gm mode               i  input
   q  close            g? help               gi revise the plan
+  gp watch a background process (|coagent-watch|)
 
 While a plan waits for approval, a / ga approve it, d / gx discard it.
 Input: <CR> (normal) / <C-s> (insert) send (queued while the agent works),
 <C-c> take back queued messages, else stop, <C-k> panel,
-<C-p>/<C-n> history, /help slash commands (|coagent-slash|). All keys are
+<C-p>/<C-n> history, gp process output, /help slash commands (|coagent-slash|). All keys are
 configurable via `keymaps`.
 
                                                      *coagent-references*
@@ -711,6 +715,38 @@ with the same rules; it may stop the run with a reason). `/exp unwatch
 [id]` ends monitoring without killing the process: a waiting wait_process
 returns and the agent may no longer wait for or stop it. Without /exp
 watch the agent cannot stop a run you started.
+
+                                                       *coagent-watch*
+Watching background processes (training runs): `gp` in the panel or in
+the input's Normal mode opens the output of the running process (a picker
+when several run, the most recent one that ended when none does). <CR> on
+a start_process item and :CoagentProcesses / /processes "Show output" open
+the same bottom panel. It shows lines as a terminal does: a progress bar
+redrawn with \r is one line in its current state. It follows the end
+while output arrives ([follow] in its header); moving or scrolling up
+pauses that ([paused]); `G` or `f` resumes (`f` toggles, `q` closes).
+
+Every process also writes its full raw output to a log file:
+.coagent/logs/<id>-<date>-<time>.log in a git repository (.coagent/ is
+git-ignored locally, never listed or searched by the agent, not writable
+by it), else stdpath('state')/coagent/logs/<project>-<hash>/ or
+`background.log_dir`. The path is shown on the tool item, in the output
+panel and in :CoagentProcesses, which offers "Open log in a split"
+(`:split +$ <log>` with 'autoread') and "Copy tail -f command". Follow a
+run from another tmux pane with `tail -f <log>`. A log that reaches
+`background.max_log_bytes` (50 MB) is rotated once with a note
+(<name>.log.1 holds the previous part; follow across it with `tail -F`).
+Logs stay after the process ends; the newest `background.keep_logs` (50)
+runs are kept, never a running one. `background.log_files = false` turns
+them off. A job in your own terminal (|coagent-terminal|) writes its own
+log, which is used as is.
+
+The model gets the same view: read_process_output, wait_process tails and
+checkpoint tails contain each progress bar once in its last state, and
+metrics come from the final state of each line (`loss=0.41` in a tqdm
+postfix counts once per finished bar). While a bar is redrawn, progress /
+ETA and anomalies (loss=nan) are read live and a metric point is taken at
+most every `experiments.monitor.bar_sample_ms` (60 s).
 
 Storage: stdpath('state')/coagent/experiments/<project>-<hash>.jsonl,
 outside the repository, directory 0700, file 0600, secrets masked.

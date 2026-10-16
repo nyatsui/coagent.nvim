@@ -109,8 +109,10 @@ function M.extract(text, cfg)
   end
   local names = set_of(cfg.metrics)
   local prefixes = set_of(cfg.metric_prefixes)
-  text = text:gsub('\27%[[%d;?]*%a', '')
-  for line in text:gmatch('[^\r\n]+') do
+  -- each line in its final state: a tqdm bar redrawn with \r counts once,
+  -- with the metrics of its last redraw (set_postfix loss=0.41)
+  text = util.cr_text(text)
+  for line in text:gmatch('[^\n]+') do
     local trimmed = vim.trim(line)
     if cfg.json_lines ~= false and trimmed:sub(1, 1) == '{' and trimmed:sub(-1) == '}' then
       local obj = util.json_decode(trimmed)
