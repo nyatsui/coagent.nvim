@@ -300,9 +300,12 @@ describe('watching from the panel', function()
     local c = agent.controller()
     local out = require('coagent.ui.output')
     local shown
-    local orig_show, orig_select = out.show, vim.ui.select
+    local orig_show, orig_select, orig_can = out.show, vim.ui.select, out.can_view_terminal
     out.show = function(item)
       shown = item
+    end
+    out.can_view_terminal = function()
+      return false -- this test is about which process is picked
     end
     local offered
     vim.ui.select = function(list, _, cb)
@@ -340,8 +343,36 @@ describe('watching from the panel', function()
       m = vim.fn.maparg('gp', 'n', false, true)
       assert.are.equal('Coagent: watch process output', m.desc)
     end)
-    out.show, vim.ui.select = orig_show, orig_select
+    out.show, vim.ui.select, out.can_view_terminal = orig_show, orig_select, orig_can
     assert(ok, err)
+  end)
+
+  it('shows a background process like a terminal: tail -F of its log with colors and \\r intact', function()
+    local c = agent.controller()
+    local out = require('coagent.ui.output')
+    local p = start(c, [[printf '\033[32mgreen\033[0m\n'; printf 'step 1\rstep 2\rstep 3\n'; sleep 30]])
+    h.wait(function()
+      return p.log ~= nil and vim.uv.fs_stat(p.log) ~= nil and (vim.uv.fs_stat(p.log).size or 0) > 0
+    end)
+    agent.process_output()
+    assert.is_truthy(out.term, 'terminal view expected')
+    local buf = out.term.buf
+    assert.are.equal('terminal', vim.bo[buf].buftype)
+    h.wait(function()
+      local text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), '\n')
+      return text:find('step 3', 1, true) ~= nil
+    end)
+    local text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), '\n')
+    assert.is_truthy(text:find('green', 1, true), text)
+    assert.is_falsy(text:find('\27[32m', 1, true), text) -- the terminal rendered the color code
+    assert.is_truthy(text:find('\nstep 3', 1, true), text)
+    assert.is_falsy(text:find('\nstep 1', 1, true), text) -- \r overwrote the line, as in a terminal
+    -- q closes it and stops tail
+    local job = out.term.job
+    out.close()
+    assert.is_nil(out.term)
+    assert.are.equal(-3, vim.fn.jobwait({ job }, 0)[1]) -- invalid job id: stopped
+    c.processes:stop(p.id)
   end)
 
   it(':CoagentProcesses offers the log in a split (at its end, autoread) and shows the path', function()

@@ -525,6 +525,9 @@ function View:open_details(item)
     return
   end
   if item.type == 'tool' and item.kind == 'exec' then
+    if item.meta and item.meta.bg_id and require('coagent')._show_bg(item.meta.bg_id) then
+      return
+    end
     output.show(item, self.config.ui.output_height)
   elseif item.type == 'tool' and item.kind == 'write' then
     self:diff(item)

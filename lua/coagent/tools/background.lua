@@ -402,7 +402,7 @@ M.start_process = {
       argv = argv,
       cwd = prepared.cwd,
       cwd_rel = prepared.cwd_rel,
-      env = vim.tbl_extend('force', {}, cfg.env or {}, { COAGENT = '1' }),
+      env = vim.tbl_extend('force', {}, cfg.env or {}, (ctx.config and ctx.config.background or {}).env or {}, { COAGENT = '1' }),
       item = ctx.item,
       lifetime_ms = lifetime,
       lifetime_name = lifetime_name,

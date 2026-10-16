@@ -1994,16 +1994,37 @@ function M.open_log(path)
   vim.bo.swapfile = false
 end
 
+--- Show the output of the background process with this id (terminal view of
+--- its log when possible). Returns false when there is no such process.
+---@param id string
+---@return boolean
+function M._show_bg(id)
+  local c = state.controller
+  local p = c and c.processes and c.processes:get(id)
+  if not p then
+    return false
+  end
+  M._show_process(c, p)
+  return true
+end
+
 --- Show the output panel of a background process.
 local function show_process(c, p)
+  local output = require('coagent.ui.output')
+  if (config.options.background or {}).view ~= 'text' and output.can_view_terminal(p.log) then
+    output.show_terminal(p.log, string.format('%s · %s · %s', p.id, p.status or '', util.ellipsize(p.command or '', 60)), config.options.ui.output_height)
+    return
+  end
   if p.item then
-    require('coagent.ui.output').show(p.item, config.options.ui.output_height)
+    output.show(p.item, config.options.ui.output_height)
   elseif p.log then
     M.open_log(p.log)
   else
     notify('no output to show for ' .. p.id)
   end
 end
+
+M._show_process = show_process
 
 --- Pick a background process: show its output, open its log or stop it.
 function M.processes()
