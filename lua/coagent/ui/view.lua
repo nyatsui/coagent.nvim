@@ -413,7 +413,7 @@ function View:bar()
   end
   local term = c.attached_terminal and c:attached_terminal()
   if term then
-    table.insert(segs, { 2.5, 1.5, 'term:' .. term:host_label() })
+    table.insert(segs, { 2.5, 1.5, 'term:' .. (term.short_label and term:short_label() or term:host_label()) })
   end
   local bg = c.processes and c.processes:running_count() or 0
   if bg > 0 then

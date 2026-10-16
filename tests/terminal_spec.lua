@@ -141,7 +141,15 @@ describe('terminal: attach and probe', function()
     assert.are.same(term:serialize(), app.controller().session.terminal)
     -- winbar segment and status
     local view = app.view()
-    assert.is_truthy(view:bar():find('term:' .. term:host_label(), 1, true))
+    assert.is_truthy(view:bar():find('term:' .. term:short_label(), 1, true), view:bar())
+    -- long host names (CI / cloud machines) are shortened so the segment fits
+    local saved_host = term.host
+    term.host = 'sjc20-bx255-c01e9ee5-ede4-4b7c-9fdc-bf3d2bf6c1c3-6f8b1c5d9e2a.local'
+    assert.is_true(#term:short_label() <= 24)
+    assert.is_nil(term:short_label():find('.local', 1, true))
+    assert.are.equal(term.host, term:host_label()) -- the judge and /delegate keep the full name
+    assert.is_truthy(view:bar():find('term:sjc20', 1, true), view:bar())
+    term.host = saved_host
     assert.is_truthy(app._terminal_status(app.controller()):find('Workspace shared with the terminal: yes', 1, true))
     app.terminal('detach')
     assert.is_nil(app.controller():attached_terminal())

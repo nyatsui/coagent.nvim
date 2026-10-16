@@ -170,6 +170,17 @@ function Term:host_label()
   return self.host or ('buf ' .. self.buf)
 end
 
+--- Short host name for the status bar: the part before the first dot, at most
+--- 24 bytes (CI and cloud machines can have 60+ character host names, which
+--- would not fit next to the other segments and the segment would be dropped).
+function Term:short_label()
+  if not self.host or self.host == '' then
+    return 'buf ' .. self.buf
+  end
+  local name = self.host:match('^[^.]+') or self.host
+  return #name > 24 and (util.clip(name, 21) .. '...') or name
+end
+
 --- The working directory in the terminal for a workspace-relative `rel`.
 ---@param rel string?
 ---@return string?
