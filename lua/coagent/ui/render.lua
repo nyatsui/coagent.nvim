@@ -17,6 +17,7 @@ local STATUS = {
   cancelled = { 'cancelled', 'CoagentDim' },
   interrupted = { 'interrupted', 'CoagentWarn' },
   deferred = { 'awaiting', 'CoagentInfo' },
+  blocked = { 'denied', 'CoagentError' },
 }
 M.STATUS = STATUS
 
@@ -310,9 +311,12 @@ local function plan(b, item, o)
   for _, l in ipairs(vim.split(item.text or '', '\n', { plain = true })) do
     b.line(l)
   end
+  if item.planned_by then
+    b.line(string.format('%s Written by the advisor model %s (strict supervision); execution returns to the builder.', i.advisor or '#', item.planned_by), 'CoagentDim')
+  end
   if item.advice then
-    local rr = b.line(string.format('%s Advisor %s plan review %s %s', i.advisor or '#', i.dot, i.dot, tostring(item.advice_model or '')))
-    b.hl(rr, 0, -1, 'CoagentSummary')
+    local rr = b.line(string.format('%s Advisor %s plan review%s %s %s', i.advisor or '#', i.dot, item.advice_block and ' · BLOCK' or '', i.dot, tostring(item.advice_model or '')))
+    b.hl(rr, 0, -1, item.advice_block and 'CoagentError' or 'CoagentSummary')
     for _, l in ipairs(vim.split(item.advice, '\n', { plain = true })) do
       b.line('  ' .. l, item.advice_lgtm and 'CoagentDim' or nil)
     end
@@ -362,6 +366,21 @@ local function summary(b, item, o)
   end
   if item.usage and (item.usage.requests or 0) > 0 then
     b.line('  ' .. Usage.long(item.usage, ' ' .. i.dot .. ' ', i.approx), 'CoagentDim')
+  end
+  if item.strong then
+    b.line(string.format('  Builder: %s (%s)', item.strong, item.escalated and 'escalated after a repeated failure' or '/strong'), 'CoagentDim')
+  end
+  if item.supervision and #item.supervision > 0 then
+    -- every advisor checkpoint of the task and its result
+    local parts = {}
+    for _, c in ipairs(item.supervision) do
+      local mark = c.verdict == 'lgtm' and i.done or (c.verdict == 'block' and 'BLOCK' or '!')
+      table.insert(parts, c.kind .. ' ' .. mark)
+    end
+    local rr = b.line('  Advisor: ' .. table.concat(parts, ' ' .. i.dot .. ' '))
+    b.hl(rr, 0, -1, vim.iter(item.supervision):any(function(c)
+      return c.verdict == 'block'
+    end) and 'CoagentWarn' or 'CoagentDim')
   end
   local v = item.verification or {}
   if v.status == 'verified' then
@@ -439,10 +458,16 @@ function M.item(item, o)
   elseif item.type == 'tool' then
     tool(b, item, o)
   elseif item.type == 'advisor' then
-    local label = ({ PLAN = 'plan review', REPEATED_FAILURE = 'repeated failure', BEFORE_DONE = 'final review' })[item.kind] or 'review'
-    local head = string.format('%s Advisor · %s · %s', i.advisor or '#', label, tostring(item.model or ''))
+    -- one item per checkpoint (name, verdict, the advisor's points)
+    local label = require('coagent.agent.advisor').LABEL[item.kind] or 'review'
+    local verdict = item.verdict == 'block' and ' · BLOCK' or (item.verdict == 'points' and ' · points' or (item.verdict == 'lgtm' and ' · LGTM' or ''))
+    local head = string.format('%s Advisor · %s (%s)%s · %s', i.advisor or '#', tostring(item.kind or ''), label, verdict, tostring(item.model or ''))
     local r = b.line(head)
-    b.hl(r, 0, -1, item.failed and 'CoagentWarn' or 'CoagentSummary')
+    b.hl(r, 0, -1, item.failed and 'CoagentWarn' or (item.verdict == 'block' and 'CoagentError' or 'CoagentSummary'))
+    for _, ch in ipairs(item.children or {}) do
+      local st = STATUS[ch.status] or STATUS.pending
+      b.line(string.format('    %s %s%s', i[st[1]] or i.dot, tostring(ch.title), ch.summary and ('  ' .. ch.summary) or ''), 'CoagentDim')
+    end
     if item.streaming then
       b.icon_row = r
       b.line(i.ellipsis, 'CoagentDim')

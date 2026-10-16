@@ -293,6 +293,8 @@ vim.keymap.set('x', '<leader>ai', ':CoagentInline<CR>', { desc = 'Coagent inline
 | `/compact summary` | 古いやり取りを現在のモデルに 1 回だけ要約させて 1 メッセージに置き換える（モデルを 1 回呼ぶので、その**トークンを消費**） |
 | `/plan [task\|approve\|discard]` | 計画を先に確認: 読み取り専用で調査して計画を作成し、承認 / 修正 / 破棄（上記「計画を先に確認する」） |
 | `/go <task>` | 計画フェーズなしでタスクを実行（`plan.default = true` のとき） |
+| `/strong <task>` | 強いモデル（`roles.strong_model`、なければアドバイザーのモデル）を作業担当にして 1 タスクだけ実行。次のタスクは元のモデルに戻る（下記「監督」） |
+| `/supervision [light\|standard\|strict\|default]` | このセッションでアドバイザーが作業担当をどこまで監督するか（下記「監督」） |
 | `/skills [enable\|disable <name>\|reload]` | Agent Skills の一覧（パス、user / repo）。このセッションだけ有効 / 無効を切替（下記「Agent Skills」） |
 | `/skill <name> [task]` | スキルを最初から読み込んだ状態でタスクを実行 |
 | `/exp [show\|diff\|note\|compare\|run\|watch\|unwatch ...]` | 実験ログ: 表・詳細・差分・メモ・Markdown の比較・実行の記録（ローカルのみ、リクエストなし）。実行中の `/exp run` をエージェントの見守りに渡す（下記「実験ログ」） |
@@ -381,7 +383,7 @@ Neovim（ターミナル）にフォーカスが無いときに、承認待ち�
 
 ```lua
 notify = {
-  on = { 'approval', 'done', 'failed', 'limit', 'waiting', 'stopped' }, -- 'paused' も指定可（'limit' = 上限で一時停止、'waiting' = WAITING_EXTERNAL、'stopped' = 見守り中の学習をエージェントが止めた）
+  on = { 'approval', 'done', 'failed', 'limit', 'waiting', 'stopped', 'blocked' }, -- 'paused' も指定可（'limit' = 上限で一時停止、'waiting' = WAITING_EXTERNAL、'stopped' = 見守り中の学習をエージェントが止めた、'blocked' = アドバイザーが BLOCK してタスクがあなたの判断を待っている）
   bell = true,                -- 端末へ BEL を送る（tmux ではウィンドウにベルフラグが立つ）
   desktop = false,            -- true: デスクトップ通知（Linux: notify-send / macOS: osascript）
   only_when_unfocused = true, -- フォーカス中は通知しない
@@ -986,6 +988,8 @@ delegate = {
 | `:CoagentJudge [log [n]\|clear]` | judge モードの判定ログ / キャッシュ消去（`/judge` と同じ） |
 | `:CoagentModel` | モデル選択（tool calling 対応モデルのみ。役割分担中は役割ごと）。`usage.rates` を設定したモデルには単価（`$3/$15 per 1M`）を表示 |
 | `:CoagentRoles [preset]` | モデルの役割分担: `single` / `advisor` / `explorers` / `full` |
+| `:CoagentSupervision [level]` | このセッションの監督レベル: `light` / `standard` / `strict` / `default`（`/supervision` と同じ） |
+| `:CoagentStrong <task>` | 強いモデルを作業担当にして 1 タスク実行（`/strong` と同じ。範囲指定で選択範囲を添付） |
 | `:CoagentEffort [level] [role]` | 推論の強さ: `minimal` / `low` / `medium` / `high` / `off` / `default`（`/effort` と同じ） |
 | `:CoagentNew` / `:CoagentSessions` | 新規セッション / 保存済みセッション一覧 |
 | `:CoagentLayout [vertical\|float]` | レイアウト切替 |
@@ -1316,7 +1320,7 @@ Copilot のモデル一覧 API は旧方式（リクエスト回数による課�
 | プリセット | 構成 |
 |---|---|
 | `single`（既定） | 選んだモデルだけ |
-| `advisor` | 作業担当 ＋ アドバイザー（計画の確定前（計画フェーズでは書かれた計画）・同じチェックが 2 回失敗したとき・完了の直前にレビュー） |
+| `advisor` | 作業担当 ＋ アドバイザー（`roles.supervision` の節目で作業担当を監督。下記「監督」） |
 | `explorers` | 作業担当 ＋ 調査担当（`explore` ツール。読み取り専用のサブエージェントを並列実行） |
 | `full` | 作業担当 ＋ 調査担当 ＋ アドバイザー |
 
@@ -1336,7 +1340,7 @@ opts = {
   roles = {
     preset = 'full',
     explorer_model = '安くて速いモデルのID',    -- 並列の読み取り専用の調査
-    advisor_model = '最も強いモデルのID',       -- 3 つの節目だけ
+    advisor_model = '最も強いモデルのID',       -- roles.supervision の節目でレビュー
     explorer_effort = 'low', advisor_effort = 'high',
   },
   fallback_models = { 'auto' },
@@ -1344,10 +1348,89 @@ opts = {
 ```
 
 **費用について。** トークンの大半は作業担当が使います（毎ステップ、全履歴（ほとんどはキャッシュ）とツール出力を送るため）。
-アドバイザーが受け取るのは短い要約（依頼・計画・差分・失敗出力。`roles.advisor.max_brief_bytes` で上限）だけで、1 タスクに
-最大 3 回、専用の追記のみの履歴で動きます。そのため、強いモデルを作業担当にするよりずっと安く、重要な判断だけ強いモデルに
-見てもらえます。安いモデル 1 つだけの場合と比べると、その数回のレビュー分が増えます。調査担当は大きな検索結果を作業担当の
+アドバイザーが受け取るのは節目ごとの短い要約（依頼・計画・差分・失敗出力・根拠・指標。`roles.advisor.max_brief_bytes` で上限）
+だけで、専用の追記のみの履歴で動きます。そのため、強いモデルを作業担当にするよりずっと安く、重要な判断だけ強いモデルに
+見てもらえます。安いモデル 1 つだけの場合と比べると、そのレビュー分が増えます（下の表）。調査担当は大きな検索結果を作業担当の
 履歴に入れないので、作業担当の消費を抑えます。
+
+### 監督（アドバイザーが作業担当をどこまで見るか）
+
+安いモデルでも、テスト・LSP の診断・エラーのような決定的なチェックで見つかる誤りは自分で直せます。しかし推論や分析、
+機械学習の方法論の誤り（データリーク、間違った分割や指標、ノイズの範囲内の差を改善と結論する、など）はすり抜けます。
+アドバイザーがいるとき（`advisor` / `full`）、`roles.supervision` で強いモデルが作業担当の仕事をどこでレビューするかを決めます。
+レベルは **節目（チェックポイント）** の集合です。
+
+| 節目 | レベル | いつ | 指摘があったら |
+|---|---|---|---|
+| `PLAN` | light | 最初のファイル変更の前（`/plan` では書かれた計画） | その変更は実行せず（NOT EXECUTED）、作業担当が計画を直す |
+| `REPEATED_FAILURE` | light | 編集後に同じチェックが 2 回失敗 | 失敗出力に指摘を付ける |
+| `BEFORE_DONE` | light | ファイル変更ありで終わるとき（全差分） | 作業担当が対応してから終える |
+| `ANSWER` | standard | ファイル変更 **なし** で `answer_min_chars`（400 文字）以上の回答で終わるとき。回答を根拠（タスク中のツール呼び出しと短い結果、記録された実験の指標）と照合 | 回答を 1 回書き直す |
+| `BEFORE_RUN` | standard | 実験・長い実行の開始前（`experiment = true` の `run_command` / `start_process`、または `/exp` が検出するコマンド）。コマンドと引数、前回の実行からのエージェントの変更、最近の実行、台帳の目標 | 実行しない。作業担当がコードや設定を直す（または理由を説明）してから再実行（もう一度レビュー。`max_run_reviews` まで） |
+| `RESULTS` | standard | 記録された実行が終わった・止められたとき。作業担当の指標の読み方を `/exp` の比較（前回・ベストとの差）と目標とあわせてレビュー | 作業担当が解釈を直してから次に進む |
+| `FAILURE` | standard | 編集後のチェックの最初の失敗（1 タスク `max_failure_reviews` 回まで） | 失敗出力に指摘を付ける |
+| `CRITICAL_EDIT` | standard | `critical_globs`（既定 `**/*loss*`・`**/*metric*`・`**/eval*`・`**/*dataset*`・`**/*split*`・`**/*config*`・`**/*config*/**`）に一致するファイルの編集を、適用する前に | 適用しない。作業担当が直すか、反対なら同じ編集をもう一度出す（そのときは適用） |
+| `PROGRESS` | strict | 作業担当の `progress_every_steps`（8）ステップごと。依頼・計画・直近の操作・変更ファイル | 作業担当が軌道修正する |
+| `EVERY_EDIT` | strict | すべての編集を適用する前に | `CRITICAL_EDIT` と同じ |
+| `STRONG_PLAN` | strict | `/plan` をアドバイザーのモデルで実行（Claude Code の opusplan に相当）。実行は作業担当のモデルに戻る | – |
+
+- **既定:** アドバイザーがいれば `standard`。`light` は以前と同じ 3 つの節目だけ
+- **節目を個別に変える:** `roles.advisor.checkpoints = { BEFORE_RUN = false, PROGRESS = true }`。
+  `/supervision <level>`（`:CoagentSupervision`）でこのセッションのレベルを変更
+- **答えの形:** `LGTM`、6 個までの番号付きの指摘（作業担当に渡り、対応するか、しない理由を説明する）、または
+  重大な問題（データリーク、間違ったデータでの評価、破壊的な変更、誤った結果の報告）のときの `BLOCK: <理由>`。
+  **BLOCK はその操作を止め、タスクを一時停止します**（winbar に `paused (advisor BLOCK)`、通知 `blocked`）。理由が表示されます。
+  勝手に先へは進みません: `/resume` で理由を作業担当に渡して続行（止められた操作は実行されていない）、新しいメッセージで
+  やり直し、`/stop` で終了
+- **確認用のツール:** `roles.advisor.tools = 'read'`（standard / strict の既定）なら、アドバイザーは要約を鵜呑みにせず
+  読み取り専用のツール（`read_file`・`search`・`glob`・`list_dir`・LSP・`diagnostics`・`git_diff`・`git_status`・`experiments`）を
+  1 つの節目あたり `max_tool_steps`（4）回まで呼んで確かめられます。結果は `max_tool_result_bytes`（4000）で切り詰め、
+  呼び出しと結果はアドバイザーの履歴に追記されます（書き換えない）。他のツールは拒否。`tools = 'none'` は要約だけ
+- **見え方:** winbar にそのタスクのアドバイザーの動き（`adv 3✓ 1!` = LGTM 3 回・指摘 1 回、`adv BLOCK`）。節目ごとに
+  名前と指摘を表示するタイムライン項目。タスクのまとめに節目とその結果の一覧。`:CoagentUsage` にアドバイザーの
+  リクエスト数とトークン（タスク・セッション）と節目の集計
+- **作業担当が 'auto' のとき:** 1 回だけ警告します。`auto` はリクエストごとに軽いモデルを選ぶことがあり（精度が落ちる）、
+  モデルが替わるたびにプロンプトキャッシュが効かなくなります。作業担当のモデルは固定してください
+- **強いモデルを作業担当に:** `/strong <task>`（`:CoagentStrong`）は `roles.strong_model`（なければアドバイザーのモデル。
+  effort は `advisor_effort`）で 1 タスクだけ実行して元に戻します。`roles.escalate_on_repeated_failure = true` なら
+  REPEATED_FAILURE のあと、そのタスクの残りを強いモデルで仕上げます。作業担当がアドバイザーと同じモデルで動いている間は
+  アドバイザーはレビューしません（自分の仕事を見ることになるため）。**作業担当のモデルを切り替えると、プロンプトキャッシュが
+  1 回効きません**: 切り替え先のモデルにはこの会話のキャッシュがないので、最初のリクエストで履歴全体が新しい入力として
+  課金されます（元のモデルに戻ったときも、その間にキャッシュが切れていれば同様）
+- **予算:** アドバイザーのトークンもタスク・セッション・月の予算に数えます。予算が `limits.budget_warn_at`（0.8）に
+  達したあとも節目のレビューは続けます（品質優先）が、`PROGRESS` だけは省きます
+- 1 タスクあたりの上限: `max_run_reviews`（3）、`max_results_reviews`（3）、`max_failure_reviews`（2）、
+  `max_edit_reviews`（12。同じファイルに続けて指摘するのは 2 回まで）
+
+**レベルごとのトークンの目安**（1 回のレビュー = アドバイザーのシステムプロンプトと履歴（ほとんどキャッシュ）＋ 新しい要約
+およそ 1〜4k トークン ＋ 短い回答 0.1〜0.5k トークン。確認用のツール呼び出し 1 回ごとに、結果が最大 ~1k トークンの
+リクエストが 1 回増えます）。クレジットの見積もりは `usage.rates` のアドバイザーのモデルの価格を掛けてください。実際の
+アドバイザーのトークンは `:CoagentUsage` で見られます。
+
+| レベル | 1 タスクあたりのレビュー回数（目安） | 備考 |
+|---|---|---|
+| `light` | 0〜3（編集するタスクで PLAN と BEFORE_DONE、質問だけなら 0） | 要約のみ・ツールなしで最も安い |
+| `standard` | 編集するタスク 2〜4、質問 1（ANSWER）、機械学習の 1 サイクル（設定の編集 ＋ 実行 ＋ 結果）でおよそ 4〜6 | レビューごとに最大 4 回のツール呼び出し |
+| `strict` | standard ＋ 編集ごとに 1 ＋ 8 ステップごとに 1。計画フェーズのリクエストはアドバイザーのモデルの価格 | 重要な実行向け。standard の数倍 |
+
+```lua
+roles = {
+  preset = 'advisor',
+  advisor_model = '最も強いモデルのID',
+  supervision = 'standard',            -- 'light' | 'standard' | 'strict'
+  strong_model = nil,                  -- /strong とエスカレーション（nil = advisor_model）
+  escalate_on_repeated_failure = false,
+  advisor = {
+    tools = 'read',                    -- 'none': 要約だけ
+    max_tool_steps = 4,
+    checkpoints = { PROGRESS = true }, -- 節目を個別に追加・削除
+    critical_globs = { '**/*loss*', '**/*metric*', '**/eval*', '**/*dataset*', '**/*split*', '**/*config*', '**/*config*/**' },
+    answer_min_chars = 400, progress_every_steps = 8,
+  },
+},
+```
+
+機械学習のプロジェクトでのおすすめの設定は [docs/ml-workflow.md](docs/ml-workflow.md) を参照してください。
 
 ## 推論の強さ（reasoning effort）
 

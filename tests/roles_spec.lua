@@ -157,7 +157,7 @@ describe('model roles', function()
         return { tool_calls = { { name = 'run_command', arguments = { command = 'sh check.sh' } } } }
       end
       return { content = 'Done.' }
-    end, { roles = { preset = 'advisor', advisor_model = 'smart-model' } })
+    end, { roles = { preset = 'advisor', advisor_model = 'smart-model', supervision = 'light' } })
     r.c:submit('make check.sh pass')
     local d = wait_done(r, 20000)
     assert.are.equal('COMPLETED', d.state)

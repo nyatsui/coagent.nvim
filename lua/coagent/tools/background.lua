@@ -742,6 +742,7 @@ M.wait_process = {
       summary = summary,
       meta = {
         waited_ms = waited, waiting = waiting, code = p.code, experiment = p.experiment and p.experiment.id or p.exp_id,
+        exited = state == 'exited' or nil,
         -- returned at a monitoring checkpoint with the run still going: the
         -- controller counts the wait chain as one step
         checkpoint = checkpoint or nil, anomalies = #anomalies > 0 and vim.tbl_map(function(a)

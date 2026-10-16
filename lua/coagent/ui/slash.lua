@@ -68,6 +68,23 @@ M.COMMANDS = {
     end,
   },
   {
+    name = 'strong',
+    args = '<task>',
+    desc = 'Run one task with the strong model (roles.strong_model / advisor model) as the builder',
+    run = function(arg)
+      return app().strong(arg)
+    end,
+  },
+  {
+    name = 'supervision',
+    args = '[light|standard|strict|default]',
+    desc = 'How closely the advisor supervises the builder (checkpoints)',
+    complete = { 'light', 'standard', 'strict', 'default' },
+    run = function(arg)
+      return app().supervision(arg)
+    end,
+  },
+  {
     name = 'skills',
     args = '[enable|disable <name>|reload]',
     desc = 'List Agent Skills (user / repo); enable or disable one for the session',

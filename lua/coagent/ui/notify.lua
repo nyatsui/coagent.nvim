@@ -11,7 +11,7 @@
 --- with focus reporting enabled (tmux: `set -g focus-events on`).
 local M = {}
 
-M.KINDS = { 'approval', 'done', 'failed', 'paused', 'limit', 'waiting', 'judge', 'stopped' }
+M.KINDS = { 'approval', 'done', 'failed', 'paused', 'limit', 'waiting', 'judge', 'stopped', 'blocked' }
 
 -- true until the terminal reports FocusLost
 M.focused = true
@@ -79,6 +79,7 @@ local LABEL = {
   waiting = 'waiting for an external result',
   judge = 'ran without asking (judge)',
   stopped = 'run stopped by the agent',
+  blocked = 'advisor BLOCK, paused',
 }
 
 --- Generic message for a notification kind. `detail` must be a tool name or
@@ -161,6 +162,9 @@ function M.attach(c, get_cfg)
         if info.reason == 'limit' then
           -- a step/tool-call/time budget ran out; detail: steps | tool_calls | duration
           M.signal(get_cfg(), 'limit', info.limit)
+        elseif info.reason == 'advisor_block' then
+          -- detail: the checkpoint (BEFORE_RUN, RESULTS, ...)
+          M.signal(get_cfg(), 'blocked', info.checkpoint)
         else
           M.signal(get_cfg(), 'paused')
         end

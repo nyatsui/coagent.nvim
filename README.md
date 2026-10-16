@@ -303,6 +303,8 @@ input history (`<C-p>`/`<C-n>`) like normal prompts.
 | `/compact summary` | Have the current model summarize older turns once and replace them with one message (calls the model once, so **its tokens are billed**) |
 | `/plan [task\|approve\|discard]` | Plan first: investigate read-only and write a plan to approve / revise / discard (see "Plan first") |
 | `/go <task>` | Run a task without the plan phase (with `plan.default = true`) |
+| `/strong <task>` | Run one task with the strong model (`roles.strong_model`, else the advisor model) as the builder; the next task is back on the selected model (see "Supervision") |
+| `/supervision [light\|standard\|strict\|default]` | How closely the advisor supervises the builder in this session (see "Supervision") |
 | `/skills [enable\|disable <name>\|reload]` | List Agent Skills (source path, user / repo); enable or disable one for this session (see "Agent Skills") |
 | `/skill <name> [task]` | Run a task with a skill loaded up front |
 | `/exp [show\|diff\|note\|compare\|run\|watch\|unwatch ...]` | Experiment log: table, details, diff, notes, Markdown comparison, record a run (local, no request); hand a running `/exp run` to the agent for monitoring (see "Experiment log") |
@@ -395,7 +397,7 @@ When Neovim (the terminal) is not focused, coagent rings the bell on approval ne
 
 ```lua
 notify = {
-  on = { 'approval', 'done', 'failed', 'limit', 'waiting', 'stopped' }, -- 'paused' is also available ('limit' = paused at a limit, 'waiting' = WAITING_EXTERNAL, 'stopped' = the agent stopped a monitored training run)
+  on = { 'approval', 'done', 'failed', 'limit', 'waiting', 'stopped', 'blocked' }, -- 'paused' is also available ('limit' = paused at a limit, 'waiting' = WAITING_EXTERNAL, 'stopped' = the agent stopped a monitored training run, 'blocked' = the advisor BLOCKed a step and the task waits for you)
   bell = true,                -- send BEL to the terminal (tmux flags the window)
   desktop = false,            -- true: desktop notification (Linux: notify-send / macOS: osascript)
   only_when_unfocused = true, -- no notification while focused
@@ -1019,6 +1021,8 @@ delegate = {
 | `:CoagentJudge [log [n]\|clear]` | Judge mode decision log / forget cached verdicts (same as `/judge`) |
 | `:CoagentModel` | Pick a model (tool-calling capable only; per role when roles are on). Models with `usage.rates` show their price (`$3/$15 per 1M`) |
 | `:CoagentRoles [preset]` | Model roles: `single` / `advisor` / `explorers` / `full` |
+| `:CoagentSupervision [level]` | Advisor supervision for this session: `light` / `standard` / `strict` / `default` (same as `/supervision`) |
+| `:CoagentStrong <task>` | Run one task with the strong model as the builder (same as `/strong`; a range attaches the selection) |
 | `:CoagentEffort [level] [role]` | Reasoning effort: `minimal` / `low` / `medium` / `high` / `off` / `default` (same as `/effort`) |
 | `:CoagentNew` / `:CoagentSessions` | New session / saved sessions |
 | `:CoagentLayout [vertical\|float]` | Switch layout |
@@ -1362,7 +1366,7 @@ By default (`single`) the one model you picked with `:CoagentModel` does everyth
 | Preset | Setup |
 |---|---|
 | `single` (default) | Only the selected model |
-| `advisor` | Builder + advisor (reviews before the plan is committed — or the written plan in the plan phase —, when the same check fails twice, and right before finishing) |
+| `advisor` | Builder + advisor supervising it at checkpoints (`roles.supervision`, see "Supervision" below) |
 | `explorers` | Builder + explorers (`explore` tool; read-only subagents running in parallel) |
 | `full` | Builder + explorers + advisor |
 
@@ -1385,7 +1389,7 @@ opts = {
   roles = {
     preset = 'full',
     explorer_model = 'cheap-fast-model-id',   -- parallel read-only searches
-    advisor_model = 'strongest-model-id',     -- only the three checkpoints
+    advisor_model = 'strongest-model-id',     -- reviews at the checkpoints of roles.supervision
     explorer_effort = 'low', advisor_effort = 'high',
   },
   fallback_models = { 'auto' },
@@ -1393,10 +1397,91 @@ opts = {
 ```
 
 **Cost.** Most tokens go to the builder: every step resends its whole history (mostly from the prompt cache) plus tool
-output. The advisor only sees short briefs (task, plan, diff, failing output; capped at `roles.advisor.max_brief_bytes`)
-at most three times per task, in its own append-only history. A strong advisor next to a cheaper builder therefore costs
-far less than running the strong model as the builder, while it still reviews the decisions that matter. Compared with a
-single cheap model, it adds those few reviews. Explorers keep large search output out of the builder's history.
+output. The advisor only sees short briefs (task, plan, diff, failing output, evidence, metrics; capped at
+`roles.advisor.max_brief_bytes`) at its checkpoints, in its own append-only history. A strong advisor next to a cheaper
+builder therefore costs far less than running the strong model as the builder, while it still reviews the decisions that
+matter. Compared with a single cheap model, it adds those reviews (see the table below). Explorers keep large search output
+out of the builder's history.
+
+### Supervision (how closely the advisor watches the builder)
+
+A cheaper builder catches many of its own mistakes through deterministic checks (tests, LSP diagnostics, errors), but
+reasoning, analysis and ML-methodology mistakes (leakage, the wrong split or metric, conclusions within noise) slip
+through. With an advisor (`advisor` / `full`), `roles.supervision` decides where the strong model reviews the builder's
+work. Each level is a set of **checkpoints**:
+
+| Checkpoint | Level | When | On points |
+|---|---|---|---|
+| `PLAN` | light | before the first file change (or the written plan in `/plan`) | the change is NOT EXECUTED; the builder adjusts the plan |
+| `REPEATED_FAILURE` | light | the same check failed twice after edits | points appended to the failing output |
+| `BEFORE_DONE` | light | the task ends with file changes (full diff) | the builder addresses them, then finishes |
+| `ANSWER` | standard | the task ends **without** file changes with an answer of at least `answer_min_chars` (400): the answer is checked against the evidence (every tool call of the task with a short result, recorded experiment metrics) | one revision of the answer |
+| `BEFORE_RUN` | standard | before an experiment / long run starts (`run_command` / `start_process` with `experiment = true`, or a command `/exp` detects): the command and arguments, the agent's changes since the last run, recent runs, the ledger goals | the run is NOT EXECUTED; the builder fixes the change or config (or says why not) and starts it again (reviewed again, up to `max_run_reviews`) |
+| `RESULTS` | standard | a recorded run finished or was stopped: the builder's first reading of the metrics, with the `/exp` comparison (deltas vs the previous and the best run) and the goals | the builder corrects its interpretation before acting on it |
+| `FAILURE` | standard | the first failure of a check after edits (at most `max_failure_reviews` per task) | points appended to the failing output |
+| `CRITICAL_EDIT` | standard | an edit of a file matching `critical_globs` (default `**/*loss*`, `**/*metric*`, `**/eval*`, `**/*dataset*`, `**/*split*`, `**/*config*`, `**/*config*/**`), before it is applied | NOT EXECUTED; the builder revises it, or re-issues it unchanged to disagree (then it applies) |
+| `PROGRESS` | strict | every `progress_every_steps` (8) builder steps: task, plan, recent actions, changed files | the builder gets back on track |
+| `EVERY_EDIT` | strict | every edit, before it is applied | as `CRITICAL_EDIT` |
+| `STRONG_PLAN` | strict | `/plan` runs on the advisor model (like Claude Code's opusplan); execution returns to the builder | – |
+
+- **Default:** `standard` whenever an advisor is configured. `light` keeps the original three checkpoints
+- **Override single checkpoints** with `roles.advisor.checkpoints = { BEFORE_RUN = false, PROGRESS = true }`;
+  `/supervision <level>` (`:CoagentSupervision`) changes the level for the session
+- **Answers:** `LGTM`, at most 6 numbered points (handed to the builder, which must address them or explain why not), or
+  `BLOCK: <reason>` for a serious problem (data leakage, evaluation on the wrong data, a destructive change, results about
+  to be reported wrongly). **A BLOCK stops the action and pauses the task** (winbar `paused (advisor BLOCK)`, notification
+  `blocked`), showing the reason. It never continues by itself: `/resume` hands the reason to the builder (the blocked step
+  did not run), a new message starts over, `/stop` ends the task
+- **Verification tools:** with `roles.advisor.tools = 'read'` (default for standard / strict) the advisor may call
+  read-only tools (`read_file`, `search`, `glob`, `list_dir`, LSP, `diagnostics`, `git_diff`, `git_status`,
+  `experiments`) up to `max_tool_steps` (4) times per checkpoint to verify claims instead of trusting the brief. Results
+  are clipped to `max_tool_result_bytes` (4000); calls and results are appended to its history (never rewritten). Other
+  tools are refused. `tools = 'none'` sends briefs only
+- **Visibility:** the winbar shows the advisor's activity for the task (`adv 3✓ 1!` = 3 LGTM, 1 with points; `adv BLOCK`);
+  each checkpoint is a timeline item with its name and points; the task summary lists every checkpoint and its result;
+  `:CoagentUsage` shows the advisor's requests and tokens (task and session) and the checkpoint counts
+- **'auto' as the builder:** a one-time warning. `auto` may pick lighter models per request (less accurate) and every
+  switch breaks prompt caching; pin a builder model
+- **The strong model as the builder:** `/strong <task>` (`:CoagentStrong`) runs one task with `roles.strong_model` (else
+  the advisor model; its `advisor_effort`) and then reverts. `roles.escalate_on_repeated_failure = true` finishes a task
+  on the strong model after a REPEATED_FAILURE. While the builder runs on the advisor's own model, the advisor does not
+  review it. **Switching the builder's model costs a one-time prompt-cache miss**: that model has no cache for this
+  conversation yet, so its first request bills the whole history as fresh input (and the first request back on the
+  builder's model too, if its cache expired meanwhile)
+- **Budgets:** advisor tokens count toward the task, session and monthly budgets. Once a budget reaches
+  `limits.budget_warn_at` (0.8), checkpoints still run (quality first) but `PROGRESS` is skipped
+- Caps per task: `max_run_reviews` (3), `max_results_reviews` (3), `max_failure_reviews` (2), `max_edit_reviews` (12; the
+  same file gets at most two rounds of points in a row)
+
+**Token impact per level** (each review = the advisor's system prompt and history, mostly from the prompt cache, plus a
+new brief of roughly 1–4k tokens and a short answer of 0.1–0.5k; each verification tool call adds one advisor request with
+a result of at most ~1k tokens). Multiply by the advisor's price in `usage.rates` for a credit estimate; `:CoagentUsage`
+shows the actual advisor tokens.
+
+| Level | Advisor reviews per task (typical) | Notes |
+|---|---|---|
+| `light` | 0–3 (PLAN and BEFORE_DONE for an editing task; none for a question) | briefs only, no tools: the cheapest |
+| `standard` | an editing task 2–4; a question 1 (ANSWER); an ML iteration (config edit + run + results) about 4–6 | plus up to 4 tool calls per review |
+| `strict` | standard + one per edit + one per 8 steps; the plan phase's requests are billed at the advisor model's price | for high-stakes runs; several times standard |
+
+```lua
+roles = {
+  preset = 'advisor',
+  advisor_model = 'strongest-model-id',
+  supervision = 'standard',            -- 'light' | 'standard' | 'strict'
+  strong_model = nil,                  -- /strong and escalation (nil = advisor_model)
+  escalate_on_repeated_failure = false,
+  advisor = {
+    tools = 'read',                    -- 'none': briefs only
+    max_tool_steps = 4,
+    checkpoints = { PROGRESS = true }, -- add or remove single checkpoints
+    critical_globs = { '**/*loss*', '**/*metric*', '**/eval*', '**/*dataset*', '**/*split*', '**/*config*', '**/*config*/**' },
+    answer_min_chars = 400, progress_every_steps = 8,
+  },
+},
+```
+
+ML projects: see [docs/ml-workflow.md](docs/ml-workflow.md) (Japanese) for the recommended setup.
 
 ## Reasoning effort
 

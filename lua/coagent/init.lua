@@ -604,6 +604,131 @@ function M.go(arg)
   return ok
 end
 
+--- `/strong <task>`, `:CoagentStrong <task>` (range = selection): run one
+--- task with the strong model (roles.strong_model, else the advisor model)
+--- as the builder; the next task is back on the selected model.
+---@param arg string?
+---@param opts {range:integer[]?, open:boolean?}?
+---@return boolean ok
+function M.strong(arg, opts)
+  opts = opts or {}
+  arg = vim.trim(arg or '')
+  local c = M.controller()
+  if opts.open then
+    track_editor()
+    capture_selection(opts.range)
+    M.view():open({ focus = arg == '' and 'input' or nil })
+  end
+  if arg == '' then
+    c:notice('error', '/strong: give the task for the strong model, e.g. /strong find why val_loss diverges after epoch 3')
+    return false
+  end
+  c.source = source()
+  local sel = state.selection
+  state.selection = nil
+  local text = arg
+  if sel and opts.range and not text:find('#selection', 1, true) then
+    text = text .. ' #selection'
+  end
+  local ok, err = c:strong(text, { source = c.source, selection = sel, input = '/strong ' .. arg })
+  if not ok then
+    c:notice('warn', '/strong: ' .. tostring(err))
+  end
+  return ok
+end
+
+--- `/supervision [light|standard|strict|default]`: how closely the advisor
+--- supervises the builder (this session). No argument: show / pick.
+---@param arg string?
+---@return boolean ok
+function M.supervision(arg)
+  local c = M.controller()
+  local Roles = require('coagent.agent.roles')
+  arg = vim.trim(arg or '')
+  local function apply(level)
+    local ok, err = c:set_supervision(level ~= 'default' and level or nil)
+    if not ok then
+      c:notice('error', '/supervision: ' .. tostring(err))
+      return false
+    end
+    local r = c:roles()
+    if not r.advisor then
+      c:notice('info', string.format('Supervision: %s (applies once an advisor is on: /roles advisor or /roles full).', level))
+    else
+      c:notice('info', M._supervision_text(r))
+    end
+    return true
+  end
+  if arg ~= '' then
+    return apply(arg)
+  end
+  vim.ui.select(vim.list_extend(vim.deepcopy(Roles.SUPERVISION), { 'default' }), {
+    prompt = 'Supervision (current: ' .. tostring(c:roles().supervision or 'off: no advisor') .. ')',
+    format_item = function(l)
+      return string.format('%-9s %s', l, Roles.SUPERVISION_DESCRIPTION[l] or 'back to the config')
+    end,
+  }, function(l)
+    if l then
+      apply(l)
+    end
+  end)
+  return true
+end
+
+--- :CoagentUsage: advisor requests / tokens and checkpoint results (task,
+--- session). Empty without an advisor.
+---@param c Coagent.Controller?
+---@return string[]
+function M._advisor_lines(c)
+  if not c then
+    return {}
+  end
+  local r = c:roles()
+  local function roles_of(acc)
+    return acc and acc.roles and acc.roles.advisor or nil
+  end
+  local task, sess = roles_of(c.task and c.task.usage), roles_of(c.session.usage_totals)
+  if not r.advisor and not sess then
+    return {}
+  end
+  local Usage = require('coagent.agent.usage')
+  local lines = { '' }
+  if r.advisor then
+    table.insert(lines, string.format('  Advisor supervision  %s (advisor %s, tools %s)', r.supervision, r.advisor_model, r.advisor_opts.tools))
+  else
+    table.insert(lines, '  Advisor (off now)')
+  end
+  local function row(label, acc, sup)
+    local text = string.format('    %-10s %d requests, %s tokens', label, acc and acc.requests or 0, Usage.k(acc and acc.tokens or 0))
+    if sup and sup.lgtm + sup.points + sup.block > 0 then
+      text = text .. string.format('; checkpoints %d LGTM, %d with points, %d BLOCK', sup.lgtm, sup.points, sup.block)
+    end
+    table.insert(lines, text)
+  end
+  if task or (c.task and c.task.sup and #c.task.sup.list > 0) then
+    row(c:busy() and 'this task' or 'last task', task, c.task and c.task.sup)
+  end
+  row('session', sess, c.sup_totals)
+  table.insert(lines, '    advisor tokens count toward the task, session and monthly budgets')
+  return lines
+end
+
+--- One line describing the effective supervision.
+---@param r CopilotAgent.Roles
+---@return string
+function M._supervision_text(r)
+  if not r.advisor then
+    return 'Supervision: off (no advisor; /roles advisor or /roles full)'
+  end
+  local on = {}
+  for _, k in ipairs(require('coagent.agent.roles').CHECKPOINTS) do
+    if r.checkpoints[k] then
+      table.insert(on, k)
+    end
+  end
+  return string.format('Supervision: %s, advisor %s (tools: %s). Checkpoints: %s.', r.supervision, r.advisor_model, r.advisor_opts.tools, #on > 0 and table.concat(on, ', ') or 'none')
+end
+
 ------------------------------------------------------------------------------
 -- Skills
 ------------------------------------------------------------------------------
@@ -1634,7 +1759,8 @@ function M.set_roles(preset)
     if r.advisor then
       table.insert(parts, 'advisor ' .. r.advisor_model)
     end
-    c:notice('info', 'Model roles: ' .. p .. ' (' .. table.concat(parts, ', ') .. '). Change a role\'s model with :CoagentModel.')
+    c:notice('info', 'Model roles: ' .. p .. ' (' .. table.concat(parts, ', ') .. '). Change a role\'s model with :CoagentModel.'
+      .. (r.advisor and ('\n' .. M._supervision_text(r) .. ' /supervision changes the level.') or ''))
   end
   if preset and preset ~= '' then
     return apply(preset)
@@ -2071,6 +2197,7 @@ function M.usage(arg)
         end
       end
     end
+    vim.list_extend(lines, M._advisor_lines(state.controller))
     if state.controller then
       table.insert(lines, '')
       table.insert(lines, '  Reasoning effort   ' .. effort_summary(state.controller:roles()))

@@ -316,6 +316,8 @@ function View:bar()
   local label = STATE_LABEL[st] or st
   if st == 'PAUSED' and c.session and c.session.pause_reason == 'limit' then
     label = 'paused (limit)'
+  elseif st == 'PAUSED' and c.session and c.session.pause_reason == 'advisor_block' then
+    label, state_group = 'paused (advisor BLOCK)', 'CoagentBarAlert'
   end
   if st == 'WAITING_EXTERNAL' then
     local w = c.session and c.session.waiting
@@ -376,6 +378,15 @@ function View:bar()
   table.insert(segs, { 3, 3, model_text })
   if roles.preset ~= 'single' then
     table.insert(segs, { 3, 2, 'roles:' .. roles.preset })
+  end
+  -- advisor checkpoints of the current / last task: "adv 3✓ 1!" or "adv BLOCK"
+  local sup = c.task and c.task.sup
+  if sup and sup.lgtm + sup.points + sup.block > 0 then
+    if sup.block > 0 then
+      table.insert(segs, { 3.5, 1, 'adv BLOCK' })
+    else
+      table.insert(segs, { 3.5, 2.5, string.format('adv %d%s%s', sup.lgtm, ic.done, sup.points > 0 and (' ' .. sup.points .. '!') or '') })
+    end
   end
   local n = c.session.changes:count()
   if n > 0 then

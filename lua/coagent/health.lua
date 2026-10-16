@@ -88,6 +88,16 @@ function M.check()
     h.info("inside tmux: notifications need focus events (`set -g focus-events on` in tmux.conf)")
   end
   h.info('#url references: ' .. (cfg.references.url == false and 'disabled' or 'enabled'))
+  do
+    local r = cfg.roles or {}
+    local Roles = require('coagent.agent.roles')
+    if Roles.PRESETS[r.preset or 'single'] and Roles.PRESETS[r.preset or 'single'].advisor then
+      h.info(string.format('roles: %s; supervision: %s (advisor %s)', r.preset, r.supervision or 'standard', r.advisor_model or 'the selected model'))
+      if (cfg.model or '') == 'auto' then
+        h.warn("the builder model is 'auto' while the advisor supervises: pin a model (accuracy, prompt caching)")
+      end
+    end
+  end
   h.info('mode: ' .. cfg.mode .. '; sessions: ' .. (cfg.session.persist and (cfg.session.dir or (vim.fn.stdpath('state') .. '/coagent/sessions')) or 'not persisted'))
 end
 

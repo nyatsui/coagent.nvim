@@ -708,8 +708,15 @@ describe('render roles', function()
     return table.concat(render.item(item, o).lines, '\n')
   end
   it('shows advisor reviews and explorer lookups', function()
-    local t = text({ type = 'advisor', kind = 'PLAN', model = 'smart', text = '1. Keep the name.' })
-    assert.is_truthy(t:find('◆ Advisor · plan review · smart\n1. Keep the name.', 1, true))
+    local t = text({ type = 'advisor', kind = 'PLAN', model = 'smart', text = '1. Keep the name.', verdict = 'points' })
+    assert.is_truthy(t:find('◆ Advisor · PLAN (plan review) · points · smart\n1. Keep the name.', 1, true))
+    local b = text({ type = 'advisor', kind = 'BEFORE_RUN', model = 'smart', text = 'BLOCK: test split used for early stopping', verdict = 'block',
+      children = { { title = 'Read train.py', status = 'done' } } })
+    assert.is_truthy(b:find('◆ Advisor · BEFORE_RUN (before run) · BLOCK · smart', 1, true))
+    assert.is_truthy(b:find('    ✓ Read train.py', 1, true))
+    local sum = text({ type = 'summary', state = 'COMPLETED', steps = 3, tool_calls = 2, duration_ms = 10,
+      supervision = { { kind = 'PLAN', verdict = 'lgtm' }, { kind = 'BEFORE_RUN', verdict = 'points' }, { kind = 'RESULTS', verdict = 'block' } } })
+    assert.is_truthy(sum:find('Advisor: PLAN ✓ · BEFORE_RUN ! · RESULTS BLOCK', 1, true))
     local ex = { type = 'tool', kind = 'read', tool = 'explore', title = 'Explore: callers', status = 'done', summary = '2 lookups', model = 'cheap', children = { { title = 'Search "x"', status = 'done', summary = '3 matches' }, { title = 'Read a.py', status = 'done' } } }
     assert.is_truthy(text(ex):find('2 lookups by cheap', 1, true))
     ex.expanded = true

@@ -139,9 +139,52 @@ function Controller:set_roles(preset, models)
   return true
 end
 
---- Model used for the builder in the current task (after a fallback switch).
+--- Model used for the builder in the current task: a fallback switch, the
+--- strong model (/strong, escalation; until the task ends) or, with strict
+--- supervision, the advisor model while the task is in the plan phase.
 function Controller:active_model()
-  return (self.task and self.task.model_override) or self:model()
+  local t = self.task
+  if t then
+    if t.model_override then
+      return t.model_override
+    end
+    if not t.finished then
+      if t.strong then
+        return t.strong
+      end
+      if t.planning then
+        local roles = self:roles()
+        if roles.advisor and roles.checkpoints.STRONG_PLAN then
+          return roles.advisor_model
+        end
+      end
+    end
+  end
+  return self:model()
+end
+
+--- Is the builder of the running task on the advisor's model (/strong,
+--- escalation, strong planning)? The advisor then does not review it.
+---@param roles CopilotAgent.Roles?
+---@return boolean
+function Controller:_builder_is_advisor(roles)
+  roles = roles or self:roles()
+  local m = self:active_model()
+  return m ~= self:model() and m == roles.advisor_model
+end
+
+--- Supervision level for this session (`/supervision`): 'light' |
+--- 'standard' | 'strict', or nil (back to the config).
+---@return boolean ok, string? err
+function Controller:set_supervision(level)
+  if level ~= nil and not Roles.valid_supervision(level) then
+    return false, 'unknown supervision level: ' .. tostring(level) .. ' (' .. table.concat(Roles.SUPERVISION, ' | ') .. ' | default)'
+  end
+  self.session.roles = self.session.roles or {}
+  self.session.roles.supervision = level
+  self.events:emit('roles', self:roles())
+  self:save()
+  return true
 end
 
 --- Per-role request/token accounting (shown in :CoagentUsage), plus the
@@ -280,12 +323,19 @@ function Controller:submit(text, opts)
     end
   end
   if self:busy() then
-    if opts.plan or opts.plan_approved or opts.skill then
+    if opts.plan or opts.plan_approved or opts.skill or opts.strong then
       return false, 'the agent is busy; wait for it or stop it first (<C-c>)'
     end
     -- Follow-up while the agent works: delivered at the next step boundary
     -- (never interrupting a running tool or an approval prompt).
     return self:_enqueue(text, opts)
+  end
+  local strong
+  if opts.strong then
+    strong = self:roles().strong_model
+    if not strong then
+      return false, 'no strong model: set roles.strong_model or roles.advisor_model (a model other than the builder\'s)'
+    end
   end
   local phase = self:plan_phase()
   local planning -- 'start' | 'revise' | nil: this task runs in the plan phase
@@ -344,6 +394,9 @@ function Controller:submit(text, opts)
   if skill then
     self:_add({ type = 'tool', tool = 'use_skill', kind = 'read', title = 'skill: ' .. skill.name, status = 'done', summary = 'used for this task (/skill)', output = skill_text })
   end
+  if strong then
+    self:notice('info', string.format('This task runs on %s (/strong); the builder returns to %s afterwards. The switch costs a one-time prompt-cache miss (this task\'s first request, and the next task\'s).', strong, self:model()))
+  end
   if planning == 'start' and phase ~= 'planning' then
     self:notice('info', 'Plan phase: the agent only investigates (read/search tools) and writes a plan for you to approve, revise or discard.')
   elseif opts.readonly and self.permissions.mode ~= 'readonly' then
@@ -398,7 +451,18 @@ function Controller:submit(text, opts)
     skill_tools = skill and skill.tools and vim.deepcopy(skill.tools) or nil,
     skill_names = skill and skill.tools and { skill.name } or nil,
     forced_tools = skill and skill.tools and vim.deepcopy(skill.tools) or nil,
+    strong = strong,
   })
+end
+
+--- `/strong <task>`: run one task with the strong model (roles.strong_model,
+--- else the advisor model) as the builder; the next task is back on the
+--- selected model.
+---@param text string
+---@param opts table? submit opts
+---@return boolean ok, string? err
+function Controller:strong(text, opts)
+  return self:submit(text, vim.tbl_extend('force', opts or {}, { strong = true }))
 end
 
 ------------------------------------------------------------------------------
@@ -467,7 +531,11 @@ function Controller:plan_approve(opts)
   local item = plan.item and self.session:get_item(plan.item)
   local extra
   if plan.advice and not Advisor.is_lgtm(plan.advice) then
-    extra = 'Advisor review of the plan (address these points where they apply):\n' .. plan.advice
+    if Advisor.parse(plan.advice) == 'block' then
+      extra = 'The advisor BLOCKED this plan; the user reviewed the reason and approved it anyway. Keep the reason in mind:\n' .. plan.advice
+    else
+      extra = 'Advisor review of the plan (address these points where they apply):\n' .. plan.advice
+    end
   end
   local ok, err = self:submit(Controller.PLAN_APPROVED, {
     input = (opts and opts.input) or '/plan approve',
@@ -535,11 +603,15 @@ function Controller:_plan_ready(gen, res)
   item.status = 'reviewing'
   local roles = self:roles()
   local plan = self.session.plan or {}
-  if roles.advisor and roles.advisor_opts.on_plan then
+  if roles.advisor and roles.checkpoints.PLAN and self:_builder_is_advisor(roles) then
+    -- strict supervision: the advisor model wrote this plan itself
+    item.planned_by = self:active_model()
+    plan.reviewed = true
+  elseif self:_checkpoint_on('PLAN') then
     item.advice_model = roles.advisor_model
     self:_update(item)
     local task = self:_task_brief()
-    local advice = t.advisor:review(gen, 'PLAN', table.concat({
+    local verdict, advice = self:_supervise(gen, 'PLAN', table.concat({
       'Task:\n' .. task,
       'Proposed plan (nothing executed yet; the user approves it after your review):\n' .. util.clip(text, 6000),
     }, '\n\n'), { item = false })
@@ -548,7 +620,8 @@ function Controller:_plan_ready(gen, res)
     end
     if advice then
       item.advice = advice
-      item.advice_lgtm = Advisor.is_lgtm(advice)
+      item.advice_lgtm = verdict == 'lgtm'
+      item.advice_block = verdict == 'block' or nil
       plan.reviewed = true
       plan.advice = advice
     end
@@ -1128,6 +1201,9 @@ function Controller:_start(body, extra)
     fail_streak = {},
     usage = Usage.new(),
     item_start = #self.session.items, -- the task's user item (ledger: experiments of this task)
+    msg_start = #self.session.messages + 1, -- first message of this task (advisor evidence)
+    -- advisor checkpoints of this task: counts per verdict and the list
+    sup = { lgtm = 0, points = 0, block = 0, list = {} },
   }
   for k, v in pairs(extra or {}) do
     self.task[k] = v
@@ -1135,6 +1211,7 @@ function Controller:_start(body, extra)
   -- the skills list is fixed for the whole task (system prompt cache)
   self.task.skills_section = self.skills and self.skills:prompt_section() or nil
   self.task.advisor = Advisor.new(self)
+  self:_auto_warning()
   self.machine:to(S.THINKING)
   async.run(function()
     local ok, err = xpcall(function()
@@ -1469,6 +1546,17 @@ function Controller:_loop(gen)
       tool_calls = #tool_calls > 0 and tool_calls or nil,
     })
 
+    -- RESULTS: the first words after a finished run are the builder's
+    -- reading of its metrics (reviewed before the builder acts on them)
+    local results_note
+    if self.task.results_pending and vim.trim(res.content or '') ~= '' and not self.task.planning then
+      local stopped
+      results_note, stopped = self:_review_results(gen, res.content)
+      if self.gen ~= gen or stopped then
+        return
+      end
+    end
+
     if #tool_calls == 0 then
       if self.task.planning then
         self:_plan_ready(gen, res)
@@ -1477,19 +1565,20 @@ function Controller:_loop(gen)
         end
         return self:_finish(gen, S.COMPLETED, { reason = 'plan_ready' })
       end
-      local advice = self:_advise_before_done(gen)
-      if self.gen ~= gen then
-        return
+      local note = results_note
+      if not note then
+        -- BEFORE_DONE (files changed) or ANSWER (no changes)
+        local stopped
+        note, stopped = self:_review_final(gen, res.content)
+        if self.gen ~= gen or stopped then
+          return
+        end
       end
-      if not advice then
+      if not note then
         return self:_finish(gen, S.COMPLETED, { reason = 'model_done' })
       end
       -- the advisor found issues: hand them to the builder and keep going
-      table.insert(self.session.messages, {
-        role = 'user',
-        content = 'Advisor review before finishing:\n' .. advice
-          .. '\nAddress these points (or explain briefly why they do not apply), re-run the relevant checks, then finish.',
-      })
+      table.insert(self.session.messages, { role = 'user', content = note })
       goto next_step
     end
 
@@ -1545,6 +1634,17 @@ function Controller:_loop(gen)
       if stop_reason then
         self:save()
         return self:_finish(gen, S.CANCELLED, { reason = 'denied', message = stop_reason })
+      end
+      if results_note then
+        table.insert(self.session.messages, { role = 'user', content = results_note })
+      end
+      -- PROGRESS (strict): a periodic on-track check at the step boundary
+      local note, stopped = self:_review_progress(gen)
+      if self.gen ~= gen or stopped then
+        return
+      end
+      if note then
+        table.insert(self.session.messages, { role = 'user', content = note })
       end
     end
     self:save()
@@ -1638,26 +1738,508 @@ function Controller:_changes_diff()
   return table.concat(parts, '\n')
 end
 
---- BEFORE_DONE checkpoint. Returns advice when the builder must continue.
-function Controller:_advise_before_done(gen)
+------------------------------------------------------------------------------
+-- Supervision (advisor checkpoints, roles.supervision)
+------------------------------------------------------------------------------
+-- Each checkpoint sends the advisor a compact brief and gets 'LGTM', numbered
+-- points or 'BLOCK: <reason>'. Points go back to the builder (which must
+-- address them or say why not); a BLOCK stops the action and pauses the task
+-- until the user decides. Advisor requests count toward every token budget.
+
+Controller.BLOCKED = 'Advisor review: BLOCKED (%s): %s\nThe user reviewed this and resumed the task. Do not repeat the blocked step as it was; '
+  .. 'address the reason, take another route, or ask the user.'
+
+Controller.CHECKPOINT_LABEL = Advisor.LABEL
+
+--- Is checkpoint `kind` on for the running task? Never while the builder
+--- runs on the advisor's own model (it would review itself).
+---@param kind string
+---@return boolean
+function Controller:_checkpoint_on(kind)
   local roles = self:roles()
+  return self.task ~= nil and roles.advisor and roles.checkpoints[kind] == true and not self:_builder_is_advisor(roles)
+end
+
+--- One-time warning: 'auto' as the builder under supervision.
+function Controller:_auto_warning()
+  if self.auto_warned then
+    return
+  end
+  local roles = self:roles()
+  if roles.advisor and self:model() == 'auto' then
+    self.auto_warned = true
+    self:notice('warn', "Supervision is on, but the builder model is 'auto': it may pick a lighter model per request, which hurts accuracy, "
+      .. 'and every switch breaks prompt caching. Pin a builder model with :CoagentModel (e.g. a mid-tier model) and keep the strong model as the advisor.')
+  end
+end
+
+--- Run checkpoint `kind` (when it is on) and record its result.
+---@return 'lgtm'|'points'|'block'|nil verdict, string? text, string? reason
+function Controller:_supervise(gen, kind, brief, opts)
+  if not self:_checkpoint_on(kind) then
+    return nil
+  end
+  local text = self.task.advisor:review(gen, kind, brief, opts)
+  if self.gen ~= gen or not text then
+    return nil
+  end
+  local verdict, reason = Advisor.parse(text)
+  local sup = self.task.sup
+  sup[verdict] = sup[verdict] + 1
+  table.insert(sup.list, { kind = kind, verdict = verdict, text = util.clip(text, 600) })
+  self.sup_totals = self.sup_totals or { lgtm = 0, points = 0, block = 0 }
+  self.sup_totals[verdict] = self.sup_totals[verdict] + 1
+  self.events:emit('supervision', sup)
+  return verdict, text, reason
+end
+
+--- BLOCK: nothing more happens until the user decides; the task never goes
+--- past a BLOCK by itself. Returns true when the user resumed it.
+---@return boolean resumed
+function Controller:_block(gen, kind, reason)
+  self:notice('warn', string.format('Advisor BLOCK (%s): %s\nThe task is paused; the blocked step did not run. '
+    .. ':CoagentResume or /resume continues (the builder gets this reason and must take another route); a new message starts over; /stop ends the task.',
+    kind, reason))
+  self.events:emit('advisor_block', { kind = kind, reason = reason })
+  return self:_wait_resume(gen, { reason = 'advisor_block', checkpoint = kind, message = reason })
+end
+
+--- A BLOCK on an action that has not run yet (its tool item).
+---@return table? out nil when the task was stopped / superseded
+function Controller:_blocked_action(gen, kind, reason, item, fail)
+  item.status = 'blocked'
+  item.summary = 'blocked by the advisor (' .. kind .. ')'
+  self:_update(item)
+  if not self:_block(gen, kind, reason) then
+    return nil
+  end
+  return fail('blocked', string.format(Controller.BLOCKED, kind, reason))
+end
+
+--- A BLOCK at a step boundary: the builder's next message, or nil when the
+--- task was stopped (second value true).
+---@return string?, boolean? stopped
+function Controller:_blocked_note(gen, kind, reason)
+  if not self:_block(gen, kind, reason) then
+    return nil, true
+  end
+  return string.format(Controller.BLOCKED, kind, reason)
+end
+
+--- Is any token / credit budget (task, session, month) at budget_warn_at?
+---@return boolean
+function Controller:_budget_near()
+  local warn_at = tonumber(self.config.limits.budget_warn_at) or 0.8
+  local b, u = self:budgets(), self:budget_usage()
+  for _, k in ipairs({ 'tokens', 'credits', 'session_tokens' }) do
+    if b[k] and u[k] and u[k] >= b[k] * warn_at then
+      return true
+    end
+  end
+  local ok, m = pcall(self.monthly, self)
+  if ok and m then
+    if m.budget.credits and m.credits and m.credits >= m.budget.credits * warn_at then
+      return true
+    end
+    if m.budget.tokens and m.tokens >= m.budget.tokens * warn_at then
+      return true
+    end
+  end
+  return false
+end
+
+--- Compact evidence of this task: every tool call with a short result, and
+--- the experiment runs it recorded.
+---@param max_bytes integer
+---@return string
+function Controller:_evidence(max_bytes)
   local t = self.task
-  if not (roles.advisor and roles.advisor_opts.before_done and t and t.edit_seq) then
+  local msgs = self.session.messages
+  local from = t.msg_start or 1
+  local results = {}
+  for i = from, #msgs do
+    if msgs[i].role == 'tool' then
+      results[msgs[i].tool_call_id] = msgs[i].content
+    end
+  end
+  local lines, n = {}, 0
+  for i = from, #msgs do
+    for _, tc in ipairs(msgs[i].role == 'assistant' and msgs[i].tool_calls or {}) do
+      n = n + 1
+      local r = tostring(results[tc.id] or '(no result)'):gsub('%s+', ' ')
+      table.insert(lines, string.format('%d. %s %s\n   -> %s', n, tc.name, util.ellipsize(tc.arguments or '', 160), util.ellipsize(r, 300)))
+    end
+  end
+  if n == 0 then
+    table.insert(lines, '(no tool calls: the answer rests on the model\'s own knowledge)')
+  end
+  local runs = self:_task_runs()
+  if #runs > 0 then
+    local Exp = require('coagent.agent.experiments')
+    table.insert(lines, 'Experiment runs recorded in this task:')
+    for _, e in ipairs(runs) do
+      table.insert(lines, Exp.brief(self.experiments, e) .. ' ' .. Exp.short_command(e.command or '', 100))
+    end
+  end
+  return util.truncate_middle(table.concat(lines, '\n'), max_bytes)
+end
+
+--- Experiment entries recorded by tool calls of this task.
+---@return table[]
+function Controller:_task_runs()
+  local out, seen = {}, {}
+  if not self.experiments then
+    return out
+  end
+  for i = (self.task.item_start or 1), #self.session.items do
+    local item = self.session.items[i]
+    local id = item.type == 'tool' and item.meta and item.meta.experiment
+    if id and not seen[id] then
+      seen[id] = true
+      local e = self.experiments:get(id)
+      if e then
+        table.insert(out, e)
+      end
+    end
+  end
+  return out
+end
+
+--- The last tool calls of this task, one line each.
+function Controller:_recent_actions(n)
+  local lines = {}
+  for i = (self.task.item_start or 1), #self.session.items do
+    local item = self.session.items[i]
+    if item.type == 'tool' then
+      table.insert(lines, string.format('- %s [%s]%s', util.ellipsize(tostring(item.title or item.tool), 120), tostring(item.status), item.summary and (' ' .. util.ellipsize(item.summary, 80)) or ''))
+    end
+  end
+  return #lines > 0 and table.concat(vim.list_slice(lines, math.max(1, #lines - n + 1)), '\n') or '(none yet)'
+end
+
+function Controller:_diff_stat()
+  local lines = {}
+  for _, c in ipairs(self.session.changes:list()) do
+    if c.status ~= 'unchanged' then
+      table.insert(lines, string.format('%s %s +%d -%d', c.status, c.rel, c.added or 0, c.removed or 0))
+    end
+  end
+  return #lines > 0 and table.concat(lines, '\n') or '(no file changes)'
+end
+
+--- Remember the agent's file contents when an experiment run starts (the
+--- next BEFORE_RUN shows what changed since).
+function Controller:_snapshot_run()
+  local ch = self.session.changes
+  local files = {}
+  for _, abs in ipairs(ch.order or {}) do
+    files[abs] = { current = ch.files[abs].current }
+  end
+  self.run_snapshot = { files = files, at = os.time() }
+end
+
+--- Diff of the agent's changes since the last run started in this session
+--- (all of the session's changes when none ran yet).
+---@return string diff, boolean since_run
+function Controller:_diff_since_run()
+  local ch = self.session.changes
+  local snap = self.run_snapshot
+  local D = require('coagent.core.diff')
+  local parts = {}
+  for _, abs in ipairs(ch.order or {}) do
+    local f = ch.files[abs]
+    local base = f.baseline
+    if snap and snap.files[abs] then
+      base = snap.files[abs].current
+    end
+    if base ~= f.current then
+      table.insert(parts, D.unified(base, f.current, f.rel))
+    end
+  end
+  return table.concat(parts, '\n'), snap ~= nil
+end
+
+--- Goals from the project ledger (empty when there is none).
+function Controller:_ledger_goals()
+  local l = self.ledger
+  if not (l and l:enabled() and l:exists()) then
+    return nil
+  end
+  local ok, text = pcall(l.read, l, 'goals')
+  if not ok or not text or vim.trim(text) == '' then
+    return nil
+  end
+  return util.clip(vim.trim(text), 1500)
+end
+
+--- Recent runs of the experiment log with deltas and the best run.
+function Controller:_runs_table(limit)
+  if not (self.experiments and self.experiments:enabled()) then
+    return nil
+  end
+  local ok, lines = pcall(require('coagent.agent.experiments').table_text, self.experiments, { limit = limit })
+  if not ok or not lines or #lines == 0 then
+    return nil
+  end
+  return table.concat(lines, '\n')
+end
+
+--- Is this exec call an experiment / long run (BEFORE_RUN)?
+function Controller:_is_run(tool, args, prepared)
+  if tool.name ~= 'run_command' and tool.name ~= 'start_process' then
+    return false
+  end
+  if args.experiment == true then
+    return true
+  end
+  local log = self.experiments
+  return log ~= nil and log:enabled() and (log:matches(prepared.command)) == true
+end
+
+--- Critical glob matching `rel` (CRITICAL_EDIT), or nil.
+function Controller:_critical(rel)
+  for _, g in ipairs(self:roles().advisor_opts.critical_globs or {}) do
+    if Roles.glob_match(g, rel) then
+      return g
+    end
+  end
+  return nil
+end
+
+--- BEFORE_DONE (with file changes) or ANSWER (without): the builder's next
+--- message when it must continue, nil to finish; second value true when the
+--- task was stopped at a BLOCK.
+---@return string?, boolean?
+function Controller:_review_final(gen, answer)
+  local t = self.task
+  local verdict, text, reason, kind
+  if t.edit_seq then
+    kind = 'BEFORE_DONE'
+    if not self:_checkpoint_on(kind) then
+      return nil
+    end
+    local task, plan = self:_task_brief()
+    local v = self:_verification()
+    verdict, text, reason = self:_supervise(gen, kind, table.concat({
+      'Task:\n' .. task,
+      'Agent notes:\n' .. plan,
+      'Verification: ' .. v.status .. (v.command and (' (' .. v.command .. ' -> ' .. tostring(v.summary) .. ')') or ''),
+      'Full diff:\n' .. util.truncate_middle(self:_changes_diff(), 10000),
+    }, '\n\n'))
+  else
+    kind = 'ANSWER'
+    local min = tonumber(self:roles().advisor_opts.answer_min_chars) or 400
+    if not self:_checkpoint_on(kind) or #vim.trim(answer or '') < min then
+      return nil
+    end
+    local task = self:_task_brief()
+    verdict, text, reason = self:_supervise(gen, kind, table.concat({
+      'Task:\n' .. task,
+      'Answer of the agent (no files were changed):\n' .. util.clip(vim.trim(answer), 6000),
+      'Evidence (tool calls of this task with short results):\n' .. self:_evidence(6000),
+    }, '\n\n'))
+  end
+  if self.gen ~= gen then
+    return nil, true
+  end
+  if verdict == 'block' then
+    return self:_blocked_note(gen, kind, reason)
+  elseif verdict ~= 'points' then
+    return nil
+  end
+  if kind == 'BEFORE_DONE' then
+    return 'Advisor review before finishing:\n' .. text
+      .. '\nAddress these points (or explain briefly why they do not apply), re-run the relevant checks, then finish.'
+  end
+  return 'Advisor review of your answer (checked against the evidence of this task):\n' .. text
+    .. '\nRevise the answer: fix what is wrong or unsupported (verify with tools where needed) or explain briefly why a point does not apply. Then give the full revised answer.'
+end
+
+--- RESULTS: the builder's first words after a run finished are its reading
+--- of the metrics; the advisor checks them against the /exp comparison.
+---@return string?, boolean?
+function Controller:_review_results(gen, interpretation)
+  local t = self.task
+  local ids = t.results_pending or {}
+  t.results_pending = nil
+  local max = tonumber(self:roles().advisor_opts.max_results_reviews) or 3
+  if #ids == 0 or not self:_checkpoint_on('RESULTS') or (t.results_reviews or 0) >= max then
+    return nil
+  end
+  t.results_reviews = (t.results_reviews or 0) + 1
+  local Exp = require('coagent.agent.experiments')
+  local runs = {}
+  for _, id in ipairs(ids) do
+    local e = self.experiments and self.experiments:get(id)
+    if e then
+      local lines = {
+        string.format('#%d%s: %s', e.id, e.name and (' ' .. e.name) or '', Exp.short_command(e.command or '', 200)),
+        string.format('status %s, exit %s, %s', Exp.status_text(e), tostring(e.code), util.format_duration(e.duration_ms or 0)),
+        'metrics: ' .. Exp.metrics_summary(self.experiments, e),
+      }
+      if e.notes and #e.notes > 0 then
+        table.insert(lines, 'notes: ' .. table.concat(vim.tbl_map(function(n)
+          return type(n) == 'table' and tostring(n.text) or tostring(n)
+        end, e.notes), '; '))
+      end
+      table.insert(runs, table.concat(lines, '\n'))
+    end
+  end
+  if #runs == 0 then
+    return nil
+  end
+  local task = self:_task_brief()
+  local verdict, text, reason = self:_supervise(gen, 'RESULTS', table.concat(vim.tbl_filter(function(x)
+    return x ~= nil
+  end, {
+    'Task:\n' .. task,
+    'Finished run(s):\n' .. table.concat(runs, '\n\n'),
+    (function()
+      local tbl = self:_runs_table(8)
+      return tbl and ('Experiment log (deltas vs the previous and the best run):\n' .. tbl) or nil
+    end)(),
+    (function()
+      local g = self:_ledger_goals()
+      return g and ('Project goals (ledger):\n' .. g) or nil
+    end)(),
+    'The agent\'s interpretation:\n' .. util.clip(vim.trim(interpretation), 4000),
+  }), '\n\n'))
+  if self.gen ~= gen then
+    return nil, true
+  end
+  if verdict == 'block' then
+    return self:_blocked_note(gen, 'RESULTS', reason)
+  elseif verdict ~= 'points' then
+    return nil
+  end
+  return string.format('Advisor review of your reading of run %s:\n%s\nCorrect your interpretation where it is wrong (or explain briefly why a point does not apply) before acting on it or reporting it.',
+    table.concat(vim.tbl_map(function(id)
+      return '#' .. id
+    end, ids), ', '), text)
+end
+
+--- PROGRESS (strict): every `progress_every_steps` builder steps a short
+--- on-track check. Skipped once a budget reaches budget_warn_at.
+---@return string?, boolean?
+function Controller:_review_progress(gen)
+  local t = self.task
+  if not self:_checkpoint_on('PROGRESS') then
+    return nil
+  end
+  local every = tonumber(self:roles().advisor_opts.progress_every_steps) or 8
+  local steps = t.steps + (t.prior_steps or 0)
+  if every <= 0 or steps == 0 or steps % every ~= 0 or t.progress_at == steps then
+    return nil
+  end
+  t.progress_at = steps
+  if self:_budget_near() then
+    if not t.progress_skip_noticed then
+      t.progress_skip_noticed = true
+      self:notice('info', 'Advisor PROGRESS checks are skipped for this task: a token / credit budget is nearly used (limits.budget_warn_at). The other checkpoints still run.')
+    end
     return nil
   end
   local task, plan = self:_task_brief()
   local v = self:_verification()
-  local brief = table.concat({
+  local verdict, text, reason = self:_supervise(gen, 'PROGRESS', table.concat({
     'Task:\n' .. task,
-    'Agent notes:\n' .. plan,
-    'Verification: ' .. v.status .. (v.command and (' (' .. v.command .. ' -> ' .. tostring(v.summary) .. ')') or ''),
-    'Full diff:\n' .. util.truncate_middle(self:_changes_diff(), 10000),
-  }, '\n\n')
-  local advice = t.advisor:review(gen, 'BEFORE_DONE', brief)
-  if advice and not Advisor.is_lgtm(advice) then
-    return advice
+    'Agent plan / notes so far:\n' .. util.clip(plan, 2500),
+    string.format('Step %d. Recent actions:\n%s', steps, self:_recent_actions(10)),
+    'Changed files:\n' .. self:_diff_stat(),
+    'Verification: ' .. v.status .. (v.command and (' (' .. v.command .. ')') or ''),
+    'Answer LGTM when the agent is on track; numbered points when it drifts, loops or misses the goal.',
+  }, '\n\n'))
+  if self.gen ~= gen then
+    return nil, true
   end
-  return nil
+  if verdict == 'block' then
+    return self:_blocked_note(gen, 'PROGRESS', reason)
+  elseif verdict ~= 'points' then
+    return nil
+  end
+  return string.format('Advisor review (progress check at step %d):\n%s\nGet back on track: address these points before you continue (or explain briefly why they do not apply).', steps, text)
+end
+
+--- CRITICAL_EDIT / EVERY_EDIT on one edit before it is applied. An edit
+--- re-issued unchanged after points (the builder disagrees), a file that got
+--- points twice in a row, or more than max_edit_reviews per task go through
+--- without another review.
+---@return 'lgtm'|'points'|'block'|nil, string?, string?
+function Controller:_review_edit(gen, kind, item, prepared, glob)
+  local t = self.task
+  local opts = self:roles().advisor_opts
+  t.edit_review = t.edit_review or { n = 0, files = {}, last = {} }
+  local er = t.edit_review
+  local rel = prepared.path and prepared.path.rel or tostring(item.title)
+  local d = prepared.diff or ''
+  local hash = vim.fn.sha256(d)
+  if er.last[rel] == hash or (er.files[rel] or 0) >= 2 then
+    return nil
+  end
+  if er.n >= (tonumber(opts.max_edit_reviews) or 12) then
+    if not er.capped then
+      er.capped = true
+      self:notice('info', string.format('Advisor edit reviews reached roles.advisor.max_edit_reviews (%d) for this task; later edits are reviewed in the final review only.', er.n))
+    end
+    return nil
+  end
+  er.n = er.n + 1
+  local task, plan = self:_task_brief()
+  local verdict, text, reason = self:_supervise(gen, kind, table.concat({
+    'Task:\n' .. task,
+    'Agent plan / notes so far:\n' .. util.clip(plan, 2500),
+    string.format('Proposed edit of %s (%s, +%d -%d)%s, not applied yet:\n%s', rel, tostring(prepared.op or 'modify'), prepared.added or 0, prepared.removed or 0,
+      glob and (' [critical file: matches ' .. glob .. ']') or '', util.truncate_middle(d, 8000)),
+  }, '\n\n'))
+  if verdict == 'points' then
+    er.files[rel] = (er.files[rel] or 0) + 1
+    er.last[rel] = hash
+  elseif verdict == 'lgtm' then
+    er.files[rel] = 0
+  end
+  return verdict, text, reason
+end
+
+--- BEFORE_RUN brief: what is about to consume GPU hours.
+function Controller:_run_brief(tool, args, prepared)
+  local Exp = require('coagent.agent.experiments')
+  local task, plan = self:_task_brief()
+  local diff, since = self:_diff_since_run()
+  local settings, order = Exp.settings(util.redact(prepared.command or ''))
+  local args_text = {}
+  for _, k in ipairs(order or {}) do
+    table.insert(args_text, k .. '=' .. tostring(settings[k]))
+  end
+  local parts = {
+    'Task:\n' .. task,
+    'Agent plan / notes so far:\n' .. util.clip(plan, 2500),
+    string.format('Run about to start (%s%s):\n$ %s\ncwd: %s%s', tool.name, tool.name == 'start_process' and ', background' or '',
+      util.redact(prepared.command or ''), tostring(prepared.cwd_rel or '.'), #args_text > 0 and ('\nArguments: ' .. table.concat(args_text, ', ')) or ''),
+    (since and 'Agent changes since the last run started in this session' or 'Agent changes in this session (no run started yet)') .. ':\n'
+      .. (diff ~= '' and util.truncate_middle(diff, 8000) or '(none)'),
+  }
+  local tbl = self:_runs_table(5)
+  if tbl then
+    table.insert(parts, 'Recent runs (experiment log):\n' .. tbl)
+  end
+  local goals = self:_ledger_goals()
+  if goals then
+    table.insert(parts, 'Project goals (ledger):\n' .. goals)
+  end
+  return table.concat(parts, '\n\n')
+end
+
+--- After a repeated failure: finish the task on the strong model
+--- (roles.escalate_on_repeated_failure).
+function Controller:_escalate()
+  local t = self.task
+  local roles = self:roles()
+  if not roles.escalate or not roles.strong_model or t.strong or t.model_override then
+    return
+  end
+  t.strong, t.escalated = roles.strong_model, true
+  self:notice('warn', string.format('Escalated: the same check failed twice, so %s finishes this task (roles.escalate_on_repeated_failure); the next task is back on %s. The switch costs a one-time prompt-cache miss.', roles.strong_model, self:model()))
+  self.events:emit('model', roles.strong_model)
 end
 
 --- Context budget in tokens.
@@ -1703,6 +2285,13 @@ function Controller:_request(gen)
   end
   local system_prompt = self.task.system_prompt
   local roles = self:roles()
+  -- the builder on the strong / advisor model uses that role's effort
+  local strong_builder = (self.task.strong ~= nil and not self.task.model_override) or self:_builder_is_advisor(roles)
+  local effort = strong_builder and roles.advisor_effort or roles.builder_effort
+  if planning and strong_builder and not self.task.strong and not self.task.strong_plan_noticed then
+    self.task.strong_plan_noticed = true
+    self:notice('info', string.format('Strict supervision: the plan phase runs on the advisor model %s; execution returns to %s. Each switch costs a one-time prompt-cache miss.', model, self:model()))
+  end
   local forced = self.task.forced_tools
   local tools = vim.tbl_filter(function(t)
     if t.name == 'explore' and not roles.explorer then
@@ -1779,7 +2368,7 @@ function Controller:_request(gen)
       tools = tools,
       model = model,
       temperature = self.config.temperature,
-      effort = roles.builder_effort,
+      effort = effort,
       role = 'builder',
       on_delta = function(content)
         if content and content ~= '' then
@@ -2043,12 +2632,14 @@ function Controller:_execute(gen, tc)
     item.preview = { command = prepared.command, cwd = prepared.cwd_rel, timeout_ms = prepared.timeout_ms }
   end
 
+  -- Supervision before anything runs (and before the user is asked).
   -- PLAN checkpoint: let the advisor look at the plan before the first change.
-  local roles = self:roles()
-  if tool.kind == 'write' and roles.advisor and roles.advisor_opts.on_plan and not self.task.plan_reviewed then
+  local reviewed_here = false
+  if tool.kind == 'write' and not self.task.plan_reviewed and self:_checkpoint_on('PLAN') then
     self.task.plan_reviewed = true
+    reviewed_here = true
     local task, plan = self:_task_brief()
-    local advice = self.task.advisor:review(gen, 'PLAN', table.concat({
+    local verdict, advice, reason = self:_supervise(gen, 'PLAN', table.concat({
       'Task:\n' .. task,
       'Agent plan / notes so far:\n' .. plan,
       'First proposed change (' .. tostring(item.title) .. '):\n' .. util.truncate_middle(prepared.diff or '', 6000),
@@ -2056,9 +2647,58 @@ function Controller:_execute(gen, tc)
     if self.gen ~= gen then
       return nil
     end
-    if advice and not Advisor.is_lgtm(advice) then
+    if verdict == 'block' then
+      return self:_blocked_action(gen, 'PLAN', reason, item, fail)
+    elseif verdict == 'points' then
       return fail('deferred', 'NOT EXECUTED: an advisor reviewed your plan before the first change:\n' .. advice
         .. '\nAdjust the plan if needed, then issue this change (or a corrected one) again.')
+    end
+  end
+  -- CRITICAL_EDIT (critical_globs) / EVERY_EDIT (strict): this diff, before it is applied
+  -- (not for files imported by /receive: the user reviews those)
+  if tool.kind == 'write' and not reviewed_here and not self.task.importing then
+    local rel = prepared.path and prepared.path.rel
+    local kind, glob
+    if self:_checkpoint_on('EVERY_EDIT') then
+      kind = 'EVERY_EDIT'
+      glob = rel and self:_critical(rel) or nil
+    elseif rel and self:_checkpoint_on('CRITICAL_EDIT') then
+      glob = self:_critical(rel)
+      kind = glob and 'CRITICAL_EDIT' or nil
+    end
+    if kind then
+      local verdict, advice, reason = self:_review_edit(gen, kind, item, prepared, glob)
+      if self.gen ~= gen then
+        return nil
+      end
+      if verdict == 'block' then
+        return self:_blocked_action(gen, kind, reason, item, fail)
+      elseif verdict == 'points' then
+        return fail('deferred', string.format('NOT EXECUTED: an advisor reviewed this edit of %s before it is applied:\n%s\n'
+          .. 'Revise the edit, or issue it again unchanged if you disagree (say why in one sentence).', tostring(rel), advice))
+      end
+    end
+  end
+  -- BEFORE_RUN: an experiment / long run is about to consume GPU hours
+  local is_run = tool.kind == 'exec' and self:_is_run(tool, args, prepared)
+  if is_run and self:_checkpoint_on('BEFORE_RUN') then
+    local t = self.task
+    local max = tonumber(self:roles().advisor_opts.max_run_reviews) or 3
+    if (t.run_reviews or 0) < max then
+      t.run_reviews = (t.run_reviews or 0) + 1
+      local verdict, advice, reason = self:_supervise(gen, 'BEFORE_RUN', self:_run_brief(tool, args, prepared))
+      if self.gen ~= gen then
+        return nil
+      end
+      if verdict == 'block' then
+        return self:_blocked_action(gen, 'BEFORE_RUN', reason, item, fail)
+      elseif verdict == 'points' then
+        return fail('deferred', 'NOT EXECUTED: an advisor reviewed this run before it starts (it would consume GPU hours):\n' .. advice
+          .. '\nAddress the points (fix the code or config, or explain briefly why a point does not apply), then start the run again.')
+      end
+    elseif not t.run_reviews_noticed then
+      t.run_reviews_noticed = true
+      self:notice('info', string.format('Advisor BEFORE_RUN reviews reached roles.advisor.max_run_reviews (%d) for this task; further runs start without one.', max))
     end
   end
 
@@ -2149,6 +2789,23 @@ function Controller:_execute(gen, tc)
   self:_update(item)
 
   local t = self.task
+  if is_run then
+    -- the next BEFORE_RUN shows what changed since this run started
+    self:_snapshot_run()
+  end
+  do
+    -- RESULTS: a recorded run finished or was stopped; the builder's next
+    -- words (its reading of the metrics) get reviewed
+    local meta = res.meta or {}
+    local exp_id = meta.experiment
+    local finished = exp_id and ((tool.name == 'run_command') or (tool.name == 'wait_process' and meta.exited) or (tool.name == 'stop_process' and res.ok))
+    t.results_seen = t.results_seen or {}
+    if finished and not t.results_seen[exp_id] and self:_checkpoint_on('RESULTS') then
+      t.results_seen[exp_id] = true
+      t.results_pending = t.results_pending or {}
+      table.insert(t.results_pending, exp_id)
+    end
+  end
   if res.meta and res.meta.checkpoint then
     -- a monitored run is still going: the next request decides on it (part
     -- of the wait chain, not counted toward max_steps / max_tool_calls)
@@ -2180,24 +2837,42 @@ function Controller:_execute(gen, tc)
 
   local content = util.truncate_middle(util.redact(res.output or ''), self.config.limits.max_tool_output_bytes)
 
-  -- REPEATED_FAILURE checkpoint: the same check failed twice (after edits).
+  -- FAILURE (a check failed after edits) / REPEATED_FAILURE (the same one twice)
   if tool.name == 'run_command' then
     local key = vim.trim(prepared.command or '')
     t.fail_streak[key] = res.ok and 0 or ((t.fail_streak[key] or 0) + 1)
-    local roles = self:roles()
-    if not res.ok and t.fail_streak[key] >= 2 and t.edit_seq and roles.advisor and roles.advisor_opts.on_repeated_failure then
-      local task, plan = self:_task_brief()
-      local advice = t.advisor:review(gen, 'REPEATED_FAILURE', table.concat({
-        'Task:\n' .. task,
-        'Agent notes:\n' .. plan,
-        'Failing check (twice): ' .. key .. '\n' .. util.truncate_middle(util.redact(res.output or ''), 4000),
-        'Diff so far:\n' .. util.truncate_middle(self:_changes_diff(), 6000),
-      }, '\n\n'))
-      if self.gen ~= gen then
-        return nil
+    if not res.ok and t.edit_seq then
+      local kind
+      t.failure_reviewed = t.failure_reviewed or {}
+      if t.fail_streak[key] >= 2 then
+        kind = 'REPEATED_FAILURE'
+      elseif not t.failure_reviewed[key] and (t.failure_reviews or 0) < (tonumber(self:roles().advisor_opts.max_failure_reviews) or 2) and self:_checkpoint_on('FAILURE') then
+        kind = 'FAILURE'
+        t.failure_reviewed[key] = true
+        t.failure_reviews = (t.failure_reviews or 0) + 1
       end
-      if advice and not Advisor.is_lgtm(advice) then
-        content = content .. '\n\nADVISOR (the same check failed twice):\n' .. advice
+      if kind then
+        local task, plan = self:_task_brief()
+        local verdict, advice, reason = self:_supervise(gen, kind, table.concat({
+          'Task:\n' .. task,
+          'Agent notes:\n' .. plan,
+          (kind == 'REPEATED_FAILURE' and 'Failing check (twice): ' or 'Failing check: ') .. key .. '\n' .. util.truncate_middle(util.redact(res.output or ''), 4000),
+          'Diff so far:\n' .. util.truncate_middle(self:_changes_diff(), 6000),
+        }, '\n\n'))
+        if self.gen ~= gen then
+          return nil
+        end
+        if verdict == 'block' then
+          if not self:_block(gen, kind, reason) then
+            return nil
+          end
+          content = content .. '\n\n' .. string.format(Controller.BLOCKED, kind, reason)
+        elseif verdict == 'points' then
+          content = content .. '\n\nADVISOR (' .. (kind == 'REPEATED_FAILURE' and 'the same check failed twice' or 'check failed') .. '):\n' .. advice
+        end
+        if kind == 'REPEATED_FAILURE' then
+          self:_escalate()
+        end
       end
     end
   end
@@ -2327,6 +3002,7 @@ function Controller:_finish_now(state, info)
   self.session:repair()
   self.pending_approval = nil
   local t = self.task or { started = util.now(), steps = 0, tool_calls = 0, checks = {} }
+  t.finished = true -- /strong and strong planning end with the task
   local changes = {}
   for _, c in ipairs(self.session.changes:list()) do
     if c.status ~= 'unchanged' then
@@ -2346,6 +3022,12 @@ function Controller:_finish_now(state, info)
     changes = changes,
     -- a planning task that ended with a plan waiting for approval
     plan = (t.planning and state == S.COMPLETED and self:plan_phase() == 'ready') or nil,
+    -- advisor checkpoints of this task, in order: {kind, verdict}
+    supervision = (t.sup and #t.sup.list > 0) and vim.tbl_map(function(c)
+      return { kind = c.kind, verdict = c.verdict }
+    end, t.sup.list) or nil,
+    strong = t.strong, -- the task ran (or finished, after escalation) on this model
+    escalated = t.escalated,
   }
   local u = t.usage
   if u and u.requests > 0 then
@@ -2715,6 +3397,7 @@ function Controller:receive(sub, R, opts)
       -- and its own later edits follow the normal policy again
       self.task.denials = 0
       self.task.review_writes = nil
+      self.task.importing = nil
       self:save()
       return self:_loop(gen)
     end
@@ -2733,6 +3416,7 @@ function Controller:receive(sub, R, opts)
     return self:_finish(gen, stopped and S.CANCELLED or S.COMPLETED, { reason = 'received', message = summary.line })
   end, {
     plan_reviewed = true, -- the advisor does not gate imported files
+    importing = true,
     review_writes = review,
     receive = (not resume) and sub.id or nil,
     on_done = opts.on_done and function(s)

@@ -109,6 +109,8 @@
 | `/compact summary` | 古いやり取りを現在のモデルで 1 回要約し、1 メッセージに置換（1 リクエスト。`<C-c>` で中止可） |
 | `/plan [task\|approve\|discard]` | 計画を先に確認（[計画を先に確認する](#計画を先に確認するplan--coagentplan)） |
 | `/go <task>` | 計画フェーズなしで実行（`plan.default = true` のとき） |
+| `/strong <task>` | 強いモデル（`roles.strong_model`、なければアドバイザーのモデル）を作業担当にして 1 タスクだけ実行（`:CoagentStrong` と同じ。[6. モードとモデル](#6-モードとモデル)） |
+| `/supervision [light\|standard\|strict\|default]` | アドバイザーの監督レベルをこのセッションだけ変更（`:CoagentSupervision` と同じ） |
 | `/skills [enable\|disable <name>\|reload]` | Agent Skills の一覧 / このセッションだけ有効・無効（[Agent Skills](#agent-skills)） |
 | `/skill <name> [task]` | スキルを最初から読み込んでタスクを実行 |
 | `/exp [show\|diff\|note\|compare\|run ...]` | 実験ログ（[実験ログ](#実験ログexp)。ローカルのみ、リクエストなし） |
@@ -502,6 +504,22 @@ Neovim にフォーカスが無いとき、承認待ち・完了・失敗・上�
   - 上げるほど推論トークン（費用・クォータ）と待ち時間が増えます。モデル `auto` では無視
   - モデルが対応しないレベルは、CopilotChat がレベル一覧を持つ版なら最も近いレベルに丸めて通知。400 で拒否されたら
     effort なしで 1 回再送し、そのモデルには以後送りません（[互換性](compatibility.md#reasoning-effort-の送り方)）
+
+- **監督（アドバイザー）** — `/roles advisor` / `full` のとき、強いモデル（アドバイザー）が節目で作業担当をレビュー
+  - `roles.supervision`: `light`（PLAN・REPEATED_FAILURE・BEFORE_DONE）/ `standard`（既定。＋ ANSWER・BEFORE_RUN・RESULTS・
+    FAILURE・CRITICAL_EDIT）/ `strict`（＋ PROGRESS・EVERY_EDIT・計画フェーズをアドバイザーのモデルで）。`/supervision` で変更、
+    `roles.advisor.checkpoints = { NAME = true/false }` で個別に追加・削除
+  - 答えは `LGTM`・番号付きの指摘（作業担当が対応するか理由を説明）・`BLOCK: <理由>`。BLOCK はその操作を止めてタスクを一時停止
+    （winbar `paused (advisor BLOCK)`、通知 `blocked`）。`/resume` で理由を作業担当に渡して続行、新しいメッセージでやり直し、`/stop` で終了
+  - 学習の開始前（BEFORE_RUN）に指摘があればその実行はされず、直してから再実行。学習の終了後（RESULTS）は作業担当の
+    指標の読み方を `/exp` の比較とあわせてレビュー
+  - `roles.advisor.tools = 'read'`（standard / strict の既定）でアドバイザーが読み取り専用のツールで確認（節目ごとに `max_tool_steps` 回まで）
+  - winbar に `adv 3✓ 1!` / `adv BLOCK`、タイムラインに節目ごとの項目、タスクのまとめに節目の結果、`gu` / `:CoagentUsage` にアドバイザーのトークン
+  - 作業担当が `auto` だと 1 回だけ警告（精度とキャッシュのため、モデルを固定する）
+  - `/strong <task>` / `:CoagentStrong` は強いモデルで 1 タスク実行して元に戻す。`roles.escalate_on_repeated_failure = true` で
+    REPEATED_FAILURE のあと残りを強いモデルで仕上げる。モデルの切り替えでプロンプトキャッシュが 1 回効かない
+  - アドバイザーのトークンも予算に数え、予算が `budget_warn_at` に達したら PROGRESS だけ省く
+  - 詳細とトークンの目安は README_ja.md の「監督」、機械学習向けの設定は [ml-workflow.md](ml-workflow.md)
 
 ## 7. セッション
 

@@ -46,6 +46,22 @@ end, {
     return { 'approve', 'discard' }
   end,
 })
+cmd('CoagentStrong', function(a)
+  agent().strong(a.args, { range = a.range > 0 and { a.line1, a.line2 } or nil, open = true })
+end, {
+  nargs = '*',
+  range = true,
+  desc = 'Run one task with the strong model (roles.strong_model / advisor model) as the builder',
+})
+cmd('CoagentSupervision', function(a)
+  agent().supervision(a.args)
+end, {
+  nargs = '?',
+  desc = 'Advisor supervision for this session: light | standard | strict | default',
+  complete = function()
+    return { 'light', 'standard', 'strict', 'default' }
+  end,
+})
 cmd('CoagentSkills', function(a)
   agent().skills(a.args)
 end, {

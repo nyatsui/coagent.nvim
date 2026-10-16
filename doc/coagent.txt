@@ -20,6 +20,7 @@ CONTENTS                                              *coagent-contents*
      Limits .................................. |coagent-limits|
   5. Modes ................................... |coagent-modes|
      Judge mode .............................. |coagent-judge|
+     Supervision ............................. |coagent-supervision|
   6. Lua API ................................. |coagent-api|
 
 ==============================================================================
@@ -97,6 +98,13 @@ Check the setup with |:checkhealth| coagent.
 :CoagentModel            Pick a tool-calling capable model (per role when roles are on).
                          Models with `usage.rates` show their price per 1M tokens.
 :CoagentRoles [preset]   Model roles: single (default) | advisor | explorers | full
+:CoagentSupervision [level]
+                         How closely the advisor supervises the builder in
+                              this session: light | standard | strict |
+                              default. See |coagent-supervision|.
+:CoagentStrong {task}    Run one task with the strong model as the builder
+                              (a range attaches the selection), then go back
+                              to the selected model. See |coagent-supervision|.
 :CoagentEffort [level] [role]
                          Reasoning effort for this session: minimal | low |
                               medium | high | off | default, optionally for
@@ -288,6 +296,10 @@ Commands go into the input history like prompts.
                       "/plan discard" act on the plan waiting for
                       approval.
   /go <task>          Run a task without the plan phase (plan.default).
+  /strong <task>      Run one task with the strong model as the builder
+                      (|coagent-supervision|).
+  /supervision [light|standard|strict|default]
+                      Supervision level for this session.
   /skills [enable|disable <name>|reload]
                       List the Agent Skills; enable or disable one for
                       this session (|coagent-skills|).
@@ -997,7 +1009,7 @@ commands are never queued; they run at once.
 When Neovim does not have focus, coagent rings the terminal bell on the
 events in `notify.on`: >lua
     notify = {
-      on = { 'approval', 'done', 'failed', 'limit', 'waiting', 'stopped' }, -- also: 'paused'
+      on = { 'approval', 'done', 'failed', 'limit', 'waiting', 'stopped', 'blocked' }, -- also: 'paused'
       bell = true,                -- BEL to the terminal (tmux: bell flag)
       desktop = false,            -- notify-send (Linux) / osascript (macOS)
       only_when_unfocused = true,
@@ -1016,7 +1028,8 @@ other pauses (:CoagentPause, interruptions). A plan ready for approval
 (|coagent-plan|) is sent as 'approval' ("approval needed (plan)"), not
 'done'. 'waiting' is sent when a task starts waiting for a delegated
 subtask (|coagent-delegate|). 'stopped' is sent when the agent stops a
-monitored training run (|coagent-monitor|).
+monitored training run (|coagent-monitor|). 'blocked' is sent when the
+advisor BLOCKs a step and the task waits for you (|coagent-supervision|).
 
                                                         *coagent-limits*
 Per-task limits are brakes against runaway loops: every request resends
@@ -1110,6 +1123,96 @@ and an allowed command runs with your full user permissions. The judge can
 be wrong; destructive, remote and outside actions stay behind rules it
 cannot override. Use a version-controlled workspace and a branch.
 
+                                                   *coagent-supervision*
+Supervision. With an advisor (roles.preset 'advisor' or 'full'),
+`roles.supervision` decides where the advisor (a strong model) reviews the
+builder (a cheaper model). Each level is a set of checkpoints:
+
+  light      PLAN              before the first file change (or the plan
+                               written in the plan phase)
+             REPEATED_FAILURE  the same check failed twice after edits
+             BEFORE_DONE       the full diff before a task with changes ends
+  standard   light, plus:
+             ANSWER            a task ending without changes with an answer
+                               of at least answer_min_chars (400): checked
+                               against the evidence (tool calls with short
+                               results, recorded experiment metrics); one
+                               revision
+             BEFORE_RUN        before an experiment / long run starts
+                               (experiment = true or a command /exp
+                               detects): command, arguments, the agent's
+                               changes since the last run, recent runs,
+                               ledger goals. Points: NOT EXECUTED, fixed,
+                               started again
+             RESULTS           after a recorded run finished or was stopped:
+                               the builder's reading of the metrics with
+                               the /exp comparison (deltas vs previous and
+                               best)
+             FAILURE           the first failing check after edits
+                               (max_failure_reviews per task)
+             CRITICAL_EDIT     an edit of a file matching critical_globs,
+                               before it is applied
+  strict     standard, plus:
+             PROGRESS          every progress_every_steps (8) steps
+             EVERY_EDIT        every edit, before it is applied
+             STRONG_PLAN       the plan phase runs on the advisor model;
+                               execution returns to the builder
+
+Default: 'standard' when an advisor is configured; 'light' keeps the
+original three checkpoints. Override single checkpoints: >lua
+  roles = {
+    preset = 'advisor', advisor_model = 'strongest-model-id',
+    supervision = 'standard',
+    strong_model = nil,                  -- /strong (nil = advisor_model)
+    escalate_on_repeated_failure = false,
+    advisor = {
+      checkpoints = { BEFORE_RUN = false, PROGRESS = true },
+      tools = 'read',                    -- 'none': briefs only
+      max_tool_steps = 4, max_tool_result_bytes = 4000,
+      answer_min_chars = 400, progress_every_steps = 8,
+      max_failure_reviews = 2, max_run_reviews = 3,
+      max_results_reviews = 3, max_edit_reviews = 12,
+      critical_globs = { '**/*loss*', '**/*metric*', '**/eval*',
+        '**/*dataset*', '**/*split*', '**/*config*', '**/*config*/**' },
+    },
+  }
+<
+The advisor answers "LGTM", up to 6 numbered points, or "BLOCK: <reason>".
+Points go back to the builder, which must address them or explain why not
+(a deferred edit re-issued unchanged is applied: the builder disagrees). A
+BLOCK (data leakage, evaluation on the wrong data, a destructive change)
+stops the action and pauses the task with the reason; it never continues by
+itself. |:CoagentResume| hands the reason to the builder (the blocked step
+did not run), a new message starts over, |:CoagentStop| ends the task.
+
+With `advisor.tools = 'read'` (default for standard / strict) the advisor
+may call read_file, search, glob, list_dir, the LSP tools, diagnostics,
+git_diff, git_status and experiments up to max_tool_steps times per
+checkpoint. Results are clipped; calls and results are appended to its own
+history (never rewritten, so its prompt cache keeps hitting).
+
+The status bar shows "adv 3✓ 1!" (3 LGTM, 1 with points) or "adv BLOCK";
+each checkpoint is a timeline item; the task summary lists the checkpoints
+and their results; :CoagentUsage shows the advisor's tokens. A one-time
+warning appears when the builder is 'auto' under supervision ('auto' may
+pick lighter models per request and breaks prompt caching): pin a model.
+
+"/strong <task>" runs one task with roles.strong_model (else the advisor
+model, with advisor_effort) as the builder, then reverts.
+escalate_on_repeated_failure = true finishes a task on that model after a
+REPEATED_FAILURE. The advisor does not review a builder running on its own
+model. Switching the builder's model costs a one-time prompt-cache miss: the
+new model has no cache for this conversation, so its first request bills
+the whole history as fresh input.
+
+Tokens: each review sends a new brief of roughly 1-4k tokens (its history
+mostly from the cache) and gets a short answer; each verification tool
+call is one more advisor request. Typical reviews per task: light 0-3,
+standard 2-6 (an ML iteration with a run about 4-6), strict several times
+standard (plus the plan phase on the advisor model). Advisor tokens count
+toward the task, session and monthly budgets; at limits.budget_warn_at the
+checkpoints still run but PROGRESS is skipped.
+
 ==============================================================================
 6. LUA API                                                 *coagent-api*
 
@@ -1126,5 +1229,7 @@ cannot override. Use a version-controlled workspace and a branch.
   require('coagent').delegate(arg)        -- "/delegate arg"
   require('coagent').receive(arg, opts)   -- "/receive arg"; opts.text
   require('coagent').controller():delegations():list()
+  require('coagent').strong(task)         -- "/strong task"
+  require('coagent').supervision(level)   -- "/supervision level"
 
  vim:tw=78:ts=8:ft=help:norl:

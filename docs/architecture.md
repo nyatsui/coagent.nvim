@@ -29,9 +29,9 @@ lua/coagent/
     context.lua                  #参照の解決・コンテキスト圧縮
     prompt.lua                   システムプロンプト（プロジェクト文書は低優先度で同梱）
     session.lua                  セッションモデル・保存/読込・中断修復
-    roles.lua                    役割プリセット（single / advisor / explorers / full）の解決
+    roles.lua                    役割プリセット（single / advisor / explorers / full）と監督レベル（light / standard / strict）の解決
     subagent.lua                 調査担当（explore ツール。読み取り専用・新規コンテキスト・並列）
-    advisor.lua                  アドバイザー（追記のみの専用履歴、PLAN / REPEATED_FAILURE / BEFORE_DONE）
+    advisor.lua                  アドバイザー（追記のみの専用履歴、節目のレビュー、LGTM / 指摘 / BLOCK の判定、読み取り専用ツールでの確認）
     changes.lua                  変更追跡・巻き戻し
     ledger.lua                   プロジェクト台帳（Markdown 5 ファイル・節ハッシュによる編集保護・digest・bundle・init/refresh/更新リクエスト）
     delegate.lua                 外部サブタスク（種類と出力形式・バンドル・サブタスクの保存・回答の解析・ダウンロードの対応付け・delegate ツール）
@@ -112,9 +112,29 @@ builder 履歴 --explore(task)--> explorer（新規履歴, headless, 並列, 読
 builder 履歴 --brief(task/plan/diff/失敗出力)--> advisor（追記のみの専用履歴）--指摘 or LGTM--> builder
 ```
 
-- PLAN: 最初の書込みツールの前。指摘があればその書込みを実行せず、指摘をツール結果として返す（再発行を促す）
-- REPEATED_FAILURE: 編集後に同じ `run_command` が 2 回失敗したとき、そのツール結果に指摘を追記
-- BEFORE_DONE: 変更があるタスクの完了直前。指摘があればユーザーメッセージとして渡し、1 度だけ作業を続行
+監督レベル（`roles.supervision`）は節目の集合です（`Roles.LEVELS`。`roles.advisor.checkpoints` で個別に上書き）。
+節目はすべて `Controller:_supervise(gen, kind, brief)` を通り、`Advisor:review` の答えを `Advisor.parse` で
+`lgtm` / `points` / `block` に分けて `task.sup`（winbar・まとめ）に記録します。
+
+| 節目 | 場所 | 指摘（points）の渡し方 |
+|---|---|---|
+| PLAN | `_execute`（最初の書込みの前）/ `_plan_ready` | 書込みを実行せず（`deferred`）ツール結果で返す |
+| CRITICAL_EDIT / EVERY_EDIT | `_execute`（書込みの前、承認より前） | 同上。同じ差分の再発行・同じファイルへの 2 回連続の指摘・`max_edit_reviews` 超過は通す |
+| BEFORE_RUN | `_execute`（`run_command` / `start_process` が実験のとき、承認より前） | 実行せず返す。実行したら `_snapshot_run` で「前回の実行からの差分」の基準を更新 |
+| FAILURE / REPEATED_FAILURE | `_execute`（`run_command` の失敗のあと、編集後のみ） | ツール結果に追記。REPEATED_FAILURE のあと `_escalate` |
+| RESULTS | 実行の終了（`run_command` の記録・`wait_process` の `meta.exited`・`stop_process`）で `task.results_pending`。次の応答の本文を `_loop` でレビュー | ツール結果のあとにユーザーメッセージ |
+| ANSWER / BEFORE_DONE | `_loop`（ツール呼び出しのない応答。変更なしなら ANSWER、ありなら BEFORE_DONE） | ユーザーメッセージで続行（各 1 回） |
+| PROGRESS | `_loop`（ツール結果のあと、`progress_every_steps` ごと。予算が `budget_warn_at` 以上なら省略） | ユーザーメッセージ |
+
+- 指摘のメッセージはすべて `Advisor review` で始まり、`_task_brief` と台帳の記録は依頼として扱いません（履歴は追記のみ）
+- BLOCK: `_block` が `_wait_resume`（`reason = 'advisor_block'`）でタスクを一時停止。再開すると止めた操作の結果
+  （またはユーザーメッセージ）として `Controller.BLOCKED` の文を渡します。新しいメッセージや停止では先へ進みません
+- アドバイザーのツール: `Advisor.TOOLS`（読み取り専用の許可リスト、`kind == 'read'` も確認、`permissions:decide` が allow のもの）。
+  毎回同じツール一覧を送り（キャッシュ）、`max_tool_steps` に達したら制限のメッセージを追記して答えを求めます。
+  失敗したチェックポイントの分の履歴は取り除きます（それより前の接頭辞は不変）
+- 作業担当のモデル: `active_model()` = フォールバック > `task.strong`（/strong・エスカレーション）> strict の計画フェーズの
+  アドバイザーのモデル > 選択中のモデル。タスクが終わると（`task.finished`）戻ります。作業担当がアドバイザーと同じモデルの間は
+  `_checkpoint_on` が偽（自分の仕事をレビューしない）
 - 調査担当は CopilotChat の headless 要求（単一ジョブ制約の外）で並列実行し、停止時は結果を破棄（ソフトキャンセル）
 - モデル選択は設定・セッションのみ（リポジトリ内の文書からは変更不可）
 
@@ -129,10 +149,12 @@ controller は UI を知らず、`events` に以下を発行します。UI は�
 | `assistant_delta` | `{item, delta}` ストリーミング差分 |
 | `tool_output` | `{item, chunk}` コマンド出力のストリーミング |
 | `approval_request` | 承認待ちの tool 項目 |
-| `done` | 完了サマリ（状態・理由・検証・変更ファイル） |
+| `done` | 完了サマリ（状態・理由・検証・変更ファイル・`supervision` = アドバイザーの節目と結果・`strong`） |
+| `supervision` | `task.sup`（`{lgtm, points, block, list}`。節目のレビューのたび） |
+| `advisor_block` | `{kind, reason}`（BLOCK で一時停止する直前） |
 | `usage`, `model`, `file_changed`, `context_compacted`, `backend_status` | 補助情報 |
 
-tool 項目は `status`（pending / awaiting_approval / running / done / failed / denied / cancelled / interrupted）、
+tool 項目は `status`（pending / awaiting_approval / running / done / failed / denied / cancelled / interrupted / deferred / blocked）、
 `title`、`summary`、`preview`（diff またはコマンド）、`decision`（承認理由・警告）、`output`/`live` を持ちます。
 
 ## UI 描画

@@ -17,12 +17,44 @@ local defaults = {
     preset = 'single',
     explorer_model = nil,
     advisor_model = nil,
+    -- With an advisor (presets 'advisor' / 'full'): how closely it supervises
+    -- the builder. nil = 'standard'. Each level is a set of checkpoints (more
+    -- checkpoints = more advisor requests, each a brief of a few k tokens plus
+    -- the advisor's growing, prompt-cached history):
+    --   'light'    PLAN, REPEATED_FAILURE, BEFORE_DONE
+    --   'standard' + ANSWER, BEFORE_RUN, RESULTS, FAILURE, CRITICAL_EDIT
+    --   'strict'   + PROGRESS, EVERY_EDIT, STRONG_PLAN (/plan runs on the advisor model)
+    -- `/supervision` changes it for the session.
+    supervision = nil,
+    -- Builder for `/strong <task>` and escalation. nil = advisor_model.
+    strong_model = nil,
+    -- After REPEATED_FAILURE, finish the task on the strong model.
+    escalate_on_repeated_failure = false,
     -- Per-role reasoning effort (nil = use `reasoning_effort`; 'off' = never send).
     builder_effort = nil,
     explorer_effort = nil,
     advisor_effort = nil,
     explorer = { max_steps = 8, max_concurrent = 2, max_summary_bytes = 6000 },
-    advisor = { on_plan = true, on_repeated_failure = true, before_done = true, max_brief_bytes = 16000 },
+    advisor = {
+      max_brief_bytes = 16000,
+      -- Override single checkpoints of the level: { BEFORE_RUN = false, PROGRESS = true, ... }
+      checkpoints = {},
+      -- 'read': the advisor may verify claims with read-only tools (read_file,
+      -- search, glob, lsp, git_diff, experiments); 'none': briefs only.
+      -- nil = 'read' for standard/strict, 'none' for light.
+      tools = nil,
+      max_tool_steps = 4, -- advisor tool calls per checkpoint
+      max_tool_result_bytes = 4000, -- each result is clipped to this
+      answer_min_chars = 400, -- ANSWER: shorter answers are not reviewed
+      max_failure_reviews = 2, -- FAILURE reviews per task
+      max_run_reviews = 3, -- BEFORE_RUN reviews per task
+      max_results_reviews = 3, -- RESULTS reviews per task
+      max_edit_reviews = 12, -- CRITICAL_EDIT / EVERY_EDIT reviews per task
+      progress_every_steps = 8, -- PROGRESS: every N builder steps
+      -- CRITICAL_EDIT: edits of matching files (workspace-relative) are
+      -- reviewed before they are applied
+      critical_globs = { '**/*loss*', '**/*metric*', '**/eval*', '**/*dataset*', '**/*split*', '**/*config*', '**/*config*/**' },
+    },
   },
   -- Switch to these models (in order) when the selected one is rate limited,
   -- out of quota or not allowed. Empty = never switch automatically.
@@ -65,13 +97,14 @@ local defaults = {
   -- Get the user's attention when the agent needs it. on: 'approval' | 'done'
   -- | 'failed' | 'paused' | 'limit' (a step/tool-call/time limit paused the task)
   -- | 'waiting' (the task delegated a subtask to another chat and waits for its result)
-  -- | 'stopped' (the agent stopped a monitored training run).
+  -- | 'stopped' (the agent stopped a monitored training run)
+  -- | 'blocked' (the advisor BLOCKed a step; the task is paused for you).
   -- bell: BEL to the terminal (tmux flags the window).
   -- desktop: notify-send (Linux) / osascript (macOS); generic text only, never
   -- prompt or code. only_when_unfocused: needs terminal focus reporting
   -- (tmux: `set -g focus-events on`), otherwise Neovim always counts as focused.
   notify = {
-    on = { 'approval', 'done', 'failed', 'limit', 'waiting', 'stopped' },
+    on = { 'approval', 'done', 'failed', 'limit', 'waiting', 'stopped', 'blocked' },
     bell = true,
     desktop = false,
     only_when_unfocused = true,
@@ -571,6 +604,13 @@ function M.setup(opts)
   end
   if opts and opts.judge and opts.judge.allowed_paths then
     M.options.judge.allowed_paths = opts.judge.allowed_paths
+  end
+  if opts and opts.roles and opts.roles.advisor and opts.roles.advisor.critical_globs then
+    M.options.roles.advisor.critical_globs = opts.roles.advisor.critical_globs
+  end
+  local sup = (M.options.roles or {}).supervision
+  if sup ~= nil and not require('coagent.agent.roles').valid_supervision(sup) then
+    vim.notify(string.format("[coagent] roles.supervision = %q is not 'light' | 'standard' | 'strict'; 'standard' is used", tostring(sup)), vim.log.levels.WARN)
   end
   if opts and opts.auto and opts.auto.protected_globs then
     M.options.auto.protected_globs = opts.auto.protected_globs
