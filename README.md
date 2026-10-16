@@ -759,11 +759,11 @@ them:
 - **`gp`** in the panel (or in the input's Normal mode) opens the output of the running process — a picker when several
   run, the most recent one that ended when none does. `<CR>` on a `start_process` item and `:CoagentProcesses` /
   `/processes` → "Show output" open the same bottom panel.
-- **Like a terminal** (default, `background.view = 'terminal'`): the output opens in a Neovim terminal running
-  `tail -F` on the process's log, so colors, tqdm bars and `\r` / cursor updates look exactly as when you run the command
+- **Like a terminal** (default, `background.view = 'terminal'`): the output opens in a Neovim terminal fed
+  from the process's log as it grows, so colors, tqdm bars and `\r` / cursor updates look exactly as when you run the command
   yourself. Background processes get `PYTHONUNBUFFERED=1`, `FORCE_COLOR=1`, `TERM=xterm-256color` and `COLUMNS=160`
   (`background.env`), so Python output arrives line by line instead of in large blocks and progress bars keep their width.
-  `q` closes it (and stops `tail`; the process keeps running). Needs `tail`; otherwise the text panel below is used
+  `q` closes it (the process keeps running)
 - **The text panel** (`background.view = 'text'`, and for short commands) shows lines as a terminal does: a tqdm progress
   bar redrawn with `\r` is one line in its current state, not thousands of lines. It **follows the end** while output arrives (`[follow]` in its header); moving or
   scrolling up pauses that (`[paused]`) so you can read, and `G` or `f` resumes it (`f` toggles, `q` closes).

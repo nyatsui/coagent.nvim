@@ -194,8 +194,9 @@ kill_term = function()
   if not t then
     return
   end
-  if t.job then
-    pcall(vim.fn.jobstop, t.job)
+  if t.timer and not t.timer:is_closing() then
+    t.timer:stop()
+    t.timer:close()
   end
   if t.buf and vim.api.nvim_buf_is_valid(t.buf) then
     pcall(vim.api.nvim_buf_delete, t.buf, { force = true })
@@ -205,24 +206,34 @@ end
 --- Can the terminal view be used for this log?
 ---@param path string?
 function M.can_view_terminal(path)
-  return path ~= nil and vim.fn.executable('tail') == 1 and vim.uv.fs_stat(path) ~= nil
+  return path ~= nil and vim.uv.fs_stat(path) ~= nil
 end
 
---- Show a log file live in a terminal (bottom split, reused).
+--- Terminal output needs CR LF: a bare LF only moves the cursor down.
+local function crlf(data)
+  return (data:gsub('\r?\n', '\r\n'))
+end
+
+--- Show a log file live in a terminal (bottom split, reused). The terminal is
+--- a process-less one (nvim_open_term) fed with the log's new bytes on a timer,
+--- so it renders colors, \r and cursor movement like any terminal without
+--- depending on the platform's `tail -F`.
 ---@param path string log file
 ---@param title string? statusline text (process id and command)
 ---@param height integer
----@param scrollback integer?
-function M.show_terminal(path, title, height, scrollback)
+---@param opts {scrollback:integer?, poll_ms:integer?}?
+function M.show_terminal(path, title, height, opts)
+  opts = type(opts) == 'table' and opts or { scrollback = opts }
   if M.term and M.term.path == path and M.term.buf and vim.api.nvim_buf_is_valid(M.term.buf) and M.visible() then
     vim.api.nvim_win_set_buf(M.win, M.term.buf)
     return M.term
   end
   local old = M.term
+  M.term = nil
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].bufhidden = 'wipe'
   pcall(function()
-    vim.bo[buf].scrollback = scrollback or 100000
+    vim.bo[buf].scrollback = opts.scrollback or 100000
   end)
   if M.visible() then
     vim.api.nvim_win_set_buf(M.win, buf)
@@ -234,29 +245,53 @@ function M.show_terminal(path, title, height, scrollback)
   vim.wo[win].number = false
   vim.wo[win].relativenumber = false
   vim.wo[win].signcolumn = 'no'
-  local job
-  vim.api.nvim_win_call(win, function()
-    vim.api.nvim_set_current_buf(buf)
-    job = vim.fn.jobstart({ 'tail', '-n', '+1', '-F', path }, { term = true })
-  end)
+  local chan = vim.api.nvim_open_term(buf, {})
+  local t = { buf = buf, chan = chan, path = path, title = title, offset = 0 }
+  local function pump()
+    if M.term ~= t or not vim.api.nvim_buf_is_valid(buf) then
+      return
+    end
+    local st = vim.uv.fs_stat(path)
+    if not st then
+      return
+    end
+    if st.size < t.offset then
+      t.offset = 0 -- rotated / truncated
+    end
+    if st.size == t.offset then
+      return
+    end
+    local fd = vim.uv.fs_open(path, 'r', 438)
+    if not fd then
+      return
+    end
+    local data = vim.uv.fs_read(fd, st.size - t.offset, t.offset)
+    vim.uv.fs_close(fd)
+    if data and #data > 0 then
+      t.offset = t.offset + #data
+      pcall(vim.api.nvim_chan_send, chan, crlf(data))
+    end
+  end
+  t.timer = vim.uv.new_timer()
+  t.timer:start(0, opts.poll_ms or 200, vim.schedule_wrap(pump))
+  t.pump = pump
   local label = (title or vim.fn.fnamemodify(path, ':t')):gsub('%%', '%%%%')
   vim.wo[win].statusline = '%#CoagentDim# ' .. label .. '  ·  q close  ·  log: ' .. vim.fn.fnamemodify(path, ':~:.'):gsub('%%', '%%%%') .. ' %='
   vim.keymap.set('n', 'q', function()
     M.close()
   end, { buffer = buf, nowait = true, desc = 'Close the process output' })
-  M.term = { buf = buf, job = job, path = path, title = title }
+  M.term = t
   M.item = nil
-  if old and old.buf ~= buf then
-    if old.job then
-      pcall(vim.fn.jobstop, old.job)
+  if old then
+    if old.timer and not old.timer:is_closing() then
+      old.timer:stop()
+      old.timer:close()
     end
-    if old.buf and vim.api.nvim_buf_is_valid(old.buf) then
+    if old.buf and old.buf ~= buf and vim.api.nvim_buf_is_valid(old.buf) then
       pcall(vim.api.nvim_buf_delete, old.buf, { force = true })
     end
   end
-  -- the terminal follows the end by itself; jump there once
-  pcall(vim.api.nvim_win_set_cursor, win, { vim.api.nvim_buf_line_count(buf), 0 })
-  return M.term
+  return t
 end
 
 function M.close()

@@ -247,8 +247,8 @@ local defaults = {
     max_log_bytes = 50 * 1024 * 1024, -- then rotated once (<name>.log.1 has the previous part)
     keep_logs = 50, -- logs of the newest runs kept after they end; older ones are deleted
     -- How a background process's output is shown (gp, <CR> on its item,
-    -- :CoagentProcesses): 'terminal' = a Neovim terminal running `tail -F` on
-    -- its log, so colors, tqdm bars and \r updates look exactly as in your
+    -- :CoagentProcesses): 'terminal' = a Neovim terminal fed from
+    -- the process's log, so colors, tqdm bars and \r updates look exactly as in your
     -- terminal; 'text' = the plain output panel.
     view = 'terminal',
     -- Environment for background processes, on top of commands.env: unbuffered

@@ -347,7 +347,7 @@ describe('watching from the panel', function()
     assert(ok, err)
   end)
 
-  it('shows a background process like a terminal: tail -F of its log with colors and \\r intact', function()
+  it('shows a background process like a terminal: a terminal fed from its log, colors and \\r intact', function()
     local c = agent.controller()
     local out = require('coagent.ui.output')
     local p = start(c, [[printf '\033[32mgreen\033[0m\n'; printf 'step 1\rstep 2\rstep 3\n'; sleep 30]])
@@ -358,20 +358,22 @@ describe('watching from the panel', function()
     assert.is_truthy(out.term, 'terminal view expected')
     local buf = out.term.buf
     assert.are.equal('terminal', vim.bo[buf].buftype)
+    -- the log header repeats the command (with "green" and "step 3" in it):
+    -- wait for the output lines themselves
     h.wait(function()
       local text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), '\n')
-      return text:find('step 3', 1, true) ~= nil
+      return text:find('\nstep 3', 1, true) ~= nil
     end)
     local text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), '\n')
-    assert.is_truthy(text:find('green', 1, true), text)
+    assert.is_truthy(text:find('\ngreen', 1, true), text)
     assert.is_falsy(text:find('\27[32m', 1, true), text) -- the terminal rendered the color code
     assert.is_truthy(text:find('\nstep 3', 1, true), text)
     assert.is_falsy(text:find('\nstep 1', 1, true), text) -- \r overwrote the line, as in a terminal
-    -- q closes it and stops tail
-    local job = out.term.job
+    -- q closes it and stops reading the log
+    local timer = out.term.timer
     out.close()
     assert.is_nil(out.term)
-    assert.are.equal(-3, vim.fn.jobwait({ job }, 0)[1]) -- invalid job id: stopped
+    assert.is_true(timer:is_closing())
     c.processes:stop(p.id)
   end)
 
