@@ -551,21 +551,32 @@ function Term:exec(spec, cb)
     end
     local now = util.now()
     if not f.sent then
-      local why = self:_busy_reason()
+      local why = not f.sb_ready_at and self:_busy_reason() or nil
       if why then
         if now - started >= (spec.busy_wait_ms or cfg.busy_wait_ms) then
           finish({ error = 'the terminal is busy: ' .. why })
         end
         return
       end
-      self.inflight = f
+      if not f.sb_ready_at then
+        -- Raise 'scrollback' first and send on a later poll: Neovim resizes
+        -- the terminal's scrollback storage on its next refresh, and fast
+        -- output (thousands of lines in a few ms on Linux) arriving before
+        -- that is pushed into the old, small storage and lost.
+        self.inflight = f
+        saved_sb = vim.bo[self.buf].scrollback
+        pcall(function()
+          vim.bo[self.buf].scrollback = math.max(saved_sb or 0, cfg.scrollback)
+        end)
+        mark_windows()
+        f.sb_ready_at = now + (cfg.scrollback_settle_ms or 60)
+        return
+      end
+      if now < f.sb_ready_at then
+        return
+      end
       f.sent = true
       f.sent_at = now
-      saved_sb = vim.bo[self.buf].scrollback
-      pcall(function()
-        vim.bo[self.buf].scrollback = math.max(saved_sb or 0, cfg.scrollback)
-      end)
-      mark_windows()
       local line = string.format(" printf '__COAGENT_%%s_S__\\n' %s; %s; printf '\\n__COAGENT_%%s_%%s__\\n' %s $?", id, spec.body, id)
       local ok, err = pcall(vim.api.nvim_chan_send, self.chan, '\21' .. line .. '\n')
       if not ok then
