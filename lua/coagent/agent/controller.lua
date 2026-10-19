@@ -99,6 +99,9 @@ function Controller.new(opts)
 end
 
 function Controller:dispose()
+  if self.loop then
+    self.loop:stop(nil, true)
+  end
   self:stop('dispose')
   self.processes:kill_all()
   if self.terminal then
@@ -2353,6 +2356,12 @@ function Controller:_request(gen)
     if t.name == 'use_skill' and not self.task.skills_section then
       return false
     end
+    if t.name == 'loop_control' and not (self.loop and self.loop:active()) then
+      return false
+    end
+    if t.name == 'ledger' and not (self.ledger and self.ledger:enabled()) then
+      return false
+    end
     local tool = self.registry:get(t.name)
     return not (forced and tool and tool.kind ~= 'read' and not forced[t.name])
   end, self.registry:schemas(function(kind)
@@ -2535,6 +2544,8 @@ function Controller:_tool_ctx(item, gen)
     config = self.config,
     skills = self.skills,
     experiments = self.experiments,
+    ledger = self.ledger,
+    loop = self.loop,
     changes = self.session.changes,
     source = self.source,
     item = item,

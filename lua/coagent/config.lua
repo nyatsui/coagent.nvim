@@ -130,6 +130,12 @@ local defaults = {
   -- Workspace root. nil = git root of cwd, or cwd.
   root = nil,
 
+  -- Settings changed from inside Neovim (/config set, /update-config,
+  -- /config edit) are saved here as JSON and applied on top of setup() opts
+  -- at every start. nil = stdpath('state')/coagent/settings.json; false = off.
+  -- Point it into your dotfiles to keep the changes there.
+  settings_file = nil,
+
   limits = {
     -- Brakes against runaway loops (every request resends the history and
     -- costs tokens). Reaching one of these three PAUSES the task;
@@ -427,15 +433,20 @@ local defaults = {
 
   -- Project ledger: the single source of truth about the ongoing work, kept
   -- per project across sessions as Markdown files you can edit (overview,
-  -- goals, status, decisions, subtasks) in
+  -- goals, status, methods, decisions, findings, subtasks) in
   -- stdpath('state')/coagent/ledger/<project>/ (0700/0600, outside the repo).
   -- /ledger init generates overview.md with ONE request (coagent reads the
   -- core files itself; no tools); /ledger refresh regenerates it when files it
-  -- lists change. After each finished task, imported result or background
-  -- experiment, ONE small request appends to subtasks.md / decisions.md and
-  -- rewrites status.md (sections you edited are never overwritten: /ledger
-  -- review shows the diff). Local tasks get a compact digest (goals, status,
-  -- recent decisions) appended to their first message, once per change.
+  -- lists change; /ledger capture (ONE request) reads the chat, earlier
+  -- sessions, the code, docs and notebooks and fills methods.md (data,
+  -- loading, preprocessing, training, evaluation, visualization, conventions),
+  -- decisions and findings. After each finished task, imported result or
+  -- background experiment, ONE small request appends to subtasks.md /
+  -- decisions.md / findings.md, updates methods.md and rewrites status.md
+  -- (sections you edited are never overwritten: /ledger review shows the
+  -- diff; /ledger undo restores the snapshot taken before each write). Local
+  -- tasks get a compact digest (goals, status, methods, recent decisions and
+  -- findings) appended to their first message, once per change.
   -- The ledger is context data: it cannot change permissions, modes or models.
   ledger = {
     enabled = true,
@@ -447,12 +458,37 @@ local defaults = {
     inject = true, -- digest in local agent tasks
     model = nil, -- init / refresh model (nil = the selected model)
     update_model = nil, -- model of the small update request (nil = the selected model)
-    recent = 10, -- entries of decisions / subtasks shown in full in views and bundles
+    recent = 10, -- entries of decisions / findings / subtasks shown in full in views and bundles
     digest_decisions = 5, -- recent decisions in the digest (one line each)
-    digest_max_bytes = 6000,
+    digest_findings = 8, -- recent findings in the digest (one line each)
+    digest_method_bytes = 800, -- per methods.md section in the digest (the agent reads the rest with the ledger tool)
+    digest_max_bytes = 10000,
+    update_methods_bytes = 8000, -- methods.md text sent with the update after a task
+    -- /ledger capture (ONE request): what to keep, read from the chat, the
+    -- code and the docs (quality first: the budgets are generous)
+    capture_model = nil, -- nil = ledger.model, else roles.strong_model, else the selected model
+    capture_chat_bytes = 60 * 1024, -- this session's conversation
+    capture_sessions = 5, -- earlier saved sessions of the project read by `capture sessions` (newest first)
+    capture_sessions_bytes = 40 * 1024,
+    capture_max_bytes = 120 * 1024, -- code, docs and notebooks
+    history_max = 20, -- snapshots kept for /ledger undo
     init_max_bytes = 160 * 1024, -- core file text sent by /ledger init (quality first)
     max_file_bytes = 24 * 1024, -- per file
     tree_max_entries = 300, -- lines of the directory tree
+  },
+
+  -- /loop [interval] [xN] <prompt or /command>: run it again and again in the
+  -- session (like Claude Code's /loop). With an interval, the next iteration
+  -- starts that long after the previous one ended; without one the agent
+  -- schedules each next run itself (loop_control tool) or the loop ends.
+  -- Iterations start only when the agent is idle and are normal tasks (the
+  -- token budgets apply). Not saved with the session.
+  loop = {
+    max_iterations = 20, -- per loop (/loop 30m x50 ... overrides)
+    min_interval = 60, -- seconds; shortest interval / self-paced delay
+    max_interval = 86400, -- longest self-paced delay
+    default_delay = 600, -- self-paced delay when the agent gives none with "continue"
+    idle_retry = 30, -- seconds between checks while the agent is busy or paused
   },
 
   -- External subtasks: hand heavy work (result analysis and planning, larger
@@ -638,6 +674,7 @@ M.options = vim.deepcopy(defaults)
 
 ---@param opts table?
 function M.setup(opts)
+  M.user_opts = opts or {}
   M.options = vim.tbl_deep_extend('force', vim.deepcopy(defaults), opts or {})
   -- Lists must replace, not merge, so users can shrink them.
   if opts and opts.auto and opts.auto.allowed_commands then
@@ -694,6 +731,22 @@ function M.setup(opts)
   check('reasoning_effort', M.options.reasoning_effort)
   for _, role in ipairs(Roles.ROLES) do
     check('roles.' .. role .. '_effort', (M.options.roles or {})[role .. '_effort'])
+  end
+  -- /config set, /update-config: saved settings on top of opts
+  local Settings = require('coagent.agent.settings')
+  M.overrides = Settings.read(M.options)
+  Settings.apply(M.options, M.overrides)
+  return M.options
+end
+
+--- Rebuild the options from setup() opts + the settings file, keeping the
+--- same tables (modules hold references to them).
+function M.reload()
+  local live = M.options
+  M.setup(M.user_opts or {})
+  if live and live ~= M.options then
+    require('coagent.agent.settings').sync(live, M.options)
+    M.options = live
   end
   return M.options
 end

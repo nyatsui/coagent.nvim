@@ -150,6 +150,15 @@ M.COMMANDS = {
     end,
   },
   {
+    name = 'loop',
+    args = '[interval] [xN] <prompt|/command> | stop | now',
+    desc = 'Run a prompt again and again: every interval (30m, 2h), or self-paced by the agent without one',
+    complete = { 'stop', 'now', '10m', '30m', '1h' },
+    run = function(arg)
+      return app().loop(arg)
+    end,
+  },
+  {
     name = 'new',
     desc = 'Start a new session',
     run = function()
@@ -230,6 +239,23 @@ M.COMMANDS = {
     complete = { 'tokens', 'credits', 'session', 'month', 'off', 'default' },
     run = function(arg)
       app().budget(arg)
+    end,
+  },
+  {
+    name = 'config',
+    args = '[get|set|unset|edit|path ...]',
+    desc = 'Settings changed here (saved in settings_file, applied at once): show, get, set, unset, edit',
+    complete = { 'get', 'set', 'unset', 'edit', 'path' },
+    run = function(arg)
+      return app().config_cmd(arg)
+    end,
+  },
+  {
+    name = 'update-config',
+    args = '<request>',
+    desc = 'Change settings in plain words: the model proposes, you apply or cancel (1 request)',
+    run = function(arg)
+      return app().update_config(arg)
     end,
   },
   {

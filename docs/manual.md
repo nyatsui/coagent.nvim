@@ -114,7 +114,9 @@
 | `/skills [enable\|disable <name>\|reload]` | Agent Skills の一覧 / このセッションだけ有効・無効（[Agent Skills](#agent-skills)） |
 | `/skill <name> [task]` | スキルを最初から読み込んでタスクを実行 |
 | `/exp [show\|diff\|note\|compare\|run ...]` | 実験ログ（[実験ログ](#実験ログexp)。ローカルのみ、リクエストなし） |
-| `/ledger [init\|refresh[!]\|note\|decision\|update\|review\|log\|open\|bundle\|info ...]` | プロジェクト台帳（[プロジェクト台帳](#プロジェクト台帳ledger)。リクエストを送るのは init / refresh / update だけ） |
+| `/ledger [init\|refresh[!]\|capture\|note\|decision\|finding\|update\|review\|undo\|log\|open\|bundle\|info ...]` | プロジェクト台帳（[プロジェクト台帳](#プロジェクト台帳ledger)。リクエストを送るのは init / refresh / capture / update だけ） |
+| `/loop [間隔] [xN] <プロンプト\|/コマンド>\|stop\|now` | 繰り返し実行（[繰り返し実行](#繰り返し実行loop)） |
+| `/config [get\|set\|unset\|edit\|path ...]` / `/update-config <依頼>` | 設定の表示と変更 / 普通の言葉で変更（[設定の変更](#設定の変更config--update-config)） |
 | `/delegate <種類> [指示]\|list\|open\|cancel\|detach` / `/receive [id]` | 別のチャットに任せる / 結果を取り込む（[サブタスクを別のチャットに任せる](#サブタスクを別のチャットに任せるdelegate--receive)。ローカルのみ） |
 | `/new` `/sessions` `/model [role]` `/mode [mode]` `/roles [preset]` | 対応する `:Coagent*` コマンドと同じ |
 | `/judge [log [n]\|clear]` | judge モードの判定一覧 / キャッシュした判定を忘れる（`:CoagentJudge` と同じ。[6. モードとモデル](#6-モードとモデル)。ローカルのみ） |
@@ -221,13 +223,14 @@ ML の学習・評価の実行とメトリクスをプロジェクトごとに�
 
 ### プロジェクト台帳（`/ledger`）
 
-進行中の作業の全体像（概要・目標・決定・サブタスクの履歴・現状）を、プロジェクトごとの Markdown ファイルに
+進行中の作業の全体像（概要・目標・実験手法・決定・知見・サブタスクの履歴・現状）を、プロジェクトごとの Markdown ファイルに
 coagent がセッションをまたいで保ちます。長いチャットで前のことを忘れないため、また別のチャットへ仕事を任せるときに
 全体像ごと渡すための記録です。
 
 - ファイル: `overview.md`（目的・ディレクトリ構成・各ファイルの役割・データの流れ・設定とハイパーパラメータ・実行方法・
   出力と指標）、`goals.md`（目標・目標指標・制約。あなたが書く）、`status.md`（現状・最良結果・未解決の課題・次の一手。
-  更新のたびに書き直し）、`decisions.md` と `subtasks.md`（追記のみ）
+  更新のたびに書き直し）、`methods.md`（実験のやり方: データ・読み込み・前処理・モデルと学習・評価・可視化・決まりごと）、
+  `decisions.md`・`findings.md`（分かったこと: うまくいった・いかなかった理由、検証した仮説、落とし穴）・`subtasks.md`（追記のみ）
 - 保存先: `stdpath('state')/coagent/ledger/<project>-<hash>/`（0700 / 0600、リポジトリ外）。
   `ledger.dir_in_repo = '.coagent/ledger'` でリポジトリ内（`.gitignore` に `.coagent/` を追加するか、共有するならコミット）
 - まず `/ledger init` — ディレクトリ構成と中核ファイル（README・requirements・`train*.py`・model / dataset / loss /
@@ -235,21 +238,52 @@ coagent がセッションをまたいで保ちます。長いチャットで前
   ファイルとバイナリは送りません
 - 概要に載ったファイルが変わると、次のタスク開始時に一度だけ「古くなった」と警告します。`/ledger refresh`（1 リクエスト。
   変化がなければ送らない）、`/ledger refresh!` は強制
+- `/ledger capture` — **これまでのチャット・コード・ドキュメントから残すべきことを読み取ります**（1 リクエスト、ツールなし）。
+  このセッションの会話、このプロジェクトの直近の保存済みセッション（5 件）、データ読み込み・前処理・評価・図を書いていそうな
+  コード・ドキュメント・ノートブック（出力は除く）を集め、`methods.md`・まだ空の `goals.md` の節・新しい決定と知見・状況を
+  書きます。`/ledger capture chat` や `/ledger capture @src/data notebooks/eda.ipynb` で対象を絞れます。送る前に推定トークン数を表示
 - タスクの完了・取り込んだ外部の結果・バックグラウンド実験の終了のたびに、**小さな 1 リクエスト**で `subtasks.md` と
-  （本当に決めたことがあれば）`decisions.md` に追記し、`status.md` を書き直します（`ledger.auto_update = true`。台帳を
+  （本当に決めたこと・分かったことがあれば）`decisions.md`・`findings.md` に追記し、タスクが変えた `methods.md` の節を更新し、
+  `status.md` を書き直します（`ledger.auto_update = true`。台帳を
   作ってからだけ）。`false` なら自動では送らず、`/ledger note <text>`・`/ledger decision <題> [-- 理由 [-- 退けた案]]`・
   ファイルの直接編集・`/ledger update`（直前のタスクを 1 リクエストで記録）で更新します
 - `/ledger` — `goals.md` と `status.md` を右の分割で開いて編集。`/ledger open decisions` などで他のファイル
 - **あなたの編集が優先**: 編集した節は上書きしません。更新は保留され、`/ledger review` で差分（あなたの文 → 提案）を見て
   「適用」「自分の版を残す」「後で」を選びます。未保存のバッファがあるファイルにも書きません
+- `/ledger finding <題> [-- 根拠]` — 知見を追記（リクエストなし）。エージェントも `ledger` ツールで「覚えておいて」と
+  言われたことを記録し、台帳のファイル全体を読めます
+- `/ledger undo` — coagent の直前の書き込み（capture・更新・エージェントのツール）の前に戻す。繰り返し使えます（20 個まで）
 - `/ledger log` — 直近 10 件（`recent`）は全文、それより古いものは 1 件 1 行。ファイル自体は全履歴を残します
 - `/ledger bundle` — 台帳全体を Markdown で `+` レジスタへ（別のチャットに貼る）。Lua からは
   `require('coagent').ledger.bundle(opts)`
-- ローカルのタスクには、目標・状況・直近の決定の要約を最初のメッセージに `<project_ledger>` として付けます（優先度の低い
+- ローカルのタスクには、目標・状況・実験手法・直近の決定と知見の要約を最初のメッセージに `<project_ledger>` として付けます（優先度の低い
   メモの扱い。変化したときだけ一度。システムプロンプトは変えないのでキャッシュが効きます）。パネルでは
   `(+ project ledger digest)` と表示。`ledger.inject = false` で無効
 - 台帳はモデルが書いた文を含む「データ」です。権限・モード・モデルは変えられません
 - `:CoagentLedger …` も同じ
+
+### 繰り返し実行（`/loop`）
+
+プロンプトやスラッシュコマンドを繰り返し実行します（Claude Code の `/loop` と同じ考え方）。
+
+- `/loop 30m 学習ログを確認して報告して` — 前の回が終わってから 30 分ごと。`90s`・`2h`・`1d`・`1h30m` も可
+- `/loop 2h x6 /ledger capture chat` — コマンドを最大 6 回（コマンドには間隔が必要）
+- `/loop val_acc が 0.92 を超えるまで調整を続けて` — 間隔なし: エージェントが `loop_control` で次の時期を決めるか終える。
+  呼ばなければ終わります
+- `/loop` で状態、`/loop now` で次の回をすぐ、`/loop stop` で終了。`/stop`・`/new`・失敗した回でも終わります
+- エージェントが空いているときだけ始まり、各回は普通のタスクです（承認・トークン予算が効く）。上限は `xN` か
+  `loop.max_iterations`（20）。ウィンドウバーに `loop 3/20 14:05`。セッションには保存しません
+- 1 本の学習を見守るだけなら `wait_process` の見守りのほうが安く済みます
+
+### 設定の変更（`/config` / `/update-config`）
+
+`setup()` の設定を土台に、あとから変えた設定を 1 つの JSON（`settings_file`。既定 `stdpath('state')/coagent/settings.json`）に
+保存して重ね、すぐ反映します。
+
+- `/config` で変更した設定の一覧、`/config get limits` で値、`/config set limits.max_task_tokens 300000`、
+  `/config unset <パス>` で元に戻す、`/config edit` でファイルを開く（保存で読み込み直し）
+- `/update-config 1タスクのトークン上限を30万にして` — 1 リクエストでモデルが変更案を出し、`パス: 変更前 -> 変更後` を見て
+  「Apply」か「Cancel」を選びます。存在しない設定や型の違いは拒否し、承認なしで実行される範囲を変える設定には印を付けます
 
 ### サブタスクを別のチャットに任せる（`/delegate` / `/receive`）
 

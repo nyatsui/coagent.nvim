@@ -58,10 +58,18 @@ I'll find the `add` implementation and its tests.
   過去のベストとの比較を返します。続けるか止めるかはエージェントが判断（固定の時間制限なし）。`/exp` で前回・ベストとの差分つきの表、
   `/exp compare` で Web チャットに貼る Markdown の比較をコピー。エージェントは `experiments` ツールで読める。
   リクエストは使わない
-- **プロジェクト台帳（ledger）** — プロジェクトごとに 1 つの Markdown の記録（概要・目標・状況・決定・サブタスク）を
-  coagent がセッションをまたいで保ちます。`/ledger init` で概要を 1 リクエストで作成し、タスク完了・外部結果の取り込み・
-  実験のたびに小さな 1 リクエストで更新。ローカルのタスクには要約（digest）を渡し、`ledger.bundle()` で全体像を他の
-  チャットへ渡せます。あなたが編集した部分は差分を見せずに上書きしません
+- **プロジェクト台帳（ledger）** — プロジェクトごとに 1 つの Markdown の記録（概要・目標・状況・実験手法・決定・知見・
+  サブタスク）を coagent がセッションをまたいで保ちます。`/ledger init` で概要を 1 リクエストで作成。`/ledger capture` は
+  チャット・過去のセッション・コード・ドキュメント・ノートブックを読み、実験のやり方（データ・読み込み・前処理・学習・
+  評価・可視化）、決めたこと、分かったことを記録します。タスク完了・外部結果の取り込み・実験のたびに小さな 1 リクエストで
+  更新。ローカルのタスクには要約（digest）を渡し、`ledger.bundle()` で全体像を他のチャットへ渡せます。あなたが編集した
+  部分は差分を見せずに上書きせず、coagent の直前の書き込みは `/ledger undo` で戻せます
+- **繰り返し実行（`/loop`）** — プロンプトやスラッシュコマンドを繰り返し実行します。間隔を指定する（`/loop 30m 学習ログを
+  確認して`）か、間隔なしでエージェントが次の実行時期を決めて（`loop_control`）目的を達するまで続けます。エージェントが
+  空いているときだけ、最大 `loop.max_iterations` 回、トークン予算の範囲で動きます
+- **Neovim の中から設定を変更（`/config`, `/update-config`）** — `/config set limits.max_task_tokens 300000`、または普通の
+  言葉で `/update-config 1タスクのトークン上限を30万にして`。モデルが変更案を出し、変更前 → 変更後を見て適用か取り消しを
+  選びます。`setup()` の設定の上に重ねる 1 つの JSON ファイルに保存し、すぐ反映します
 - **サブタスクを別のチャットに任せる** — `/delegate analyze|implement|fix|review` が、手で操作する Web チャット向けの自己完結した
   バンドル（台帳、ソース全文、環境、git diff、コマンド出力の全文、添付、出力形式。`bundle.md` は添付用の 1 ファイル版）を git に無視される
   `.coagent/delegate/<id>/`（または `~/coagent/`）に書き出し、`/receive` がダウンロードしたファイルを
@@ -302,7 +310,9 @@ vim.keymap.set('x', '<leader>ai', ':CoagentInline<CR>', { desc = 'Coagent inline
 | `/skills [enable\|disable <name>\|reload]` | Agent Skills の一覧（パス、user / repo）。このセッションだけ有効 / 無効を切替（下記「Agent Skills」） |
 | `/skill <name> [task]` | スキルを最初から読み込んだ状態でタスクを実行 |
 | `/exp [show\|diff\|note\|compare\|run\|watch\|unwatch ...]` | 実験ログ: 表・詳細・差分・メモ・Markdown の比較・実行の記録（ローカルのみ、リクエストなし）。実行中の `/exp run` をエージェントの見守りに渡す（下記「実験ログ」） |
-| `/ledger [init\|refresh[!]\|note\|decision\|update\|review\|log\|open\|bundle\|info ...]` | プロジェクト台帳: ファイルを開く・概要の生成と更新・メモと決定の追記・編集した節への更新の確認（下記「プロジェクト台帳」。リクエストを送るのは init / refresh / update だけ） |
+| `/ledger [init\|refresh[!]\|capture\|note\|decision\|finding\|update\|review\|undo\|log\|open\|bundle\|info ...]` | プロジェクト台帳: ファイルを開く・概要の生成と更新・チャットやコードやドキュメントからの実験手法・決定・知見の取り込み・メモの追記・編集した節への更新の確認・取り消し（下記「プロジェクト台帳」。リクエストを送るのは init / refresh / capture / update だけ） |
+| `/loop [間隔] [xN] <プロンプト\|/コマンド>\|stop\|now` | プロンプトやコマンドを繰り返し実行: 一定間隔、または間隔なしでエージェントが次の時期を決める（下記「繰り返し実行」） |
+| `/config [get\|set\|unset\|edit\|path ...]` / `/update-config <依頼>` | 設定の表示と変更（`settings_file` に保存してすぐ反映）/ 普通の言葉で設定を変更（1 リクエスト。適用か取り消しを選ぶ。下記「Neovim の中から設定を変更」） |
 | `/delegate <種類> [指示]\|list\|open\|cancel\|detach` | 手で操作する別のチャット向けにサブタスクのバンドルを作る（「サブタスクを別のチャットに任せる」参照。ローカル、リクエストなし） |
 | `/receive [id] [paste\|clipboard\|files]` | 結果を取り込む: 貼り付けたテキストやダウンロードしたファイル。変更はすべてレビュー付き |
 | `/new` / `/sessions` | 新規セッション / 保存済みセッション一覧 |
@@ -770,8 +780,9 @@ tqdm の postfix の `loss=0.41` は終わったバーごとに 1 回数えら�
 ### プロジェクト台帳（/ledger）
 
 長いチャットは遅くなり、前のことを忘れます。台帳（ledger）は、プロジェクトで進行中の作業についての唯一の情報源です。
-コードが何をしているか、何を目指しているか、何をなぜ決めたか、各サブタスクで何をしたか、いまどこにいるか — を
-coagent がセッションをまたいで保つので、新しいタスクも（サブタスクを任せる別のチャットも）全体像から始められます。
+コードが何をしているか、何を目指しているか、実験をどう進めているか、何をなぜ決めたか、何が分かったか、各サブタスクで
+何をしたか、いまどこにいるか — を coagent がセッションをまたいで保つので、新しいタスクも（サブタスクを任せる別の
+チャットも）全体像から始められます。
 
 **ファイル**。安定した `## ` 見出しを持つ普通の Markdown です。あなたが編集し、coagent が更新します。
 
@@ -780,7 +791,9 @@ coagent がセッションをまたいで保つので、新しいタスクも（
 | `overview.md` | 目的、ディレクトリ構成、各ファイルの役割、データの流れ（dataset → dataloader → model → loss / optimizer → 学習ループ → 評価 → 出力）、設定とハイパーパラメータ、実行方法、出力と指標 | `/ledger init`、`/ledger refresh` |
 | `goals.md` | 現在の目標、目標指標、制約 | あなた（書き換えません） |
 | `status.md` | 現状、これまでの最良結果、未解決の課題、次の一手 | 更新のたびに書き直し |
-| `decisions.md` | 追記のみ: `### D-<n> · <日付> · <題>` と決定内容・理由・退けた案・出どころ | 更新、`/ledger decision` |
+| `methods.md` | 実験のやり方: Data（データ）、Data loading（読み込み）、Preprocessing（前処理）、Model and training（モデルと学習）、Evaluation（評価）、Visualization（可視化）、Conventions（決まりごと）。ファイル・関数・コマンド・パラメータ・指標の定義・図を具体的に | `/ledger capture`、更新（タスクが変えた節だけ）、エージェントの `ledger` ツール、あなた |
+| `decisions.md` | 追記のみ: `### D-<n> · <日付> · <題>` と決定内容・理由・退けた案・出どころ | 更新、`/ledger capture`、`/ledger decision` |
+| `findings.md` | 追記のみ: `### F-<n> · <日付> · <題>` と知見・根拠・出どころ。うまくいったこと、いかなかったことと理由、検証した仮説、落とし穴 | 更新、`/ledger capture`、`/ledger finding`、エージェント |
 | `subtasks.md` | 追記のみ: `### S-<n> · <日付> · <種類> · <題>`（種類は `local` / `delegated` / `experiment` / `note`）と依頼・結果・変更ファイル・結末 | 更新、`/ledger note` |
 
 **保存先**。`stdpath('state')/coagent/ledger/<project>-<hash>/` — リポジトリの外、ディレクトリ 0700、ファイル 0600
@@ -793,7 +806,8 @@ coagent がセッションをまたいで保つので、新しいタスクも（
 |---|---|---|
 | `/ledger init` | 1 回、ツールなし | ディレクトリ構成と中核ファイル（README、pyproject / requirements、`train*.py`、model / dataset / loss / config 系、設定ファイルなど）を coagent 自身が読み（品質優先: 合計 `init_max_bytes` = 160 KB まで、1 ファイル `max_file_bytes` まで。`.env` などの保護ファイルとバイナリは送らず、秘密情報はマスク）、モデルが `overview.md` を書きます。概要がバッククォートで挙げたファイルは指紋（sha256 + mtime）を記録します |
 | `/ledger refresh` | 1 回、古くなったときだけ | 概要に載っているファイルが変わった・消えたとき（次のタスク開始時に一度だけ `Ledger overview is stale: 2 files it lists changed (...)` と警告）。現在の概要と変わったファイルを渡します。`/ledger refresh!` は変化がなくても作り直します |
-| タスク完了・外部結果の取り込み・バックグラウンド実験の終了後 | 小さな 1 回、ツールなし | `ledger.auto_update = true` のとき。サブタスクの記録、本当に決めたことがあれば決定、`status.md` の書き直し。変更ファイルと結末はモデルではなく coagent が書きます。タスク中の実験はそのタスクの記録に含めます。リクエストが失敗したら簡易な記録だけを書き、`status.md` は変えません |
+| `/ledger capture` | 1 回、ツールなし | **すでにある材料から、残すべきことを読み取ります**。coagent が、このセッションの会話（プロンプトと回答は全文、ツール呼び出しは 1 行、コマンド出力は末尾）、このプロジェクトの直近の保存済みセッション（`capture_sessions` = 5 件）、データの読み込み・前処理・評価・図を書いていそうなコード・ドキュメント・ノートブック（`data`・`loader`・`transform`・`eval`・`metric`・`plot` などの名前、`.ipynb` は出力を除いたセル。合計 `capture_max_bytes` = 120 KB まで、秘密情報はマスク、保護ファイルは送らない）を集めます。モデル（`capture_model`、なければ `roles.strong_model`、なければ選択中のモデル）が `methods.md`、`goals.md` のまだ空の節、まだ記録されていない決定と知見、状況を書きます。送る前に入力の大きさと推定トークン数を表示します |
+| タスク完了・外部結果の取り込み・バックグラウンド実験の終了後 | 小さな 1 回、ツールなし | `ledger.auto_update = true` のとき。サブタスクの記録、本当に決めたこと・分かったことがあれば決定と知見、タスクが確立・変更した `methods.md` の節、`status.md` の書き直し。変更ファイルと結末はモデルではなく coagent が書きます。タスク中の実験はそのタスクの記録に含めます。リクエストが失敗したら簡易な記録だけを書き、`status.md` は変えません |
 
 自動更新は台帳ができてから（`/ledger` か `/ledger init` で作成）だけ行います。`auto_update = false` なら自動では何も
 送りません。`/ledger note`・`/ledger decision`・ファイルの直接編集、または `/ledger update`（直前に終わったタスクを
@@ -804,13 +818,16 @@ coagent がセッションをまたいで保つので、新しいタスクも（
 | コマンド | 内容 |
 |---|---|
 | `/ledger` | `goals.md` と `status.md` を右の分割で開いて編集（台帳がなければ作成）し、状態を表示 |
-| `/ledger open <file>` | `overview` / `goals` / `status` / `decisions` / `subtasks` をその分割で開く |
+| `/ledger open <file>` | `overview` / `goals` / `status` / `methods` / `decisions` / `findings` / `subtasks` をその分割で開く |
 | `/ledger init` / `refresh[!]` | 概要の生成 / 更新（上記） |
+| `/ledger capture [chat\|sessions\|code\|docs\|all] [パス]` | 残すべきことの取り込み（上記）。引数なしは 4 つすべて。`/ledger capture @src/data notebooks/eda.ipynb` はそのファイル・フォルダ（とこのチャット）を読む |
 | `/ledger note <text>` | `subtasks.md` に `note` を追記（リクエストなし） |
 | `/ledger decision <題> [-- 理由 [-- 退けた案]]` | 決定を追記（リクエストなし） |
+| `/ledger finding <題> [-- 根拠]` | 知見を追記（リクエストなし） |
 | `/ledger update` | 直前に終わったタスクをいま記録（1 リクエスト。`auto_update = false` 向け） |
 | `/ledger review` | あなたが編集した節への保留中の更新: 差分（あなたの文 → 提案）を見せ、適用 / 自分の版を残す / 後で、を選ぶ |
-| `/ledger log [decisions\|subtasks]` | 上限つきの表示: 直近 `recent`（10）件は全文、それより古いものは 1 件 1 行 |
+| `/ledger undo` | coagent の直前の書き込み（capture、更新、エージェントのツール、`/ledger finding`）の前の状態に戻す。繰り返し使え、`.history/` に `history_max`（20）個まで保存 |
+| `/ledger log [decisions\|findings\|subtasks]` | 上限つきの表示: 直近 `recent`（10）件は全文、それより古いものは 1 件 1 行 |
 | `/ledger bundle` | 台帳全体を Markdown で `+` レジスタへ（別のチャットに貼る用） |
 | `/ledger info` | 場所、概要の生成日時と鮮度、件数、保留中の更新 |
 
@@ -818,11 +835,16 @@ coagent がセッションをまたいで保つので、新しいタスクも（
 上書きしません。更新は `/ledger review` で差分を見て選ぶまで保留されます。バッファで未保存の変更があるファイルにも
 書きません（追記は保存後に行います）。開いていて未変更のバッファは書き込み後に読み直します。
 
-**上限つき**。`status.md` は追記せず書き直します。`decisions.md` と `subtasks.md` は全履歴を残しますが、表示・バンドル・
-更新リクエストには直近 N 件と、古いものの 1 行要約だけを含めます。
+**上限つき**。`status.md` は追記せず書き直します。`decisions.md`・`findings.md`・`subtasks.md` は全履歴を残しますが、
+表示・バンドル・更新リクエストには直近 N 件と、古いものの 1 行要約だけを含めます。
 
-**ローカルのタスクには要約（digest）**。タスク開始時に、目標・状況・直近 `digest_decisions`（5）件の決定（各 1 行）を
-まとめた要約（最大 `digest_max_bytes`）を、そのタスクの最初のメッセージの末尾に `<project_ledger rev="...">` として、
+**エージェントも使う**。エージェントには `ledger` ツールがあります。ファイル全体を読む（タスクには要約しか渡らないため）、
+「これを覚えておいて」と言われたとき（または重要なことを確かめたとき）に知見や決定を記録する、`methods.md` の節を 1 つ
+書き直す（あなたが編集した節は `/ledger review` 待ちになります）。書くのはリポジトリ外の台帳だけで、どの書き込みも
+取り消せます。
+
+**ローカルのタスクには要約（digest）**。タスク開始時に、目標・状況・`methods.md`（各節は `digest_method_bytes` まで）・
+直近 `digest_decisions`（5）件の決定と `digest_findings`（8）件の知見（各 1 行）をまとめた要約（最大 `digest_max_bytes`）を、そのタスクの最初のメッセージの末尾に `<project_ledger rev="...">` として、
 優先度の低いプロジェクトメモの扱いで付けます。プロンプトキャッシュに優しい作り: 変化したときだけ一度入れ（台帳が
 変わらなければ再送しません。システムプロンプトは変えません）、途中で台帳が変わってもタスク中のメッセージはどのステップでも
 同じバイト列のままです。`ledger.inject = false` で無効。
@@ -835,6 +857,33 @@ coagent がセッションをまたいで保つので、新しいタスクも（
 **信頼の扱い**。台帳にはモデルが書いた文やリポジトリ由来の文が入ります。あくまで文脈のデータで、権限・モード・モデルは
 変えられません。モデルの文は節や記録を追加できず（`#` で始まる行は太字にします）、秘密情報はマスクし、要約は自分の
 ブロックを途中で閉じられません。
+
+### 繰り返し実行（/loop）
+
+Claude Code の `/loop` と同じく、プロンプト（またはスラッシュコマンド）をいまのセッションで繰り返し実行します。
+
+```text
+/loop 30m 学習ログを確認して、ベストの実行と比べ、おかしければ教えて
+/loop 2h x6 /ledger capture chat
+/loop val_acc が 0.92 を超えるまで学習率の調整を続けて
+/loop            状態を表示        /loop now   次の回をすぐ実行        /loop stop   終了
+```
+
+- **間隔を指定すると**（`90s`・`30m`・`2h`・`1d`・`1h30m`）、前の回が終わってからその時間がたったら次の回を始めます。
+  エージェントは `loop_control` ツールで早めに終えられます（目的を達した、続けても意味がない、など）。
+- **間隔を省くと**エージェントが自分でペースを決めます。各回の終わりに `loop_control` を呼び、待っているもの（ジョブの
+  進み具合、次のチェックポイント）に合わせた待ち時間で `continue` するか、`stop` します。呼ばなければループは終わるので、
+  忘れられたループがトークンを使い続けることはありません。
+- `xN` で回数の上限を指定（既定は `loop.max_iterations` = 20）。最短の間隔・待ち時間は `loop.min_interval`（60 秒）、
+  自分でペースを決めるときの最長は `loop.max_interval`（1 日）です。
+- 次の回はエージェントが空いているときだけ始めます。タスク中・承認待ち・一時停止中・委任したサブタスクの待機中は始めず、
+  `loop.idle_retry` 秒ごとに確かめます。スラッシュコマンドには間隔が必要です。
+- 各回はセッションの普通のタスクです。承認・権限モード・トークン予算（タスク・セッション・月）がそのまま効き、予算で
+  一時停止したら再開するまでループも待ちます。`/stop`、止められた・失敗した回、`/new`、Neovim の終了でループは終わります
+  （セッションには保存しません）。ウィンドウバーに `loop 3/20 14:05`（回数 / 上限、次の開始時刻）を表示します。
+- 1 本の長い学習を見守るなら、見守り付きの待機（`wait_process`。「バックグラウンドプロセスを見る」参照）のほうが安く済み
+  ます。何も起きていない間は何も送りません。ループは複数の実行にまたがる定期的な作業に向いています: 複数ジョブの確認、
+  評価のやり直し、台帳の更新など。
 
 ### サブタスクを別のチャットに任せる（/delegate, /receive）
 
@@ -1040,6 +1089,8 @@ terminal = {
 | 調査 | `list_dir`, `glob`, `search`, `read_file`, `git_status`, `git_diff`, `diagnostics` | 不要 |
 | スキル | `use_skill`（スキルの手順を読み込む。スキルがあるときだけ提供） | 不要 |
 | 実験 | `experiments`（ローカルの実験ログ: 表・詳細・比較） | 不要 |
+| プロジェクト台帳 | `ledger`（台帳のファイルを読む、知見・決定を記録、`methods.md` の節を書き直す。書くのはリポジトリ外の台帳だけ、`/ledger undo` で戻せる） | 不要 |
+| ループ | `loop_control`（`/loop` の次の回を予約、またはループを終える。ループ中だけ提供） | 不要 |
 | 委任 | `delegate`（重いサブタスクを別のチャット向けにバンドル。タスクは `/receive` まで待つ） | **常に必要**（auto モードでも） |
 | 言語サーバー | `lsp_definition`（定義）, `lsp_references`（参照）, `lsp_symbols`（アウトライン / シンボル検索）, `lsp_hover`（型・ドキュメント） | 不要 |
 | 編集 | `edit_file`, `write_file`, `delete_file` | 必要（diff 表示） |
@@ -1062,7 +1113,9 @@ terminal = {
 | `:CoagentPlan [task\|approve\|discard]` | タスクを計画から始める（`/plan` と同じ。範囲指定で選択範囲を添付） |
 | `:CoagentSkills [enable\|disable <name>\|reload]` | Agent Skills の一覧 / このセッションだけ有効・無効を切替（`/skills` と同じ） |
 | `:CoagentExp [show\|diff\|note\|compare\|run ...]` | 実験ログ（`/exp` と同じ） |
-| `:CoagentLedger [init\|refresh[!]\|note\|decision\|update\|review\|log\|open\|bundle\|info ...]` | プロジェクト台帳（`/ledger` と同じ） |
+| `:CoagentLedger [init\|refresh[!]\|capture\|note\|decision\|finding\|update\|review\|undo\|log\|open\|bundle\|info ...]` | プロジェクト台帳（`/ledger` と同じ） |
+| `:CoagentLoop [間隔] [xN] <プロンプト\|/コマンド>\|stop\|now` | 繰り返し実行（`/loop` と同じ） |
+| `:CoagentConfig [get\|set\|unset\|edit\|path ...]` / `:CoagentUpdateConfig <依頼>` | 設定（`/config` / `/update-config` と同じ） |
 | `:CoagentDelegate <種類> [指示]\|list\|open\|cancel\|detach` / `:CoagentReceive [id]` | サブタスクを任せる / 結果を取り込む（`/delegate`、`/receive` と同じ） |
 | `:CoagentPrompt [name] [text]` | プロンプトテンプレートを実行（範囲指定で選択範囲。名前なしなら一覧から選択） |
 | `:CoagentToggle` / `Open` / `Close` | パネル開閉 |
@@ -1302,6 +1355,25 @@ require('coagent').setup({
 ```
 
 独自ツールの追加: `require('coagent').register_tool({ name, kind = 'read'|'write'|'exec', description, schema, prepare, run })`。
+
+### Neovim の中から設定を変更（/config, /update-config）
+
+`setup()` の設定が土台です。あとから Neovim の中で変えた設定は 1 つの JSON ファイル（`settings_file`。既定は
+`stdpath('state')/coagent/settings.json`、0600。dotfiles に置きたければその中を指定、`false` で無効）に保存し、起動の
+たびに設定の上に重ね、すぐ反映します（キーマップ・バックエンド・ハイライトは再起動後）。
+
+| コマンド | 内容 |
+|---|---|
+| `/config` | 設定ファイルの場所と、そこで変えた設定 |
+| `/config get <パス>` | いま有効な値（`/config get limits`） |
+| `/config set <パス> <値>` | 保存して反映。値は JSON（`300000`、`true`、`"文字列"`、`["make test"]`）か、そのままの文字列。リストは丸ごと置き換え |
+| `/config unset <パス>` | `setup()` の値 / 既定値に戻す |
+| `/config edit` | ファイルを開く。保存すると読み込み直す（JSON が壊れていれば反映しない） |
+| `/update-config <依頼>` | 普通の言葉で。例: `/update-config advisorを claude-sonnet-4.6 にして、監督を strict に`。1 リクエストで、モデルに既定値の説明（`config.lua`）・設定ファイル・いまの値を渡し、`set` / `unset` を提案させます。`パス: 変更前 -> 変更後` を見て「Apply」か「Cancel」を選びます。依頼があいまいなら聞き返します |
+
+パスと型は既定値と照らして確かめます（`limits.max_tokenz` や `ui.width = "wide"` は拒否）。`backend` と `settings_file` は
+ここでは変えられません。確認なしで実行される範囲を変える設定（`mode`・`auto.*`・`judge.*`・`commands.*`・`terminal.*` など）は
+変更案に印を付けます。このファイルを書くのはあなただけで、リポジトリのファイルが書くことはありません。
 
 ### render-markdown.nvim
 

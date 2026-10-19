@@ -14,6 +14,8 @@ CONTENTS                                              *coagent-contents*
      Skills .................................. |coagent-skills|
      Experiment log .......................... |coagent-experiments|
      Project ledger .......................... |coagent-ledger|
+     Loops ................................... |coagent-loop|
+     Settings ................................ |coagent-settings|
      Delegating subtasks ..................... |coagent-delegate|
      Your own terminal ....................... |coagent-terminal|
      Queue ................................... |coagent-queue|
@@ -54,9 +56,16 @@ Check the setup with |:checkhealth| coagent.
 :CoagentExp [show|diff|note|compare|run ...]
                          The experiment log (same as /exp;
                               |coagent-experiments|).
-:CoagentLedger [init|refresh[!]|note|decision|update|review|log|open|bundle|info]
+:CoagentLedger [init|refresh[!]|capture|note|decision|finding|update|review|undo|log|open|bundle|info]
                          The project ledger (same as /ledger;
                               |coagent-ledger|).
+:CoagentLoop [interval] [xN] {prompt|/command} | stop | now
+                         Run a prompt again and again (same as /loop;
+                              |coagent-loop|).
+:CoagentConfig [get|set|unset|edit|path ...]
+:CoagentUpdateConfig {request}
+                         Show and change settings (same as /config and
+                              /update-config; |coagent-settings|).
 :CoagentDelegate <kind> [instruction] | list | open | cancel | detach
                          Bundle a subtask for another chat (same as
                               /delegate; |coagent-delegate|).
@@ -318,9 +327,17 @@ Commands go into the input history like prompts.
                       The experiment log: table, details, diff, notes,
                       Markdown comparison, record a run
                       (|coagent-experiments|; local, no request).
-  /ledger [init|refresh[!]|note|decision|update|review|log|open|bundle|info]
+  /ledger [init|refresh[!]|capture|note|decision|finding|update|review|undo|log|open|bundle|info]
                       The project ledger (|coagent-ledger|; only init,
-                      refresh and update send a request).
+                      refresh, capture and update send a request).
+  /loop [interval] [xN] <prompt|/command> | stop | now
+                      Run a prompt or a command again and again
+                      (|coagent-loop|).
+  /config [get|set|unset|edit|path ...]
+  /update-config <request>
+                      Show and change settings; change them in plain
+                      words (one request; you apply or cancel)
+                      (|coagent-settings|).
   /delegate <kind> [instruction] | list | open | cancel | detach
   /receive [id] [paste|clipboard|files]
                       Delegate a subtask to another chat you operate and
@@ -808,8 +825,9 @@ runs whose command or notes contain it.
 
                                                         *coagent-ledger*
 The project ledger is the single source of truth about the ongoing work of a
-project, kept by coagent across sessions: what the code does, the goal, what
-was decided and why, what each subtask did and where things stand. Local
+project, kept by coagent across sessions: what the code does, the goal, how
+the experiments are done, what was decided and why, what was learned, what
+each subtask did and where things stand. Local
 tasks start from it, and other chats you delegate a subtask to can get it
 whole (|coagent-ledger-bundle|).
 
@@ -823,8 +841,17 @@ them):
                 rewritten.
   status.md     Current state, Best results, Open issues, Next steps.
                 Rewritten (not appended) by each update.
+  methods.md    How the experiments are done: Data, Data loading,
+                Preprocessing, Model and training, Evaluation,
+                Visualization, Conventions (files, functions, commands,
+                parameters, metric definitions, plots). Written by
+                /ledger capture, by updates (only the sections a task
+                changed), by the agent's `ledger` tool and by you.
   decisions.md  Append-only: "### D-<n> · <date> · <title>" with decision,
                 reason, rejected alternatives, source.
+  findings.md   Append-only: "### F-<n> · <date> · <title>" with finding,
+                evidence, source: what worked, what did not and why,
+                hypotheses tested, pitfalls.
   subtasks.md   Append-only: "### S-<n> · <date> · <kind> · <title>" (kind
                 local, delegated, experiment or note) with request, result,
                 files changed, outcome.
@@ -844,25 +871,45 @@ Requests (everything else is local):
 - /ledger refresh: ONE request, only when a file listed in the overview
   changed or disappeared (a warning is shown once at the next task start).
   "/ledger refresh!" regenerates it anyway.
+- /ledger capture [chat|sessions|code|docs|all] [paths]: ONE request
+  without tools that reads what you already have: this session's
+  conversation (prompts and replies in full, tool calls as one line, the
+  tail of command output), the newest saved sessions of the project
+  (`capture_sessions`), and the code, docs and notebooks most likely to
+  describe data loading, preprocessing, evaluation and plots (up to
+  `capture_max_bytes`; .ipynb without outputs; secrets masked). The model
+  (`capture_model`, else roles.strong_model, else the selected one) fills
+  methods.md, the goals.md sections still empty, new decisions and
+  findings, and the status. Paths read those files / folders (plus this
+  chat) instead.
 - After each finished task, imported result (|coagent-ledger-bundle|) or
   background experiment: ONE small request appends the subtask entry and
-  any decisions and rewrites status.md (`auto_update`). Files changed and
+  any decisions and findings, updates the methods.md sections the task
+  changed and rewrites status.md (`auto_update`). Files changed and
   the outcome are written by coagent. If the request fails a plain entry
   is written and status.md is left alone. Only once the ledger exists.
 
   /ledger             Open goals.md and status.md in a split for editing
                       (creates the ledger) and show its state.
-  /ledger open <file> overview, goals, status, decisions or subtasks.
+  /ledger open <file> overview, goals, status, methods, decisions,
+                      findings or subtasks.
+  /ledger capture [sources] [paths]
+                      Capture what to keep (above).
   /ledger init        Generate overview.md (above).
   /ledger refresh[!]  Refresh it when stale (! = anyway).
   /ledger note <text> A note entry in subtasks.md (no request).
   /ledger decision <title> [-- reason [-- rejected alternatives]]
                       A decision entry (no request).
+  /ledger finding <title> [-- evidence]
+                      A finding entry (no request).
   /ledger update      Record the last finished task now (one request; for
                       `auto_update = false`).
   /ledger review      Pending updates of sections you edited: shows the
                       diff, then apply / keep yours / decide later.
-  /ledger log [decisions|subtasks]
+  /ledger undo        Restore the ledger as it was before coagent's last
+                      write (capture, update, the agent's tool); repeatable,
+                      `history_max` snapshots in .history/.
+  /ledger log [decisions|findings|subtasks]
                       Recent `recent` entries in full plus one line per
                       older entry.
   /ledger bundle      The whole ledger as Markdown into the + register.
@@ -874,8 +921,14 @@ waits in the ledger's .meta.json until /ledger review. A file with unsaved
 changes in a buffer is not written (appended entries wait for the save);
 an open unmodified buffer is reloaded.
 
-Digest: at the start of a local task a compact digest (goals, status, the
-last `digest_decisions` decisions, at most `digest_max_bytes`) is appended
+The agent's `ledger` tool reads a whole file, records a finding or decision
+(when you ask it to remember something) and rewrites one methods.md section
+(a section you edited waits for /ledger review). It writes only the ledger.
+
+Digest: at the start of a local task a compact digest (goals, status,
+methods.md with each section clipped to `digest_method_bytes`, the last
+`digest_decisions` decisions and `digest_findings` findings, at most
+`digest_max_bytes`) is appended
 to the task's first message as <project_ledger rev="...">, as
 lower-priority project notes. It is injected once per change and never
 touches the system prompt, so the prompt cache keeps hitting; the task's
@@ -892,9 +945,14 @@ are masked, and the digest cannot close its own block.
     dir_in_repo = nil,    -- e.g. '.coagent/ledger'
     auto_update = true, inject = true,
     model = nil, update_model = nil,   -- nil = the selected model
-    recent = 10, digest_decisions = 5, digest_max_bytes = 6000,
+    recent = 10, digest_decisions = 5, digest_findings = 8,
+    digest_method_bytes = 800, digest_max_bytes = 10000,
+    update_methods_bytes = 8000,
     init_max_bytes = 160 * 1024, max_file_bytes = 24 * 1024,
     tree_max_entries = 300,
+    capture_model = nil, capture_chat_bytes = 60 * 1024,
+    capture_sessions = 5, capture_sessions_bytes = 40 * 1024,
+    capture_max_bytes = 120 * 1024, history_max = 20,
   }
 <
                                                  *coagent-ledger-bundle*
@@ -911,6 +969,52 @@ are masked, and the digest cannot close its own block.
       The digest block local tasks get (and its rev).
   require('coagent').ledger(arg)
       Same as "/ledger arg".
+
+                                                          *coagent-loop*
+Loops: run a prompt (or a slash command) again and again in this session,
+like Claude Code's /loop.
+  /loop 30m check the training log      every 30 minutes
+  /loop 2h x6 /ledger capture chat      a command, at most 6 times
+  /loop tune lr until val_acc > 0.92    self-paced by the agent
+  /loop  /loop now  /loop stop          state / next iteration now / end
+With an interval (90s, 30m, 2h, 1d, 1h30m) the next iteration starts that
+long after the previous one ended; the agent may end the loop early with its
+`loop_control` tool. Without one the agent schedules each next run
+(loop_control continue + delay_seconds) or stops; without the call the loop
+ends. Iterations start only when the agent is idle (no task, approval, pause
+or delegated subtask), are normal tasks (approvals and token budgets apply)
+and are capped by xN or `loop.max_iterations`. /stop, a stopped or failed
+iteration, /new and quitting end the loop (it is not saved). The window bar
+shows "loop 3/20 14:05".
+>lua
+  loop = {
+    max_iterations = 20,
+    min_interval = 60,     -- seconds
+    max_interval = 86400,  -- longest self-paced delay
+    default_delay = 600,   -- "continue" without a delay
+    idle_retry = 30,       -- re-check while busy or paused
+  }
+<
+                                                      *coagent-settings*
+Settings changed from inside Neovim are saved in one JSON file
+(`settings_file`, default stdpath('state')/coagent/settings.json, 0600;
+false = off) applied on top of the setup() opts at every start, and take
+effect at once (keymaps, the backend, highlights after a restart).
+  /config                       The file and what was changed in it.
+  /config get <path>            The effective value.
+  /config set <path> <value>    Save and apply. The value is JSON (300000,
+                                true, "text", ["make test"]) or plain text;
+                                lists replace.
+  /config unset <path>          Back to the setup() / default value.
+  /config edit                  Open the file; saving reloads it.
+  /update-config <request>      In plain words. ONE request: the model gets
+                                config.lua (the documented defaults), the
+                                file and the current values and proposes
+                                set / unset; you see "path: old -> new" and
+                                choose Apply or Cancel.
+Paths and types are checked against the defaults; `backend` and
+`settings_file` cannot be set. Changes to what runs without asking (mode,
+auto, judge, commands, terminal, ...) are marked in the preview.
 
                                                       *coagent-delegate*
 coagent stays the orchestrator and hands heavy subtasks (result analysis

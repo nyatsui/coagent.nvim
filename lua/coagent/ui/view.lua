@@ -124,6 +124,9 @@ function View:attach(c)
   on('processes', function()
     self:refresh_bar()
   end)
+  on('loop', function()
+    self:refresh_bar()
+  end)
   on('roles', function()
     self:refresh_bar()
   end)
@@ -414,6 +417,10 @@ function View:bar()
   local term = c.attached_terminal and c:attached_terminal()
   if term then
     table.insert(segs, { 2.5, 1.5, 'term:' .. (term.short_label and term:short_label() or term:host_label()) })
+  end
+  local lp = c.loop and c.loop:bar()
+  if lp then
+    table.insert(segs, { 4.5, 2, lp })
   end
   local bg = c.processes and c.processes:running_count() or 0
   if bg > 0 then

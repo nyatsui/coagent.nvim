@@ -58,14 +58,14 @@ function M.open(ledger, name)
   return bufs
 end
 
---- Bounded view of decisions and subtasks (recent N in full + older ones as
+--- Bounded view of decisions, findings and subtasks (recent N in full + older ones as
 --- one line each) in a scratch buffer.
 ---@param ledger Coagent.Ledger
----@param which string? 'decisions' | 'subtasks' | nil (both)
+---@param which string? 'decisions' | 'findings' | 'subtasks' | nil (all)
 ---@return integer buf
 function M.log(ledger, which)
   local parts = {}
-  for _, name in ipairs({ 'decisions', 'subtasks' }) do
+  for _, name in ipairs({ 'decisions', 'findings', 'subtasks' }) do
     if not which or which == name then
       table.insert(parts, ledger:view(name))
     end

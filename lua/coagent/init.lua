@@ -489,10 +489,226 @@ function M.inline(instruction, opts)
 end
 
 function M.stop()
+  local looped = state.controller and state.controller.loop and state.controller.loop:stop('/stop')
   if state.controller and state.controller:stop() then
     return true
   end
+  return looped or false
+end
+
+------------------------------------------------------------------------------
+-- Settings (/config, /update-config)
+------------------------------------------------------------------------------
+
+M.CONFIG_USAGE = '/config [get <path> | set <path> <value> | unset <path> | edit | path]'
+
+local function open_settings_file(c)
+  local Settings = require('coagent.agent.settings')
+  local path = Settings.path(config.options)
+  if not path then
+    c:notice('warn', 'settings_file = false: there is no settings file.')
+    return false
+  end
+  if not vim.uv.fs_stat(path) then
+    Settings.write(config.options, {})
+  end
+  vim.cmd('botright split ' .. vim.fn.fnameescape(path))
+  local buf = vim.api.nvim_get_current_buf()
+  vim.bo[buf].swapfile = false
+  if not vim.b[buf].coagent_settings then
+    vim.b[buf].coagent_settings = true
+    vim.api.nvim_create_autocmd('BufWritePost', {
+      buffer = buf,
+      callback = function()
+        local raw = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), '\n')
+        local ok, data = pcall(vim.json.decode, raw)
+        if not ok or type(data) ~= 'table' then
+          c:notice('error', 'Settings: ' .. vim.fn.fnamemodify(path, ':~') .. ' is not a JSON object; not applied.')
+          return
+        end
+        pcall(vim.uv.fs_chmod, path, tonumber('600', 8))
+        config.reload()
+        c:notice('info', 'Settings reloaded from ' .. vim.fn.fnamemodify(path, ':~') .. ' (keymaps and the backend after a restart).')
+      end,
+    })
+  end
+  return true, buf
+end
+
+--- `/config ...` (see M.CONFIG_USAGE): show and change settings. Changes are
+--- saved in config.settings_file and applied at once.
+---@param arg string?
+---@return boolean ok
+function M.config_cmd(arg)
+  local c = M.controller()
+  local Settings = require('coagent.agent.settings')
+  arg = vim.trim(arg or '')
+  local verb, rest = arg:match('^(%S+)%s*(.-)$')
+  local path = Settings.path(config.options)
+  if arg == '' or verb == 'path' then
+    local lines = { 'Settings file: ' .. (path and vim.fn.fnamemodify(path, ':~') or '(off: settings_file = false)') }
+    local flat = Settings.flatten(Settings.read(config.options))
+    if verb ~= 'path' then
+      if #flat == 0 then
+        table.insert(lines, 'No settings changed here yet (your setup() opts apply).')
+      else
+        table.insert(lines, 'Changed here (on top of setup() opts):')
+        for _, l in ipairs(flat) do
+          table.insert(lines, '  ' .. l)
+        end
+      end
+      table.insert(lines, 'Usage: ' .. M.CONFIG_USAGE .. '; /update-config <what to change, in plain words>.')
+    end
+    c:notice('info', table.concat(lines, '\n'))
+    return true
+  elseif verb == 'get' then
+    local parts, err = Settings.split(rest)
+    if not parts then
+      c:notice('error', '/config get: ' .. err)
+      return false
+    end
+    local v = Settings.get(config.options, parts)
+    c:notice('info', rest .. ' = ' .. (type(v) == 'table' and vim.inspect(v) or Settings.show(v)))
+    return true, v
+  elseif verb == 'set' or verb == 'unset' then
+    local key, value = rest:match('^(%S+)%s*(.-)$')
+    if not key or (verb == 'set' and value == '') then
+      c:notice('error', '/config ' .. verb .. ': ' .. (verb == 'set' and '/config set <path> <value>' or '/config unset <path>'))
+      return false
+    end
+    local ch, err = Settings.change(key, verb == 'set' and Settings.parse_value(value) or nil)
+    if not ch then
+      c:notice('error', '/config ' .. verb .. ': ' .. err)
+      return false
+    end
+    local ok, cerr = Settings.commit({ ch })
+    if not ok then
+      c:notice('error', '/config ' .. verb .. ': ' .. tostring(cerr))
+      return false
+    end
+    c:notice('info', 'Setting saved:\n' .. table.concat(Settings.describe({ ch }), '\n'))
+    if state.view then
+      state.view:refresh_bar()
+    end
+    return true
+  elseif verb == 'edit' then
+    return open_settings_file(c)
+  end
+  c:notice('error', '/config: unknown argument "' .. arg .. '". Usage: ' .. M.CONFIG_USAGE)
   return false
+end
+
+--- `/update-config <request>`: ONE request turns the request (plain words)
+--- into setting changes; you see them and apply or cancel.
+---@param request string?
+---@param cb fun(applied:boolean)? (tests)
+---@return boolean started
+function M.update_config(request, cb)
+  local c = M.controller()
+  request = vim.trim(request or '')
+  if request == '' then
+    c:notice('error', '/update-config <what to change, in plain words> (e.g. /update-config 1タスクのトークン上限を30万にして)')
+    return false
+  end
+  local Settings = require('coagent.agent.settings')
+  c:notice('info', 'Settings: asking the model for the change (1 request)...')
+  Settings.propose(c, request, function(changes, info)
+    local function done(applied)
+      if cb then
+        cb(applied)
+      end
+    end
+    if not changes then
+      if info.question then
+        c:notice('warn', 'Settings: ' .. info.question)
+      else
+        c:notice('error', '/update-config: ' .. tostring(info.err))
+      end
+      return done(false)
+    end
+    local lines = {}
+    if info.explanation then
+      table.insert(lines, info.explanation)
+    end
+    for _, r in ipairs(info.rejected or {}) do
+      table.insert(lines, '  (dropped: ' .. r .. ')')
+    end
+    if #changes == 0 then
+      table.insert(lines, 'No setting to change.')
+      c:notice('warn', 'Settings: ' .. table.concat(lines, '\n'))
+      return done(false)
+    end
+    table.insert(lines, 'Proposed change' .. (#changes > 1 and 's' or '') .. ' (saved in ' .. vim.fn.fnamemodify(Settings.path(config.options) or '?', ':~') .. '):')
+    vim.list_extend(lines, Settings.describe(changes))
+    c:notice('info', table.concat(lines, '\n'))
+    local choices = { 'Apply', 'Cancel' }
+    vim.ui.select(choices, { prompt = 'Apply these setting changes?' }, function(choice)
+      if choice ~= 'Apply' then
+        c:notice('info', 'Settings unchanged.')
+        return done(false)
+      end
+      local ok, err = Settings.commit(changes)
+      if not ok then
+        c:notice('error', '/update-config: ' .. tostring(err))
+        return done(false)
+      end
+      c:notice('info', 'Settings applied (/config shows them; /config unset <path> reverts one).')
+      if state.view then
+        state.view:refresh_bar()
+      end
+      done(true)
+    end)
+  end)
+  return true
+end
+
+--- `/loop [interval] [xN] <prompt or /command> | stop | now` (no argument:
+--- status). See coagent.agent.loop.
+---@param arg string?
+---@return boolean ok
+function M.loop(arg)
+  local c = M.controller()
+  arg = vim.trim(arg or '')
+  if arg == '' or arg == 'status' then
+    c:notice('info', c.loop:status_text())
+    return true
+  elseif arg == 'stop' then
+    if not c.loop:stop('/loop stop') then
+      c:notice('info', 'No loop is running.')
+    end
+    return true
+  elseif arg == 'now' then
+    local ok, err = c.loop:now()
+    if not ok then
+      c:notice('warn', '/loop now: ' .. tostring(err))
+    end
+    return ok
+  end
+  local spec, err = require('coagent.agent.loop').parse(arg)
+  if not spec then
+    c:notice('error', '/loop: ' .. err)
+    return false
+  end
+  local slash = require('coagent.ui.slash')
+  local p = slash.parse(spec.prompt)
+  if p.kind == 'command' then
+    if p.name == 'loop' then
+      c:notice('error', '/loop: a loop cannot start another loop')
+      return false
+    end
+    if not slash.get(p.name) then
+      c:notice('error', '/loop: unknown command /' .. p.name)
+      return false
+    end
+    spec.run = function()
+      slash.run(p)
+    end
+  end
+  local ok, serr = c.loop:start(spec)
+  if not ok then
+    c:notice('error', '/loop: ' .. tostring(serr))
+  end
+  return ok
 end
 
 --- Drop the messages queued while the agent is busy.
@@ -1129,8 +1345,40 @@ end
 -- Project ledger (/ledger)
 ------------------------------------------------------------------------------
 
-M.LEDGER_USAGE = '/ledger [init | refresh[!] | note <text> | decision <title> [-- reason [-- alternatives]] | update | review | log [decisions|subtasks] | open <file> | bundle | info]'
-M.LEDGER_ARGS = { 'init', 'refresh', 'note', 'decision', 'update', 'review', 'log', 'open', 'bundle', 'info' }
+M.LEDGER_USAGE = '/ledger [init | refresh[!] | capture [chat|sessions|code|docs|all] [paths] | note <text> | decision <title> [-- reason [-- alternatives]] | finding <title> [-- evidence] | update | review | undo | log [decisions|findings|subtasks] | open <file> | bundle | info]'
+M.LEDGER_ARGS = { 'init', 'refresh', 'capture', 'note', 'decision', 'finding', 'update', 'review', 'undo', 'log', 'open', 'bundle', 'info' }
+
+--- Conversations for /ledger capture: this session, and the newest saved
+--- sessions of the project (ledger.capture_sessions of them).
+---@param c Coagent.Controller
+---@return string chat, string earlier
+local function capture_transcripts(c)
+  local Ledger = require('coagent.agent.ledger')
+  local cfg = c.config.ledger or {}
+  local chat = Ledger.transcript(c.session.items, cfg.capture_chat_bytes or 60 * 1024)
+  local parts, left = {}, cfg.capture_sessions_bytes or 40 * 1024
+  local n = cfg.capture_sessions or 5
+  local ok, list = pcall(function()
+    return c.store and c.store:list(c.ws.root) or {}
+  end)
+  for _, entry in ipairs(ok and list or {}) do
+    if #parts >= n or left < 2048 then
+      break
+    end
+    if entry.id ~= c.session.id then
+      local s = c.store:load(c.ws.root, entry.id)
+      if s and s.items and #s.items > 0 then
+        local per = math.max(2048, math.floor(left / math.max(1, n - #parts)))
+        local text = Ledger.transcript(s.items, per)
+        if vim.trim(text) ~= '' then
+          table.insert(parts, string.format('<session title="%s" updated="%s">\n%s\n</session>', util.ellipsize((tostring(entry.title or ''):gsub('"', "'")), 80), os.date('%Y-%m-%d', entry.updated_at or 0), text))
+          left = left - #text
+        end
+      end
+    end
+  end
+  return chat, table.concat(parts, '\n\n')
+end
 
 --- `/ledger ...` (see M.LEDGER_USAGE). Only init, refresh and update send a
 --- request (one each); everything else is local.
@@ -1173,17 +1421,43 @@ local function ledger_cmd(arg)
       notice('warn', '/ledger refresh: ' .. tostring(err))
     end
     return ok
-  elseif verb == 'note' or verb == 'decision' then
+  elseif verb == 'note' or verb == 'decision' or verb == 'finding' then
     if not l:exists() then
       l:ensure()
     end
     local id, err = l[verb](l, rest)
+    local usage = { note = '/ledger note <text>', decision = '/ledger decision <title> [-- reason [-- alternatives]]', finding = '/ledger finding <title> [-- evidence]' }
     if not id then
-      notice('error', '/ledger ' .. verb .. ': ' .. tostring(err) .. (verb == 'note' and ' (/ledger note <text>)' or ' (/ledger decision <title> [-- reason [-- alternatives]])'))
+      notice('error', '/ledger ' .. verb .. ': ' .. tostring(err) .. ' (' .. usage[verb] .. ')')
       return false
     end
-    notice('info', string.format('Ledger: %s-%d added to %s.md.', verb == 'note' and 'S' or 'D', id, verb == 'note' and 'subtasks' or 'decisions'))
+    local file = ({ note = 'subtasks', decision = 'decisions', finding = 'findings' })[verb]
+    notice('info', string.format('Ledger: %s-%d added to %s.md.', Ledger.LOGS[file], id, file))
     return true, id
+  elseif verb == 'capture' then
+    local a = Ledger.capture_args(rest)
+    local chat, earlier = '', ''
+    if vim.tbl_contains(a.sources, 'chat') or vim.tbl_contains(a.sources, 'sessions') then
+      chat, earlier = capture_transcripts(c)
+    end
+    local ok, err = l:capture({
+      sources = a.sources,
+      paths = a.paths,
+      chat = vim.tbl_contains(a.sources, 'chat') and chat or nil,
+      sessions = vim.tbl_contains(a.sources, 'sessions') and earlier or nil,
+    })
+    if not ok then
+      notice('error', '/ledger capture: ' .. tostring(err))
+    end
+    return ok
+  elseif verb == 'undo' then
+    local snap, err = l:undo()
+    if not snap then
+      notice('warn', '/ledger undo: ' .. tostring(err))
+      return false
+    end
+    notice('info', string.format('Ledger restored to before "%s"%s.', snap.label or '?', snap.time and (' (' .. os.date('%Y-%m-%d %H:%M', snap.time) .. ')') or ''))
+    return true, snap
   elseif verb == 'update' then
     local ev = c.last_ledger_event
     if not ev then
@@ -1198,8 +1472,8 @@ local function ledger_cmd(arg)
   elseif verb == 'review' then
     return ui.review(l, notice)
   elseif verb == 'log' then
-    if rest ~= '' and rest ~= 'decisions' and rest ~= 'subtasks' then
-      notice('error', '/ledger log [decisions|subtasks]')
+    if rest ~= '' and not Ledger.LOGS[rest] then
+      notice('error', '/ledger log [decisions|findings|subtasks]')
       return false
     end
     return true, ui.log(l, rest ~= '' and rest or nil)

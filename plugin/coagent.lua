@@ -90,7 +90,7 @@ cmd('CoagentLedger', function(a)
   agent().ledger(a.args)
 end, {
   nargs = '*',
-  desc = 'Project ledger: open, init, refresh[!], note, decision, update, review, log, open <file>, bundle, info',
+  desc = 'Project ledger: open, init, refresh[!], capture, note, decision, finding, update, review, undo, log, open <file>, bundle, info',
   complete = function(_, line)
     if line:match('^%S+%s+%S+%s') then
       if line:match('^%S+%s+open%s+%S*$') then
@@ -128,6 +128,27 @@ end, {})
 cmd('CoagentClose', function()
   agent().close()
 end, {})
+cmd('CoagentConfig', function(a)
+  agent().config_cmd(a.args)
+end, {
+  nargs = '*',
+  desc = 'Settings: [get <path> | set <path> <value> | unset <path> | edit | path]',
+  complete = function()
+    return { 'get', 'set', 'unset', 'edit', 'path' }
+  end,
+})
+cmd('CoagentUpdateConfig', function(a)
+  agent().update_config(a.args)
+end, { nargs = '+', desc = 'Change settings in plain words (the model proposes, you apply)' })
+cmd('CoagentLoop', function(a)
+  agent().loop(a.args)
+end, {
+  nargs = '*',
+  desc = 'Run a prompt again and again: [interval] [xN] <prompt|/command> | stop | now',
+  complete = function()
+    return { 'stop', 'now', '10m', '30m', '1h' }
+  end,
+})
 cmd('CoagentStop', function()
   agent().stop()
 end, { desc = 'Stop the running task' })
