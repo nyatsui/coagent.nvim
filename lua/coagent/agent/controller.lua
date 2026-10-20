@@ -2887,13 +2887,26 @@ function Controller:_execute(gen, tc)
     t.fail_counts, t.call_counts = {}, {}
   elseif not (res.meta and res.meta.waiting) then
     -- (waiting for a running process again is progress, not a loop)
-    local key = util.call_key(tc.name, args)
+    -- The same call with the same RESULT is a loop; a different result (a
+    -- log or metrics file that grew, a file changed outside the agent) is
+    -- not. Counts restart when old tool outputs were elided from the context
+    -- (the model may need to read them again).
+    if self.session.compact_watermark ~= t.counts_watermark then
+      t.counts_watermark = self.session.compact_watermark
+      t.call_counts = {}
+    end
+    local key = util.call_key(tc.name, args) .. '#' .. vim.fn.sha256(res.output or ''):sub(1, 16)
     t.call_counts[key] = (t.call_counts[key] or 0) + 1
     if not res.ok then
       self:_count_failure(tc.name, args)
     end
-    if t.call_counts[key] >= self.config.limits.max_identical_calls then
-      t.abort = string.format('The model repeated the same %s call %d times without making changes.', tc.name, t.call_counts[key])
+    local max = self.config.limits.max_identical_calls
+    if t.call_counts[key] >= max then
+      t.abort = string.format('The model repeated the same %s call %d times with the same result and no changes in between.', tc.name, t.call_counts[key])
+    elseif t.call_counts[key] == max - 1 and max > 2 then
+      -- one warning first: the model usually just forgot it has the result
+      res.output = (res.output or '') .. string.format('\n\n[coagent: this is the %d. identical %s call in this task, with the same result as before. '
+        .. 'Use the result you already have; one more identical call ends the task.]', t.call_counts[key], tc.name)
     end
   end
   if tool.name == 'run_command' then

@@ -372,7 +372,7 @@ repeating the same investigation or fix can burn a lot of tokens (money / quota)
 | `max_tool_calls` | 120 | Tool calls (`wait_process` calls that return at a checkpoint are not counted). **Pauses** (resumable) |
 | `max_duration_ms` | 30 min | Active time (time waiting for approval or in `wait_process`, and checkpoint answers, are not counted). **Pauses** (resumable) |
 | `max_consecutive_denials` | 3 | Denials in a row. **Ends** the task (you are saying "stop") |
-| `max_identical_calls` / `max_identical_failures` | 4 / 3 | Repeating the same call with no change / the same failure. **Ends** the task (it is looping) |
+| `max_identical_calls` / `max_identical_failures` | 4 / 3 | The same call with the same arguments **and the same result**, with no edit in between (one warning goes to the model first; a file or log whose content changed does not count, and counts restart when old outputs were elided from the context) / the same failure. **Ends** the task (it is looping) |
 
 - At a count or time limit the task becomes **PAUSED**, not failed. The panel shows which limit, the current usage and how to
   continue; the winbar shows `paused (limit)`

@@ -124,16 +124,10 @@ M.read_file = {
   run = function(args, ctx, prepared)
     local info = prepared.path
     local data
-    -- Prefer CopilotChat's file resource reader (binary detection, caching).
-    local fn = cc_function('file')
-    if fn then
-      local ok, res = pcall(fn.resolve, { path = info.real }, cc_source(ctx))
-      async.main()
-      if ok and res and res[1] then
-        data = res[1].data
-      end
-    end
-    if not data then
+    -- Always from disk: CopilotChat's file reader caches by whole-second
+    -- mtime and returns stale text for a file rewritten within the same
+    -- second (an edit right after a read, a growing training log).
+    do
       local raw, rerr = util.read_file(info.real)
       if not raw then
         return { ok = false, output = 'Error: cannot read ' .. info.rel .. ': ' .. tostring(rerr) }

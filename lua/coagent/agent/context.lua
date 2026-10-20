@@ -153,16 +153,14 @@ function M.resolve_references(text, env)
       table.insert(atts, attachment('directory', info.rel == '.' and './' or (info.rel .. '/'), 'text', res.output))
       return
     end
-    local fn = cc_function('file')
-    local data
-    if fn then
-      local ok, res = pcall(fn.resolve, { path = info.real }, cc_source)
-      async.main()
-      data = ok and res and res[1] and res[1].data or nil
-    end
-    data = data or util.read_file(info.real)
+    -- from disk (CopilotChat's reader caches by whole-second mtime)
+    local data = util.read_file(info.real)
     if not data then
       table.insert(errors, ref .. ' not found')
+      return
+    end
+    if data:find('\0', 1, true) then
+      table.insert(errors, ref .. ' looks like a binary file; not attached')
       return
     end
     table.insert(atts, attachment('file', info.rel, vim.filetype.match({ filename = info.real }) or 'text', data))

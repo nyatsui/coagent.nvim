@@ -186,6 +186,35 @@ describe('per-task limits', function()
     assert.is_false(vim.tbl_contains(r.states, 'PAUSED'))
   end)
 
+  it('warns once before ending a task for identical calls', function()
+    local r = build(root, function()
+      return { tool_calls = { { name = 'read_file', arguments = { path = 'a.txt' } } } }
+    end, { limits = { max_identical_calls = 4, max_steps = 40 } })
+    r.c:submit('loop')
+    local d = wait_done(r)
+    assert.are.equal('FAILED', d.state)
+    assert.is_truthy(d.message:find('same read_file call 4 times with the same result', 1, true), d.message)
+    assert.are.equal(4, r.backend.calls)
+    local msgs = r.backend.requests[4].messages
+    assert.is_truthy(msgs[#msgs].content:find('3. identical read_file call', 1, true))
+    assert.is_nil(r.backend.requests[3].messages[#r.backend.requests[3].messages].content:find('identical', 1, true))
+  end)
+
+  it('reading a file whose content changes is not a loop (a growing training log)', function()
+    local log = root .. '/train.log'
+    local r = build(root, function(_, n)
+      if n <= 6 then
+        vim.fn.writefile({ 'epoch ' .. n .. ' val_acc=0.' .. n }, log)
+        return { tool_calls = { { name = 'read_file', arguments = { path = 'train.log' } } } }
+      end
+      return { content = 'done' }
+    end, { limits = { max_identical_calls = 3, max_steps = 40 } })
+    r.c:submit('watch the log')
+    local d = wait_done(r)
+    assert.are.equal('COMPLETED', d.state, vim.inspect({ d.message, d.reason }))
+    assert.are.equal(6, d.tool_calls)
+  end)
+
   it('survives save and restore while paused at a limit', function()
     local store = Session.store(vim.fn.tempname())
     local cfg = { limits = { max_steps = 2 }, session = { persist = true } }
