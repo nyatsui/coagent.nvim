@@ -600,7 +600,10 @@ function Term:exec(spec, cb)
     local rows, end_at, code, truncated = read_output()
     if end_at then
       stream(rows, end_at - 1)
-      finish({ code = code, output = output_text(rows, end_at - 1), truncated = truncated, timed_out = stop_state and stop_state.why == 'timeout' or nil, killed = stop_state and stop_state.why == 'cancel' or nil })
+      -- a Ctrl-C the user typed may still let the shell print the end marker
+      -- (with 130) before this poll sees it: report it as their interruption
+      local by_user = not stop_state and f.user == 'ctrl-c' and 'ctrl-c' or nil
+      finish({ code = code, output = output_text(rows, end_at - 1), truncated = truncated, interrupted = by_user, timed_out = stop_state and stop_state.why == 'timeout' or nil, killed = stop_state and stop_state.why == 'cancel' or nil })
       return
     end
     local function partial()

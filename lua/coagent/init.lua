@@ -84,6 +84,14 @@ function M.setup(opts)
     end,
   })
 
+  -- saved tool outputs of old sessions
+  vim.schedule(function()
+    local c = config.options.context or {}
+    if c.archive_outputs ~= false and (c.archive_days or 30) > 0 then
+      pcall(require('coagent.agent.archive').prune, config.options, c.archive_days or 30)
+    end
+  end)
+
   local toggle = config.options.keymaps.global.toggle
   if toggle then
     vim.keymap.set({ 'n', 'v' }, toggle, function()
@@ -2902,6 +2910,7 @@ function M._reset()
     state.unnotify = nil
   end
   require('coagent.agent.ledger')._reset()
+  require('coagent.agent.archive')._reset()
   state.view, state.controller, state.backend, state.store = nil, nil, nil, nil
   state.selection, state.extra_tools = nil, {}
 end

@@ -1130,6 +1130,7 @@ terminal = {
 | Experiments | `experiments` (the local experiment log: table, details, comparison) | No |
 | Project ledger | `ledger` (read a ledger file; record a finding / decision; rewrite a `methods.md` section — only coagent's ledger, outside the repository, `/ledger undo`) | No |
 | Loops | `loop_control` (schedule the next `/loop` iteration or end the loop; offered only while a loop runs) | No |
+| Saved outputs | `recall_output` (read back a tool output that was cut or shortened: a range, or the lines matching a query; see "Context length") | No |
 | Delegation | `delegate` (bundle a heavy subtask for another chat; the task waits for `/receive`) | **Always**, also in auto mode |
 | Language server | `lsp_definition`, `lsp_references`, `lsp_symbols` (outline / symbol search), `lsp_hover` (types / docs) | No |
 | Editing | `edit_file`, `write_file`, `delete_file` | Yes (with diff) |
@@ -1143,6 +1144,9 @@ terminal = {
   model is told to copy exactly next time. Otherwise the error shows the closest text in the file with line numbers, so
   the model can retry without reading the file again. `read_file` stops at a line boundary before the tool output limit
   (`max_tool_output_bytes`) and says where to continue, so long documents are never cut in the middle
+- Encodings: everything sent to the model is valid UTF-8 (bytes that are not become U+FFFD, so a binary-ish output can
+  never make the API reject the request). `read_file` shows Shift_JIS (cp932) files decoded; `edit_file` refuses files
+  that are not UTF-8, so their encoding is never changed by accident
 - LSP tools use the language servers configured in your Neovim (files not yet loaded are loaded invisibly and the server is
   awaited). Files without a server return an error and the model falls back to `search`
 - Background processes keep running after the task ends (winbar: `N bg`). They stop with `<C-c>`, a new session, or when
@@ -1704,9 +1708,20 @@ opts = {
 
 - The winbar shows the last request's usage against the model's context limit, e.g. `ctx 12k/128k 9%` (with Auto, the limit
   of the model the server actually used). Details in `:CoagentUsage`
-- Above 70% of the limit, older tool outputs are elided first. Elision goes straight down to 60% and the boundary is recorded
+- **Nothing the model saw is lost.** A tool output longer than `limits.max_tool_output_bytes` (24 KB) reaches the model as
+  its head and tail plus `[full output: N bytes, M lines, saved: recall_output(id="...")]`, and the whole output is saved
+  (redacted, 0600) in `stdpath('state')/coagent/outputs/<project>/<session>/`. With the `recall_output` tool the agent reads
+  any range of it, or the lines matching a query, instead of re-running the command or re-reading the file
+- Above 70% of the limit, older tool outputs are shortened first (their first lines and error lines stay, and the full text
+  is saved the same way and named in the shortened text). Shortening goes straight down to 60% and the boundary is recorded
   and kept until the limit is exceeded again, so the beginning of what is sent stays the same and provider prompt caches keep
   hitting (Copilot bills by tokens). After compaction the winbar shows `compacted` (`*` when narrow)
+- If shortening old outputs is not enough, the older turns are **summarized with one request** (like `/compact summary`,
+  automatically, during the task) instead of being cut: the summary keeps the user's instructions, decisions, files,
+  commands with results and metrics, and the `recall_output` ids of outputs that matter. Each summary needs enough new
+  turns to summarize (at most 10 per task). Only when the summary fails are the oldest turns dropped, leaving a note with
+  their saved outputs. `context.auto_summary = false` goes back to dropping; `context.archive_outputs = false` saves nothing;
+  saved outputs of sessions untouched for `context.archive_days` (30) are deleted
 - `/compact` compacts by hand without waiting for the limit (moves the boundary to just before the last 8 messages and saves
   it; no request). `/compact summary` summarizes older turns with one request and sends that single summary from then on.
   Both change the beginning of what is sent, so **the next request misses the prompt cache once**. The session history

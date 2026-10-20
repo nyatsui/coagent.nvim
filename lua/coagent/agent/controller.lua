@@ -1068,10 +1068,72 @@ Write a concise summary (at most ~400 words, bullet points) that keeps:
 - every instruction, requirement and preference the user stated
 - decisions taken and why, and approaches that failed
 - files read or changed and what was learned about them (paths, symbols)
-- commands run and their outcome (pass/fail, key error lines)
+- commands run and their outcome (pass/fail, key error lines, metrics with their values)
 - what remains to be done
+Tool outputs that were saved show recall_output(id="..."): keep that reference next to each output that may matter
+later, so the agent can read it back in full.
 Do not invent anything. Answer with the summary only.
 ]]
+
+--- The saved full tool outputs of this session (nil: context.archive_outputs = false).
+---@return Coagent.Archive?
+function Controller:archive()
+  local c = self.config.context or {}
+  if c.archive_outputs == false then
+    return nil
+  end
+  return require('coagent.agent.archive').get(self.config, self.ws.root, self.session.id)
+end
+
+--- fun(text) -> ref for context.compact / transcript (nil when off).
+function Controller:_archiver()
+  local a = self:archive()
+  return a and function(text)
+    return a:put(text)
+  end or nil
+end
+
+--- Near the context budget, summarize the older turns ONCE (like
+--- /compact summary, inside the task) instead of losing them. Called from
+--- the task's coroutine.
+---@return boolean summarized
+function Controller:_auto_summary(gen, model)
+  local msgs = self.session.messages
+  local prev = self.session.compact_summary
+  local from, upto = context.summary_range(msgs, prev)
+  -- too little new to summarize (the recent turns alone fill the budget):
+  -- shorten instead of paying for a summary on every step
+  if not from or upto - from < 4 then
+    return false
+  end
+  local transcript = context.transcript(msgs, from, upto, prev and prev.content, self:_archiver())
+  self:notice('info', string.format('The conversation is near the context budget: summarizing %d older messages (1 request; outputs stay readable with recall_output)...', upto - from))
+  local res, err = self.backend:ask({
+    messages = { { role = 'user', content = transcript } },
+    system_prompt = Controller.SUMMARY_PROMPT,
+    tools = {},
+    model = model,
+    temperature = self.config.temperature,
+    effort = self:roles().builder_effort,
+    role = 'builder',
+  })
+  async.main()
+  if self.gen ~= gen then
+    return false
+  end
+  if res and not res.cancelled then
+    self:_record_role('builder', model, res)
+  end
+  local text = (res and not res.cancelled) and vim.trim(res.content or '') or ''
+  if text == '' then
+    self:notice('warn', 'Context summary failed (' .. util.clip(tostring(err or 'empty answer'), 160) .. '); the oldest turns are shortened instead (their outputs stay saved).')
+    return false
+  end
+  self.session.compact_summary = { upto = upto, content = text, model = model, auto = true }
+  self.session.compact_watermark = context.full_watermark(context.with_summary(msgs, self.session.compact_summary))
+  self:notice('info', string.format('Summarized %d older messages into one to stay within the context budget.\n%s', upto - from, text))
+  return true
+end
 
 --- Context window and budget without asking the backend (listing models may
 --- need the network); only used for estimates.
@@ -1104,7 +1166,7 @@ function Controller:_compact_view(watermark)
       monitor = require('coagent.agent.monitor').enabled(self.config) and require('coagent.agent.monitor').cfg(self.config) or nil,
     })
   local sent = context.with_summary(self.session.messages, self.session.compact_summary)
-  local _, cinfo = context.compact(sent, budget, { system_prompt = sp, watermark = watermark })
+  local _, cinfo = context.compact(sent, budget, { system_prompt = sp, watermark = watermark, archive = self:_archiver() })
   return cinfo, { budget = budget, max = max, system_prompt = sp, sent = sent }
 end
 
@@ -1176,7 +1238,7 @@ function Controller:_compact_summary()
     return false, string.format('nothing to summarize: no new turns before the last %d messages', context.KEEP_RECENT)
   end
   local model = self:model()
-  local transcript = context.transcript(msgs, from, upto, prev and prev.content)
+  local transcript = context.transcript(msgs, from, upto, prev and prev.content, self:_archiver())
   local before = self:_compact_view(self.session.compact_watermark)
   self.gen = self.gen + 1
   local gen = self.gen
@@ -2377,10 +2439,31 @@ function Controller:_request(gen)
   if self.gen ~= gen then
     return { cancelled = true }
   end
-  local messages, cinfo = context.compact(context.with_summary(self.session.messages, self.session.compact_summary), budget, {
-    system_prompt = system_prompt,
-    watermark = self.session.compact_watermark,
-  })
+  local cfg_ctx = self.config.context or {}
+  local archiver = self:_archiver()
+  local function compact(lossless)
+    return context.compact(context.with_summary(self.session.messages, self.session.compact_summary), budget, {
+      system_prompt = system_prompt,
+      watermark = self.session.compact_watermark,
+      archive = archiver,
+      lossless = lossless,
+    })
+  end
+  local t = self.task
+  -- a safety cap per task; each summary needs enough new turns (_auto_summary)
+  local can_summarize = cfg_ctx.auto_summary ~= false and (t.auto_summaries or 0) < 10
+  local messages, cinfo = compact(can_summarize)
+  if cinfo.over then
+    -- shortening old outputs is not enough: summarize older turns instead of
+    -- truncating or dropping them
+    if self:_auto_summary(gen, model) then
+      t.auto_summaries = (t.auto_summaries or 0) + 1
+    end
+    if self.gen ~= gen then
+      return { cancelled = true }
+    end
+    messages, cinfo = compact(false)
+  end
   self.session.compact_watermark = cinfo.watermark
   if cinfo.dropped > 0 then
     -- an injected ledger digest may be among the dropped turns
@@ -2546,6 +2629,9 @@ function Controller:_tool_ctx(item, gen)
     experiments = self.experiments,
     ledger = self.ledger,
     loop = self.loop,
+    archive = function()
+      return self:archive()
+    end,
     changes = self.session.changes,
     source = self.source,
     item = item,
@@ -2916,7 +3002,17 @@ function Controller:_execute(gen, tc)
     self:_activate_skill(prepared.skill)
   end
 
-  local content = util.truncate_middle(util.redact(res.output or ''), self.config.limits.max_tool_output_bytes)
+  local full = util.redact(res.output or '')
+  local content = util.truncate_middle(full, self.config.limits.max_tool_output_bytes)
+  if #content < #full then
+    -- the model sees the head and the tail; the whole output stays readable
+    local a = self:archive()
+    local ref = a and a:put(full)
+    if ref then
+      local n = select(2, full:gsub('\n', '\n')) + 1
+      content = content .. string.format('\n[full output: %d bytes, %d lines, saved: %s reads any range or the lines matching a query]', #full, n, require('coagent.agent.archive').call(ref))
+    end
+  end
 
   -- FAILURE (a check failed after edits) / REPEATED_FAILURE (the same one twice)
   if tool.name == 'run_command' then

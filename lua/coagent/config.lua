@@ -130,6 +130,22 @@ local defaults = {
   -- Workspace root. nil = git root of cwd, or cwd.
   root = nil,
 
+  -- Long conversations: nothing the model saw is lost.
+  context = {
+    -- Tool outputs cut at limits.max_tool_output_bytes, or shortened when the
+    -- conversation nears the context budget, are saved in full (redacted) in
+    -- stdpath('state')/coagent/outputs/<project>/<session>/ (0600); the
+    -- shortened text names them and the agent reads any part back with the
+    -- recall_output tool (no re-run).
+    archive_outputs = true,
+    archive_days = 30, -- saved outputs of sessions untouched this long are deleted
+    archive_dir = nil, -- nil = stdpath('state')/coagent/outputs
+    -- When shortening old outputs is not enough, summarize the older turns
+    -- with ONE request (like /compact summary) instead of truncating or
+    -- dropping them. false: drop the oldest turns (a short note remains).
+    auto_summary = true,
+  },
+
   -- Settings changed from inside Neovim (/config set, /update-config,
   -- /config edit) are saved here as JSON and applied on top of setup() opts
   -- at every start. nil = stdpath('state')/coagent/settings.json; false = off.

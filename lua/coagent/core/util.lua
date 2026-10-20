@@ -30,6 +30,63 @@ local function is_cont(b)
   return b ~= nil and b >= 0x80 and b < 0xC0
 end
 
+--- `s` as valid UTF-8: every byte that does not start a well-formed
+--- sequence (a Shift_JIS / Latin-1 file, binary output, a character cut in
+--- half) becomes U+FFFD. The API rejects request bodies with invalid UTF-8.
+---@param s string
+---@return string text, boolean changed
+function M.fix_utf8(s)
+  if type(s) ~= 'string' or not s:find('[\128-\255]') then
+    return s, false
+  end
+  local out, i, n, start, bad = {}, 1, #s, 1, false
+  local byte = string.byte
+  while i <= n do
+    local c = byte(s, i)
+    if c < 0x80 then
+      i = i + 1
+    else
+      local len = (c >= 0xC2 and c <= 0xDF) and 2 or (c >= 0xE0 and c <= 0xEF) and 3 or (c >= 0xF0 and c <= 0xF4) and 4 or 0
+      local ok = len > 0 and i + len - 1 <= n
+      if ok then
+        for k = 1, len - 1 do
+          local b = byte(s, i + k)
+          if b < 0x80 or b > 0xBF then
+            ok = false
+            break
+          end
+        end
+      end
+      if ok then
+        local c2 = byte(s, i + 1)
+        if (c == 0xE0 and c2 < 0xA0) or (c == 0xED and c2 > 0x9F) or (c == 0xF0 and c2 < 0x90) or (c == 0xF4 and c2 > 0x8F) then
+          ok = false -- overlong, surrogate or beyond U+10FFFF
+        end
+      end
+      if ok then
+        i = i + len
+      else
+        out[#out + 1] = s:sub(start, i - 1)
+        out[#out + 1] = '\239\191\189'
+        bad = true
+        i = i + 1
+        start = i
+      end
+    end
+  end
+  if not bad then
+    return s, false
+  end
+  out[#out + 1] = s:sub(start)
+  return table.concat(out), true
+end
+
+---@param s string
+---@return boolean
+function M.is_utf8(s)
+  return not select(2, M.fix_utf8(s))
+end
+
 --- First `max_bytes` bytes of `s` without cutting a UTF-8 character in half.
 ---@param s string
 ---@param max_bytes integer

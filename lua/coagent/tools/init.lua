@@ -23,6 +23,7 @@ local builtin = {
   require('coagent.agent.delegate').tool,
   require('coagent.agent.ledger').tool,
   require('coagent.agent.loop').tool,
+  require('coagent.agent.archive').tool,
   lsp.lsp_definition,
   lsp.lsp_references,
   lsp.lsp_symbols,

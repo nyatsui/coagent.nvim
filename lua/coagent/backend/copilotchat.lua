@@ -266,16 +266,20 @@ function Backend:model_info(model)
   end
 end
 
+-- Everything sent must be valid UTF-8 (the API answers 400 "unicode decode
+-- error" otherwise): file contents in other encodings, binary command output.
+local fix = util.fix_utf8
+
 local function to_history(messages)
   local out = {}
   for _, m in ipairs(messages) do
-    local msg = { role = m.role, content = m.content or '' }
+    local msg = { role = m.role, content = fix(m.content or '') }
     if m.tool_call_id then
       msg.tool_call_id = m.tool_call_id
     end
     if m.tool_calls and #m.tool_calls > 0 then
       msg.tool_calls = vim.tbl_map(function(tc)
-        return { id = tc.id, name = tc.name, arguments = tc.arguments or '{}' }
+        return { id = tc.id, name = tc.name, arguments = fix(tc.arguments or '{}') }
       end, m.tool_calls)
     end
     table.insert(out, msg)
@@ -665,10 +669,10 @@ function Backend:_ask_once(client, req, plan)
     headless = req.headless == true,
     history = to_history(req.messages),
     tools = vim.tbl_map(function(t)
-      return { name = t.name, description = t.description, schema = require('coagent.tools').normalize_schema(t.schema) }
+      return { name = t.name, description = fix(t.description or ''), schema = require('coagent.tools').normalize_schema(t.schema) }
     end, req.tools or {}),
     resources = {},
-    system_prompt = req.system_prompt or '',
+    system_prompt = fix(req.system_prompt or ''),
     model = plan.model,
     temperature = req.temperature,
     on_progress = function(msg)

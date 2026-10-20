@@ -240,7 +240,7 @@ describe('controller compact', function()
     end)
     assert.are.equal(1, backend.calls)
     local sent = backend.requests[1].messages
-    assert.is_truthy(sent[3].content:find('elided', 1, true))
+    assert.is_truthy(sent[3].content:find('shortened', 1, true))
     assert.is_true(#sent[3].content < 1000)
   end)
 

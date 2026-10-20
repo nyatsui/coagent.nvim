@@ -123,7 +123,7 @@ M.read_file = {
   end,
   run = function(args, ctx, prepared)
     local info = prepared.path
-    local data
+    local data, encoding_note
     -- Always from disk: CopilotChat's file reader caches by whole-second
     -- mtime and returns stale text for a file rewritten within the same
     -- second (an edit right after a read, a growing training log).
@@ -136,6 +136,17 @@ M.read_file = {
         return { ok = false, output = 'Error: ' .. info.rel .. ' looks like a binary file.' }
       end
       data = raw
+      if not util.is_utf8(raw) then
+        -- Japanese files are often Shift_JIS (cp932): show them decoded
+        local dec = vim.fn.iconv(raw, 'cp932', 'utf-8')
+        if type(dec) == 'string' and dec ~= '' and util.is_utf8(dec) then
+          data = dec
+          encoding_note = '\n[note: the file is not UTF-8; shown decoded from Shift_JIS (cp932). edit_file / write_file only change UTF-8 files]'
+        else
+          data = util.fix_utf8(raw)
+          encoding_note = '\n[note: the file is not valid UTF-8; invalid bytes are shown as U+FFFD]'
+        end
+      end
     end
     if #data > ctx.config.limits.max_read_bytes and not (args.start_line or args.end_line) then
       -- Still return a window so the model can continue with ranges.
@@ -178,7 +189,7 @@ M.read_file = {
     if total == 0 then
       return { ok = true, output = '(empty file)', summary = '0 lines' }
     end
-    return { ok = true, output = table.concat(out, '\n') .. note, summary = string.format('%d lines', e - s + 1) }
+    return { ok = true, output = table.concat(out, '\n') .. note .. (encoding_note or ''), summary = string.format('%d lines', e - s + 1) }
   end,
 }
 
@@ -882,6 +893,10 @@ M.edit_file = {
     local old = util.read_file(info.real)
     if not old then
       return nil, 'cannot read ' .. info.rel
+    end
+    if not util.is_utf8(old) then
+      return nil, info.rel .. ' is not UTF-8 (e.g. Shift_JIS); edit_file only changes UTF-8 files, so its encoding is never changed '
+        .. 'by accident. Ask the user to convert it, or leave it unchanged.'
     end
     local edits = args.edits
     if type(edits) ~= 'table' or #edits == 0 then

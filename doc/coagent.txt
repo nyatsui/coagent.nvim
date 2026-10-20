@@ -368,6 +368,26 @@ command name (e.g. "/etc/hosts is wrong") is sent as a normal prompt.
 is not changed; only what later requests send. Because the start of the
 request changes, the next request is a one-time prompt-cache miss.
 
+                                                  *coagent-context-archive*
+Nothing the model saw is lost. A tool output longer than
+`limits.max_tool_output_bytes` reaches the model as its head and tail plus
+"saved: recall_output(id=...)"; old outputs shortened near the context
+budget name their saved full text the same way. Both are saved (redacted,
+0600) in stdpath('state')/coagent/outputs/<project>/<session>/, and the
+`recall_output` tool reads any range or the lines matching a query. When
+shortening is not enough, the older turns are summarized with ONE request
+during the task (at most 10 per task) instead of being dropped; only if
+that fails are the oldest turns dropped, with a note naming their saved
+outputs.
+>lua
+  context = {
+    archive_outputs = true,
+    archive_days = 30,     -- delete outputs of sessions untouched this long
+    archive_dir = nil,     -- nil = stdpath('state')/coagent/outputs
+    auto_summary = true,   -- false: drop the oldest turns instead
+  }
+<
+
                                                    *coagent-plan* *:CoagentPlan*
 Plan first: check the direction before anything changes (like Claude Code's
 plan mode). >

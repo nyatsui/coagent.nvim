@@ -398,20 +398,41 @@ local function important_lines(text, max)
   return out
 end
 
---- Shrink a tool result while keeping its first lines and any error lines.
+--- The saved full text of `content`: the reference it already names (an
+--- output cut at max_tool_output_bytes) or a new one from `archive`.
 ---@param content string
+---@param archive (fun(text:string):string?)?
+---@return string? ref
+local function ref_of(content, archive)
+  local Archive = require('coagent.agent.archive')
+  local ref = content:match(Archive.REF_PATTERN)
+  if ref then
+    return ref
+  end
+  return archive and archive(content) or nil
+end
+
+--- Shrink a tool result while keeping its first lines and any error lines.
+--- With `archive`, the full text is saved and the shortened one names it
+--- (recall_output), so nothing is lost.
+---@param content string
+---@param archive (fun(text:string):string?)?
 ---@return string
-function M.elide(content)
+function M.elide(content, archive)
   if #content <= 800 then
     return content
   end
   local head = util.clip(content, 400)
-  local errs = important_lines(content:sub(401), 15)
-  local out = head .. '\n[... older tool output elided to save context (' .. #content .. ' bytes)'
+  local errs = important_lines(content:sub(#head + 1), 15)
+  local ref = ref_of(content, archive)
+  local out = head .. '\n[... older tool output shortened to save context (' .. #content .. ' bytes)'
+  if ref then
+    out = out .. '; the full text is saved: ' .. require('coagent.agent.archive').call(ref) .. ' reads any part of it'
+  end
   if #errs > 0 then
     out = out .. '; key lines kept:]\n' .. table.concat(errs, '\n')
   else
-    out = out .. '; re-run the tool if you need it again]'
+    out = out .. (ref and ']' or '; re-run the tool if you need it again]')
   end
   return out
 end
@@ -424,8 +445,12 @@ end
 ---     and the recent tail, replacing them with a short note
 ---@param messages table[]
 ---@param budget integer
----@param opts {system_prompt:string?, keep_recent:integer?}?
----@return table[] messages, {elided:integer, dropped:integer, tokens:integer}
+--- With opts.archive, shortened outputs and texts are saved in full first
+--- (recall_output). With opts.lossless, compaction stops after step 1 and
+--- reports `over = true` when that is not enough (the caller summarizes
+--- older turns instead of losing them).
+---@param opts {system_prompt:string?, keep_recent:integer?, watermark:integer?, target:integer?, archive:(fun(text:string):string?)?, lossless:boolean?}?
+---@return table[] messages, {elided:integer, dropped:integer, tokens:integer, watermark:integer, over:boolean?}
 function M.compact(messages, budget, opts)
   opts = opts or {}
   local keep_recent = opts.keep_recent or 8
@@ -445,7 +470,7 @@ function M.compact(messages, budget, opts)
   local function elide_at(i)
     local m = msgs[i]
     if m and m.role == 'tool' and #(m.content or '') > 800 then
-      m.content = M.elide(m.content)
+      m.content = M.elide(m.content, opts.archive)
       info.elided = info.elided + 1
     end
   end
@@ -469,10 +494,16 @@ function M.compact(messages, budget, opts)
     info.tokens = size()
     return msgs, info
   end
+  if opts.lossless then
+    info.over = true
+    info.tokens = size()
+    return msgs, info
+  end
   for i = 1, cutoff do
     local m = msgs[i]
     if m.role == 'assistant' and #(m.content or '') > 1500 then
-      m.content = util.clip(m.content, 1200) .. '\n[... truncated]'
+      local ref = opts.archive and opts.archive(m.content)
+      m.content = util.clip(m.content, 1200) .. (ref and ('\n[... truncated; the full text is saved: ' .. require('coagent.agent.archive').call(ref) .. ']') or '\n[... truncated]')
     end
   end
   if size() <= budget then
@@ -524,7 +555,11 @@ function M.compact(messages, budget, opts)
       table.insert(dropped_tools, tc.name .. ' ' .. util.clip(tc.arguments or '', 80))
     end
     while middle[1] and middle[1].role == 'tool' do
-      table.remove(middle, 1)
+      local t = table.remove(middle, 1)
+      local ref = #(t.content or '') > 0 and ref_of(t.content, opts.archive)
+      if ref then
+        dropped_tools[#dropped_tools] = (dropped_tools[#dropped_tools] or 'tool') .. ' -> output saved: ' .. require('coagent.agent.archive').call(ref)
+      end
       info.dropped = info.dropped + 1
     end
   end
@@ -538,7 +573,7 @@ function M.compact(messages, budget, opts)
       end
       table.insert(lines, '- ' .. d)
     end
-    table.insert(lines, 'Re-read files if you need their current content.]')
+    table.insert(lines, 'Saved outputs can be read back with recall_output; re-read files if you need their current content.]')
     note = { role = 'user', content = table.concat(lines, '\n') }
   end
   msgs = head
@@ -560,7 +595,7 @@ end
 
 M.KEEP_RECENT = 8
 
-M.SUMMARY_PREFIX = '[Context note: the earlier conversation was summarized by /compact summary to save context. Summary:\n'
+M.SUMMARY_PREFIX = '[Context note: the earlier conversation was summarized to save context. Summary:\n'
 
 local function first_user(messages)
   for i, m in ipairs(messages) do
@@ -631,7 +666,8 @@ end
 ---@param upto integer
 ---@param prev_summary string?
 ---@return string
-function M.transcript(messages, from, upto, prev_summary)
+---@param archive (fun(text:string):string?)? saves tool outputs (their ids appear in the transcript)
+function M.transcript(messages, from, upto, prev_summary, archive)
   local parts = {}
   if prev_summary then
     table.insert(parts, '## Earlier summary\n' .. prev_summary)
@@ -639,7 +675,7 @@ function M.transcript(messages, from, upto, prev_summary)
   for i = from + 1, upto do
     local m = messages[i]
     if m.role == 'tool' then
-      table.insert(parts, '## tool result\n' .. M.elide(m.content or ''))
+      table.insert(parts, '## tool result\n' .. M.elide(m.content or '', archive))
     else
       local text = '## ' .. m.role .. '\n' .. util.clip(m.content or '', 4000)
       for _, tc in ipairs(m.tool_calls or {}) do
