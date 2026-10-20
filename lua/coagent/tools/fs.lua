@@ -157,8 +157,19 @@ M.read_file = {
       note = string.format('\n[lines %d-%d of %d]', s, e, total)
     end
     local out = {}
+    -- stop at a line boundary before the tool result would be cut in the
+    -- middle (max_tool_output_bytes): the model sees exact lines and reads on
+    local cap = math.max(4096, (ctx.config.limits.max_tool_output_bytes or 24 * 1024) - 600)
+    local bytes = 0
     for i = s, e do
-      table.insert(out, i .. '\t' .. lines[i])
+      local l = i .. '\t' .. lines[i]
+      if bytes + #l + 1 > cap and #out > 0 then
+        note = string.format('\n[showing lines %d-%d of %d (output size limit); continue with start_line=%d]', s, i - 1, total, i)
+        e = i - 1
+        break
+      end
+      bytes = bytes + #l + 1
+      table.insert(out, l)
     end
     local conflict = util.find_buf(info.real)
     if conflict and vim.bo[conflict].modified then
@@ -645,6 +656,189 @@ local function all_prefixed(s, pat)
   return true
 end
 
+------------------------------------------------------------------------------
+-- Tolerant matching of old_string (only when it yields ONE match)
+------------------------------------------------------------------------------
+
+-- Characters models often write differently from the file.
+local UNI = {
+  ['\u{00A0}'] = ' ', ['\u{3000}'] = ' ', ['\u{2009}'] = ' ', ['\u{202F}'] = ' ',
+  ['\u{2018}'] = "'", ['\u{2019}'] = "'", ['\u{201C}'] = '"', ['\u{201D}'] = '"',
+  ['\u{2013}'] = '-', ['\u{2014}'] = '-', ['\u{2212}'] = '-', ['\u{2026}'] = '...',
+  ['\u{FEFF}'] = '',
+}
+
+--- A line compared at `level`: 1 trailing whitespace ignored; 2 + runs of
+--- inner spaces and look-alike characters (quotes, dashes, wide spaces);
+--- 3 + leading indentation ignored.
+local function norm_line(l, level)
+  l = l:gsub('%s+$', '')
+  if level >= 2 then
+    for k, v in pairs(UNI) do
+      l = l:gsub(k, v)
+    end
+    l = l:gsub('%s+$', '')
+    local ind, rest = l:match('^(%s*)(.*)$')
+    l = (level >= 3 and '' or ind) .. rest:gsub('[ \t]+', ' ')
+  end
+  return l
+end
+
+--- Lines of `text` with the byte offset where each starts and ends (without
+--- its newline).
+local function line_spans(text)
+  local out, pos = {}, 1
+  while pos <= #text + 1 do
+    local nl = text:find('\n', pos, true)
+    if not nl then
+      table.insert(out, { s = pos, e = #text, text = text:sub(pos) })
+      break
+    end
+    table.insert(out, { s = pos, e = nl - 1, text = text:sub(pos, nl - 1) })
+    pos = nl + 1
+  end
+  return out
+end
+
+--- Find old_string line by line, tolerating whitespace and look-alike
+--- characters. Returns the byte range of the unique match and the level used.
+---@return integer? start, integer? stop, integer? level, string? file_indent, string? old_indent
+local function fuzzy_find(content, o)
+  local trail = o:sub(-1) == '\n'
+  local olines = vim.split(trail and o:sub(1, -2) or o, '\n', { plain = true })
+  while #olines > 0 and vim.trim(olines[1]) == '' do
+    table.remove(olines, 1)
+  end
+  while #olines > 0 and vim.trim(olines[#olines]) == '' do
+    table.remove(olines)
+  end
+  if #olines == 0 then
+    return nil
+  end
+  local spans = line_spans(content)
+  for level = 1, 3 do
+    local want = {}
+    for i, l in ipairs(olines) do
+      want[i] = norm_line(l, level)
+    end
+    local hits = {}
+    for i = 1, #spans - #olines + 1 do
+      local ok = true
+      for k = 1, #olines do
+        if norm_line(spans[i + k - 1].text, level) ~= want[k] then
+          ok = false
+          break
+        end
+      end
+      if ok then
+        table.insert(hits, i)
+        if #hits > 1 then
+          break
+        end
+      end
+    end
+    if #hits == 1 then
+      local i = hits[1]
+      local last = spans[i + #olines - 1]
+      local stop = last.e
+      if trail and stop < #content then
+        stop = stop + 1 -- the newline after the last line
+      end
+      -- a CR at the end of the last line stays with the line ending
+      if not trail and content:sub(stop, stop) == '\r' then
+        stop = stop - 1
+      end
+      return spans[i].s, stop, level, spans[i].text:match('^%s*'), olines[1]:match('^%s*')
+    elseif #hits > 1 then
+      return nil
+    end
+  end
+end
+
+--- Similarity of two lines (0..1): shared prefix + suffix after normalizing.
+local function line_sim(a, b)
+  a, b = norm_line(a, 3), norm_line(b, 3)
+  if a == b then
+    return 1
+  end
+  local n = math.min(#a, #b)
+  if n == 0 then
+    return 0
+  end
+  local p = 0
+  while p < n and a:byte(p + 1) == b:byte(p + 1) do
+    p = p + 1
+  end
+  local q = 0
+  while q < n - p and a:byte(#a - q) == b:byte(#b - q) do
+    q = q + 1
+  end
+  return (p + q) / math.max(#a, #b)
+end
+
+--- The region of `content` that looks most like `o`, as read_file lines.
+---@return string?
+local function closest_region(content, o)
+  local olines = vim.split(o, '\n', { plain = true })
+  local probe = {}
+  for _, l in ipairs(olines) do
+    if vim.trim(l) ~= '' then
+      table.insert(probe, l)
+    end
+    if #probe >= 12 then
+      break
+    end
+  end
+  if #probe == 0 then
+    return nil
+  end
+  local lines = vim.split(content, '\n', { plain = true })
+  if #lines > 20000 then
+    return nil
+  end
+  local best, best_i = 0, nil
+  for i = 1, #lines do
+    local sc = line_sim(lines[i], probe[1])
+    if sc > 0.3 then
+      -- the following probe lines near the following file lines
+      for k = 2, #probe do
+        sc = sc + (lines[i + k - 1] and line_sim(lines[i + k - 1], probe[k]) or 0)
+      end
+      if sc > best then
+        best, best_i = sc, i
+      end
+    end
+  end
+  if not best_i or best / #probe < 0.35 then
+    return nil
+  end
+  local from = math.max(1, best_i - 2)
+  local to = math.min(#lines, best_i + #olines + 2, from + 59)
+  local out = {}
+  for i = from, to do
+    table.insert(out, i .. '\t' .. util.ellipsize(lines[i]:gsub('\r$', ''), 400))
+  end
+  return table.concat(out, '\n'), from, to
+end
+
+--- Shift the indentation of `n` from the model's `o_ind` to the file's `f_ind`.
+local function reindent(n, o_ind, f_ind)
+  if o_ind == f_ind then
+    return n
+  end
+  local out = {}
+  for _, l in ipairs(vim.split(n, '\n', { plain = true })) do
+    if l ~= '' and vim.startswith(l, o_ind) then
+      l = f_ind .. l:sub(#o_ind + 1)
+    end
+    table.insert(out, l)
+  end
+  return table.concat(out, '\n')
+end
+
+M._fuzzy_find = fuzzy_find
+M._closest_region = closest_region
+
 M.edit_file = {
   name = 'edit_file',
   kind = 'write',
@@ -695,6 +889,7 @@ M.edit_file = {
     end
     local crlf = old:find('\r\n', 1, true) ~= nil
     local normalized = false
+    local fuzzy -- level of tolerant matching used (1-3)
     local new = old
     for i, e in ipairs(edits) do
       local o, n = e.old_string, e.new_string
@@ -727,20 +922,51 @@ M.edit_file = {
           end
         end
       end
+      local fs_, fe
+      if c == 0 and not e.replace_all then
+        -- whitespace / look-alike characters / indentation: only a unique match
+        local level, f_ind, o_ind
+        fs_, fe, level, f_ind, o_ind = fuzzy_find(new, o)
+        if fs_ then
+          if level == 3 then
+            n = reindent(n, o_ind, f_ind)
+          end
+          if crlf then
+            n = n:gsub('\r?\n', '\r\n')
+          end
+          fuzzy = math.max(fuzzy or 0, level)
+          c = 1
+        end
+      end
       if c == 0 then
-        return nil, string.format(
-          'edit %d: old_string not found in %s. It must match exactly, including whitespace, and must not contain line-number prefixes. Re-read the file and retry.',
+        local region, from, to = closest_region(new, e.old_string)
+        local msg = string.format(
+          'edit %d: old_string not found in %s. It must match exactly, including whitespace, and must not contain line-number prefixes.',
           i,
           info.rel
         )
+        if region then
+          msg = msg .. string.format('\nThe closest text in the file now (lines %d-%d; copy old_string from it WITHOUT the line numbers):\n%s', from, to, region)
+        else
+          msg = msg .. ' Re-read the part of the file you edit (read_file with start_line / end_line) and retry.'
+        end
+        if i > 1 then
+          msg = msg .. '\n(Edits are applied in order: edit ' .. i .. ' sees the text after edits 1-' .. (i - 1) .. '.)'
+        end
+        return nil, msg
       end
       if c > 1 and not e.replace_all then
         return nil, string.format('edit %d: old_string occurs %d times in %s; add surrounding context to make it unique or set replace_all.', i, c, info.rel)
       end
-      new = replace_plain(new, o, n, e.replace_all)
+      if fs_ then
+        new = new:sub(1, fs_ - 1) .. n .. new:sub(fe + 1)
+      else
+        new = replace_plain(new, o, n, e.replace_all)
+      end
     end
     local pv = preview(info, old, new, 'modify')
     pv.normalized = normalized
+    pv.fuzzy = fuzzy
     return pv
   end,
   run = function(_, ctx, prepared, approved)
@@ -756,6 +982,9 @@ M.edit_file = {
       ok = true,
       output = string.format('Edited %s (+%d -%d)', prepared.path.rel, a, r)
         .. (prepared.normalized and '\nNOTE: old_string contained read_file line prefixes (number/tab); they were ignored. Do not include them.' or '')
+        .. (prepared.fuzzy and ('\nNOTE: old_string did not match exactly; it matched one place after ignoring '
+          .. ({ 'trailing whitespace', 'whitespace and look-alike characters (quotes, dashes, wide spaces)', 'whitespace, look-alike characters and indentation' })[prepared.fuzzy]
+          .. '. Copy old_string exactly from read_file next time.') or '')
         .. partial_note(prepared, content)
         .. fmt
         .. dnote,

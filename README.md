@@ -1137,6 +1137,12 @@ terminal = {
 | Background | `start_process` (dev servers, long training / evaluation runs; `experiment = true` records a run) | Yes |
 | | `wait_process` (blocks until exit / a pattern / a monitoring checkpoint, no model requests while waiting), `read_process_output`, `list_processes`, `stop_process` (with a reason for runs) | No (only processes the agent started, or a run handed over with `/exp watch`) |
 
+- `edit_file` replaces exact text. When `old_string` does not match exactly, it is still applied if it matches **one**
+  place after ignoring trailing whitespace, then look-alike characters (curly quotes, dashes, wide / non-breaking
+  spaces) and runs of spaces, then indentation (the replacement is re-indented); the diff shows what happens and the
+  model is told to copy exactly next time. Otherwise the error shows the closest text in the file with line numbers, so
+  the model can retry without reading the file again. `read_file` stops at a line boundary before the tool output limit
+  (`max_tool_output_bytes`) and says where to continue, so long documents are never cut in the middle
 - LSP tools use the language servers configured in your Neovim (files not yet loaded are loaded invisibly and the server is
   awaited). Files without a server return an error and the model falls back to `search`
 - Background processes keep running after the task ends (winbar: `N bg`). They stop with `<C-c>`, a new session, or when
