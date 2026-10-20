@@ -181,6 +181,10 @@ local defaults = {
     budget_counts = 'billed_equivalent',
     budget_warn_at = 0.8, -- one notice at this fraction of a budget
     max_read_bytes = 256 * 1024, -- largest file the model may read at once
+    -- edit_file only changes lines the model read (read_file) in their current
+    -- form, or wrote itself; write_file only replaces a file it read in full.
+    -- Stops edits based on guesses about unread text or an old version.
+    edit_requires_read = true,
     context_budget = nil, -- tokens; nil = 70% of model max input tokens (fallback 64k)
   },
 

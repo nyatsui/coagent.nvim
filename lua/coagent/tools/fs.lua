@@ -123,7 +123,7 @@ M.read_file = {
   end,
   run = function(args, ctx, prepared)
     local info = prepared.path
-    local data, encoding_note
+    local data, encoding_note, disk
     -- Always from disk: CopilotChat's file reader caches by whole-second
     -- mtime and returns stale text for a file rewritten within the same
     -- second (an edit right after a read, a growing training log).
@@ -136,6 +136,7 @@ M.read_file = {
         return { ok = false, output = 'Error: ' .. info.rel .. ' looks like a binary file.' }
       end
       data = raw
+      disk = raw
       if not util.is_utf8(raw) then
         -- Japanese files are often Shift_JIS (cp932): show them decoded
         local dec = vim.fn.iconv(raw, 'cp932', 'utf-8')
@@ -188,6 +189,9 @@ M.read_file = {
     end
     if total == 0 then
       return { ok = true, output = '(empty file)', summary = '0 lines' }
+    end
+    if ctx.seen and disk and e >= s then
+      ctx.seen:mark_read(info.real, disk, s, e)
     end
     return { ok = true, output = table.concat(out, '\n') .. note .. (encoding_note or ''), summary = string.format('%d lines', e - s + 1) }
   end,
@@ -554,6 +558,42 @@ local function partial_note(prepared, content)
   )
 end
 
+local Seen = require('coagent.tools.seen')
+
+--- The read-before-edit tracker when it applies (limits.edit_requires_read).
+local function seen_of(ctx)
+  if ctx.seen and (ctx.config.limits or {}).edit_requires_read ~= false then
+    return ctx.seen
+  end
+end
+
+--- Why the model may not change `content` of this file (nil: it may).
+local function unread_error(seen, info, content)
+  if seen:flags(info.real, content) then
+    return nil
+  end
+  if seen.files[info.real] then
+    return info.rel .. ' changed since you read it (edited by the user, a formatter or another program). Read the part you '
+      .. 'change again (read_file with start_line / end_line) and copy old_string from that output.'
+  end
+  return 'you have not read ' .. info.rel .. ' in this conversation (or it left the context). Read the part you change first '
+    .. '(read_file with start_line / end_line) and copy old_string from that output: edits are never based on unread text.'
+end
+
+--- Update the tracker after the agent wrote `content` (and a formatter may
+--- have rewritten it since).
+local function track_write(ctx, prepared, content)
+  if not ctx.seen then
+    return
+  end
+  local real = prepared.path.real
+  ctx.seen:after_write(real, prepared.old, content, true)
+  local disk = util.read_file(real)
+  if disk and disk ~= content then
+    ctx.seen:after_write(real, content, disk, false)
+  end
+end
+
 ------------------------------------------------------------------------------
 -- write_file
 ------------------------------------------------------------------------------
@@ -584,6 +624,13 @@ M.write_file = {
     if old and is_binary(old) then
       return nil, 'refusing to overwrite a binary file'
     end
+    local seen = seen_of(ctx)
+    if seen and old and old ~= '' and not seen:all(info.real, old) then
+      local why = unread_error(seen, info, old)
+      return nil, 'write_file would replace all of ' .. info.rel .. ', but '
+        .. (why and why:gsub('^' .. vim.pesc(info.rel) .. ' ', 'it ', 1) or ('you have not read all of it (lines ' .. Seen.missing(seen:flags(info.real, old), 1, Seen.line_count(old)) .. ' are unread)'))
+        .. ' To change part of it, use edit_file.'
+    end
     return preview(info, old, args.content, old == nil and 'create' or 'modify')
   end,
   run = function(_, ctx, prepared, approved)
@@ -594,6 +641,7 @@ M.write_file = {
     end
     local verb = prepared.op == 'create' and 'Created' or 'Wrote'
     local fmt = formatter.after_edit(ctx, prepared.path)
+    track_write(ctx, prepared, content)
     local dnote, dmeta = edit_diag.after(ctx, prepared.path, snap, prepared.old)
     return {
       ok = true,
@@ -671,24 +719,13 @@ end
 -- Tolerant matching of old_string (only when it yields ONE match)
 ------------------------------------------------------------------------------
 
--- Characters models often write differently from the file.
-local UNI = {
-  ['\u{00A0}'] = ' ', ['\u{3000}'] = ' ', ['\u{2009}'] = ' ', ['\u{202F}'] = ' ',
-  ['\u{2018}'] = "'", ['\u{2019}'] = "'", ['\u{201C}'] = '"', ['\u{201D}'] = '"',
-  ['\u{2013}'] = '-', ['\u{2014}'] = '-', ['\u{2212}'] = '-', ['\u{2026}'] = '...',
-  ['\u{FEFF}'] = '',
-}
-
 --- A line compared at `level`: 1 trailing whitespace ignored; 2 + runs of
---- inner spaces and look-alike characters (quotes, dashes, wide spaces);
---- 3 + leading indentation ignored.
+--- inner spaces / tabs; 3 + leading indentation. Only whitespace: any other
+--- difference (a character, punctuation, full-width vs half-width) means the
+--- model's view of the text is wrong, and the edit is refused.
 local function norm_line(l, level)
   l = l:gsub('%s+$', '')
   if level >= 2 then
-    for k, v in pairs(UNI) do
-      l = l:gsub(k, v)
-    end
-    l = l:gsub('%s+$', '')
     local ind, rest = l:match('^(%s*)(.*)$')
     l = (level >= 3 and '' or ind) .. rest:gsub('[ \t]+', ' ')
   end
@@ -855,7 +892,9 @@ M.edit_file = {
   kind = 'write',
   description = 'Edit an existing file by exact string replacement. old_string must match the file content exactly '
     .. '(including indentation, without line-number prefixes) and be unique unless replace_all is true. '
-    .. 'Use `edits` to apply several replacements to the same file in one call.',
+    .. 'Keep old_string SHORT: the smallest unique piece, copied from a read_file output you got in this task (for long '
+    .. 'Markdown or prose lines, a distinctive part of the line is enough). Read the part you edit again if your view of '
+    .. 'it is old or was shortened. Use `edits` to apply several replacements to the same file in one call.',
   schema = {
     type = 'object',
     required = { 'path' },
@@ -902,6 +941,15 @@ M.edit_file = {
     if type(edits) ~= 'table' or #edits == 0 then
       edits = { { old_string = args.old_string, new_string = args.new_string, replace_all = args.replace_all } }
     end
+    local seen = seen_of(ctx)
+    local flags
+    if seen then
+      local why = unread_error(seen, info, old)
+      if why then
+        return nil, why
+      end
+      flags = seen:flags(info.real, old)
+    end
     local crlf = old:find('\r\n', 1, true) ~= nil
     local normalized = false
     local fuzzy -- level of tolerant matching used (1-3)
@@ -939,7 +987,7 @@ M.edit_file = {
       end
       local fs_, fe
       if c == 0 and not e.replace_all then
-        -- whitespace / look-alike characters / indentation: only a unique match
+        -- whitespace / indentation only, and only a unique match
         local level, f_ind, o_ind
         fs_, fe, level, f_ind, o_ind = fuzzy_find(new, o)
         if fs_ then
@@ -973,10 +1021,43 @@ M.edit_file = {
       if c > 1 and not e.replace_all then
         return nil, string.format('edit %d: old_string occurs %d times in %s; add surrounding context to make it unique or set replace_all.', i, c, info.rel)
       end
+      if flags then
+        -- every line this edit changes must have been read in this form
+        local ranges = {}
+        if fs_ then
+          ranges[1] = { fs_, fe }
+        else
+          local init = 1
+          while true do
+            local a, b = new:find(o, init, true)
+            if not a then
+              break
+            end
+            table.insert(ranges, { a, b })
+            init = b + 1
+            if not e.replace_all then
+              break
+            end
+          end
+        end
+        for _, r in ipairs(ranges) do
+          local ls, le = Seen.line_at(new, r[1]), Seen.line_at(new, math.max(r[1], r[2]))
+          local miss = Seen.missing(flags, ls, le)
+          if miss then
+            return nil, string.format('edit %d: it changes lines %d-%d of %s, but you have not read line%s %s in its current form. '
+              .. 'Read them first (read_file start_line=%d end_line=%d) and copy old_string from that output: edits are never based on unread text.',
+              i, ls, le, info.rel, miss:find('[-,]') and 's' or '', miss, ls, le)
+          end
+        end
+      end
+      local before = new
       if fs_ then
         new = new:sub(1, fs_ - 1) .. n .. new:sub(fe + 1)
       else
         new = replace_plain(new, o, n, e.replace_all)
+      end
+      if flags then
+        flags = Seen.carry(flags, before, new, true)
       end
     end
     local pv = preview(info, old, new, 'modify')
@@ -992,13 +1073,14 @@ M.edit_file = {
     end
     local a, r = diff.stats(prepared.old, content)
     local fmt = formatter.after_edit(ctx, prepared.path)
+    track_write(ctx, prepared, content)
     local dnote, dmeta = edit_diag.after(ctx, prepared.path, snap, prepared.old)
     return {
       ok = true,
       output = string.format('Edited %s (+%d -%d)', prepared.path.rel, a, r)
         .. (prepared.normalized and '\nNOTE: old_string contained read_file line prefixes (number/tab); they were ignored. Do not include them.' or '')
         .. (prepared.fuzzy and ('\nNOTE: old_string did not match exactly; it matched one place after ignoring '
-          .. ({ 'trailing whitespace', 'whitespace and look-alike characters (quotes, dashes, wide spaces)', 'whitespace, look-alike characters and indentation' })[prepared.fuzzy]
+          .. ({ 'trailing whitespace', 'runs of spaces', 'spaces and indentation' })[prepared.fuzzy]
           .. '. Copy old_string exactly from read_file next time.') or '')
         .. partial_note(prepared, content)
         .. fmt

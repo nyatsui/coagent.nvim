@@ -26,10 +26,16 @@ describe('edit_file matching', function()
     assert.are.equal('a\r\nB\r\nC\r\n', pv.new)
   end)
 
-  it('tolerates look-alike characters and spacing (quotes, dashes, wide spaces)', function()
+  it('does not accept a different character, only different spacing', function()
     setup({ ['ja.md'] = '## 手順\n\n「学習」 — 2 回　実行する “best” 設定\n次の行\n' })
-    local pv = assert(prep('ja.md', '「学習」 - 2  回 実行する "best" 設定\n', '「学習」を 3 回実行する\n'))
-    assert.are.equal('## 手順\n\n「学習」を 3 回実行する\n次の行\n', pv.new)
+    -- a look-alike character (dash, quotes, wide space) means the model's view is wrong
+    local pv, err = prep('ja.md', '「学習」 - 2 回 実行する "best" 設定\n', 'x\n')
+    assert.is_nil(pv)
+    assert.is_truthy(err:find('The closest text in the file now', 1, true), err)
+    assert.is_truthy(err:find('3\t「学習」 — 2 回　実行する “best” 設定', 1, true), err)
+    -- runs of spaces are fine
+    pv = assert(prep('ja.md', '「学習」  —  2 回　実行する “best” 設定', '「学習」 3 回'))
+    assert.are.equal('## 手順\n\n「学習」 3 回\n次の行\n', pv.new)
     assert.are.equal(2, pv.fuzzy)
   end)
 

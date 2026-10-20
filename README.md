@@ -1138,11 +1138,16 @@ terminal = {
 | Background | `start_process` (dev servers, long training / evaluation runs; `experiment = true` records a run) | Yes |
 | | `wait_process` (blocks until exit / a pattern / a monitoring checkpoint, no model requests while waiting), `read_process_output`, `list_processes`, `stop_process` (with a reason for runs) | No (only processes the agent started, or a run handed over with `/exp watch`) |
 
-- `edit_file` replaces exact text. When `old_string` does not match exactly, it is still applied if it matches **one**
-  place after ignoring trailing whitespace, then look-alike characters (curly quotes, dashes, wide / non-breaking
-  spaces) and runs of spaces, then indentation (the replacement is re-indented); the diff shows what happens and the
-  model is told to copy exactly next time. Otherwise the error shows the closest text in the file with line numbers, so
-  the model can retry without reading the file again. `read_file` stops at a line boundary before the tool output limit
+- **Edits only of text the model has read** (`limits.edit_requires_read`, default on). `edit_file` changes only lines
+  the model read with `read_file` in their current form, or wrote itself; `write_file` replaces an existing file only
+  after the model read all of it. A file changed since the read (by you, a formatter, another program) must be read
+  again, and so must everything once old outputs leave the context. The error names the lines and the `read_file`
+  range to read, so an edit is never based on a guess about unread text or an old version
+- `edit_file` replaces exact text. Why exact: it locates the place unambiguously and proves that the model's view of
+  the text is right. The only differences tolerated are invisible ones — trailing whitespace / CRLF, runs of spaces,
+  indentation (the replacement is re-indented) — and only when that matches **one** place. Any other difference (a
+  character, punctuation, full-width vs half-width) is refused: the error shows the closest text in the file with line
+  numbers, to copy exactly. `read_file` stops at a line boundary before the tool output limit
   (`max_tool_output_bytes`) and says where to continue, so long documents are never cut in the middle
 - Encodings: everything sent to the model is valid UTF-8 (bytes that are not become U+FFFD, so a binary-ish output can
   never make the API reject the request). `read_file` shows Shift_JIS (cp932) files decoded; `edit_file` refuses files

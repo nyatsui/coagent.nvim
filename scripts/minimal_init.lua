@@ -15,3 +15,18 @@ vim.env.XDG_DATA_HOME = state
 
 vim.cmd('runtime plugin/plenary.vim')
 vim.cmd('runtime plugin/coagent.lua')
+
+-- Most specs script edits without reading the file first; the
+-- read-before-edit rule (limits.edit_requires_read) has its own spec, which
+-- turns it on explicitly.
+do
+  local config = require('coagent.config')
+  local setup = config.setup
+  config.setup = function(opts)
+    opts = opts or {}
+    if not (opts.limits and opts.limits.edit_requires_read ~= nil) then
+      opts = vim.tbl_deep_extend('force', opts, { limits = { edit_requires_read = false } })
+    end
+    return setup(opts)
+  end
+end

@@ -75,6 +75,11 @@ function M.config(root, extra)
     session = { persist = false },
     ui = { render_throttle_ms = 0 },
   }, extra or {})
+  -- most specs script edits without a read first; the read-before-edit
+  -- rule has its own spec (edit_read_spec)
+  if not (extra and extra.limits and extra.limits.edit_requires_read ~= nil) then
+    cfg.limits.edit_requires_read = false
+  end
   -- never pick up the developer's own ~/.config/coagent/skills (lists replace)
   cfg.skills.paths = extra and extra.skills and extra.skills.paths or {}
   return cfg

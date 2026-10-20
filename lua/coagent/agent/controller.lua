@@ -60,6 +60,8 @@ function Controller.new(opts)
     queue = {},
   }, Controller)
   self.processes = Background.new(self.config)
+  -- lines of files the model has read in their current form (edit_file / write_file)
+  self.seen = require('coagent.tools.seen').new()
   self.processes:on_change(function(p)
     vim.schedule(function()
       local item = p.item
@@ -1075,6 +1077,15 @@ later, so the agent can read it back in full.
 Do not invent anything. Answer with the summary only.
 ]]
 
+--- Old tool outputs left the context (shortened or summarized): the model
+--- no longer has the text it read, so edits need a fresh read.
+function Controller:_set_watermark(wm)
+  if wm ~= self.session.compact_watermark and self.seen then
+    self.seen:reset()
+  end
+  self.session.compact_watermark = wm
+end
+
 --- The saved full tool outputs of this session (nil: context.archive_outputs = false).
 ---@return Coagent.Archive?
 function Controller:archive()
@@ -1130,7 +1141,7 @@ function Controller:_auto_summary(gen, model)
     return false
   end
   self.session.compact_summary = { upto = upto, content = text, model = model, auto = true }
-  self.session.compact_watermark = context.full_watermark(context.with_summary(msgs, self.session.compact_summary))
+  self:_set_watermark(context.full_watermark(context.with_summary(msgs, self.session.compact_summary)))
   self:notice('info', string.format('Summarized %d older messages into one to stay within the context budget.\n%s', upto - from, text))
   return true
 end
@@ -1174,7 +1185,7 @@ end
 ---@return table cinfo
 function Controller:_after_compact(kind)
   local cinfo, v = self:_compact_view(self.session.compact_watermark)
-  self.session.compact_watermark = cinfo.watermark
+  self:_set_watermark(cinfo.watermark)
   self.session.context = {
     estimate = cinfo.tokens,
     reported = nil,
@@ -1221,7 +1232,7 @@ function Controller:compact(opts)
     self:notice('info', string.format('Nothing to compact: no long tool outputs before the last %d messages. /compact summary condenses older turns (1 request).', context.KEEP_RECENT))
     return true, { elided = 0, unchanged = true }
   end
-  self.session.compact_watermark = wm
+  self:_set_watermark(wm)
   local cinfo = self:_after_compact('elide')
   self:notice(
     'info',
@@ -1275,7 +1286,7 @@ function Controller:_compact_summary()
         self:notice('error', 'Summary failed (' .. util.clip(tostring(rerr or 'empty answer'), 160) .. '); the history is unchanged.')
       else
         self.session.compact_summary = { upto = upto, content = text, model = model }
-        self.session.compact_watermark = context.full_watermark(context.with_summary(msgs, self.session.compact_summary))
+        self:_set_watermark(context.full_watermark(context.with_summary(msgs, self.session.compact_summary)))
         local cinfo = self:_after_compact('summary')
         self:notice('info', string.format('Summarized %d older messages into one: ~%d -> ~%d tokens.\n%s\n\n%s', upto - from, before.tokens or 0, cinfo.tokens or 0, CACHE_NOTE, text))
       end
@@ -2464,7 +2475,7 @@ function Controller:_request(gen)
     end
     messages, cinfo = compact(false)
   end
-  self.session.compact_watermark = cinfo.watermark
+  self:_set_watermark(cinfo.watermark)
   if cinfo.dropped > 0 then
     -- an injected ledger digest may be among the dropped turns
     self.ledger_dropped = true
@@ -2629,6 +2640,9 @@ function Controller:_tool_ctx(item, gen)
     experiments = self.experiments,
     ledger = self.ledger,
     loop = self.loop,
+    -- files imported by /receive are reviewed by the user as a whole; the
+    -- read-before-edit rule is for the model's own edits
+    seen = not tostring(item and item.call_id or ''):match('^receive_') and self.seen or nil,
     archive = function()
       return self:archive()
     end,
