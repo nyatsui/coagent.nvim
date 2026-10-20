@@ -67,3 +67,29 @@ describe('UTF-8', function()
     assert.are.equal(sjis, h.read(root .. '/sjis.txt'))
   end)
 end)
+
+describe('backend errors', function()
+  local Backend = require('coagent.backend.copilotchat')
+
+  it('explains a content_filter stop and never treats it as a reason to retry or switch models', function()
+    local raw = '/home/u/.local/share/coagent/lazy/CopilotChat.nvim/lua/CopilotChat/client.lua:626: Early stop: content_filter'
+    local text = Backend.explain_error(raw)
+    assert.is_truthy(text:find('^stopped by the content filter %(finish reason content_filter%)'), text)
+    assert.is_truthy(text:find('blocks output matching public code', 1, true))
+    assert.is_truthy(text:find('does not retry around the filter', 1, true))
+    assert.is_false(Backend.is_model_unavailable(text))
+    assert.is_false(Backend.is_retryable(text))
+    assert.is_truthy(Backend.explain_error('x/client.lua:626: Early stop: length'):find('maximum output length', 1, true))
+    assert.are.equal('Failed to get response: 500', Backend.explain_error('/a/b/client.lua:622: Failed to get response: 500'))
+    -- through a request
+    local client = {
+      ask = function()
+        error(raw)
+      end,
+    }
+    local res, err = setmetatable({}, { __index = Backend }):_ask_once(client, { messages = {} }, { model = 'm' })
+    assert.is_nil(res)
+    assert.is_truthy(err:find('content filter', 1, true), err)
+    assert.is_nil(err:find('client.lua', 1, true))
+  end)
+end)

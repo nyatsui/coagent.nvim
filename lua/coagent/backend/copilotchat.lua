@@ -650,6 +650,26 @@ end
 ---@param req Coagent.AskRequest
 ---@param plan {model:string, effort:string?, via:string?}
 ---@return Coagent.AskResult?, string? err, string? effort sent
+--- Readable error text: the stream's finish reason explained, without
+--- CopilotChat's source location ("…/client.lua:626: ").
+---@param err string
+---@return string
+function Backend.explain_error(err)
+  err = tostring(err or '')
+  local reason = err:match('Early stop: ([%w_]+)')
+  if reason == 'content_filter' then
+    return 'stopped by the content filter (finish reason content_filter): GitHub Copilot or the model provider withheld this answer. '
+      .. 'Usual causes: the organization setting that blocks output matching public code (e.g. quoting common '
+      .. 'boilerplate code), or the responsible-AI filter for harmful content or prompt injection. coagent does not '
+      .. 'retry around the filter.'
+  elseif reason == 'length' then
+    return 'the answer reached the maximum output length (finish reason length) and was cut off.'
+  elseif reason then
+    return 'the answer stopped early (finish reason ' .. reason .. ').'
+  end
+  return (err:gsub('^[^\n]-%.lua:%d+: ', ''))
+end
+
 function Backend:_ask_once(client, req, plan)
   local co = current_co()
   local entry
@@ -688,7 +708,7 @@ function Backend:_ask_once(client, req, plan)
   local sent = (plan.via == 'variant' and plan.effort) or (entry and entry.applied) or nil
 
   if not ok_ask then
-    return nil, util.redact(tostring(res))
+    return nil, util.redact(Backend.explain_error(tostring(res)))
   end
   if res == nil then
     return { cancelled = true, content = '', tool_calls = {}, usage = {} }
@@ -728,6 +748,10 @@ end
 ---@return boolean
 function Backend.is_model_unavailable(err)
   err = tostring(err or ''):lower()
+  -- a filtered answer is not a reason to try another model
+  if err:find('content_filter', 1, true) then
+    return false
+  end
   if err:find('401', 1, true) or err:find('unauthorized', 1, true) or err:find('authorize', 1, true) then
     return false
   end
@@ -744,6 +768,9 @@ end
 ---@return boolean
 function Backend.is_retryable(err)
   err = tostring(err or ''):lower()
+  if err:find('content_filter', 1, true) then
+    return false
+  end
   for _, pat in ipairs({ '429', '500', '502', '503', '504', 'timed out', 'timeout', 'connection reset', "couldn't connect", 'could not resolve', 'early stop: error' }) do
     if err:find(pat, 1, true) then
       return true

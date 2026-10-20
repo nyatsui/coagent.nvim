@@ -170,7 +170,7 @@ function Advisor:review(gen, kind, brief, opts)
   local res, err
   local function fail(why)
     item.streaming = false
-    item.text = 'Advisor unavailable: ' .. tostring(why or 'no answer') .. ' (continuing without review)'
+    item.text = 'Advisor unavailable: ' .. tostring(why or 'no answer') .. '\nThe task continues without this review.'
     item.failed = true
     ctrl:_update(item)
     -- keep the advisor history consistent: drop the unanswered checkpoint
