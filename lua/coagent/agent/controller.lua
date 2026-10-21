@@ -2058,21 +2058,27 @@ end
 
 --- Remember the agent's file contents when an experiment run starts (the
 --- next BEFORE_RUN shows what changed since).
-function Controller:_snapshot_run()
+--- The agent's changed files as they are now (for a later diff).
+function Controller:_snapshot_files()
   local ch = self.session.changes
   local files = {}
   for _, abs in ipairs(ch.order or {}) do
     files[abs] = { current = ch.files[abs].current }
   end
-  self.run_snapshot = { files = files, at = os.time() }
+  return { files = files, at = os.time() }
+end
+
+function Controller:_snapshot_run()
+  self.run_snapshot = self:_snapshot_files()
 end
 
 --- Diff of the agent's changes since the last run started in this session
---- (all of the session's changes when none ran yet).
+--- (all of the session's changes when none ran yet), or since `snap`.
+---@param snap table? a _snapshot_files() result
 ---@return string diff, boolean since_run
-function Controller:_diff_since_run()
+function Controller:_diff_since_run(snap)
   local ch = self.session.changes
-  local snap = self.run_snapshot
+  snap = snap or self.run_snapshot
   local D = require('coagent.core.diff')
   local parts = {}
   for _, abs in ipairs(ch.order or {}) do
@@ -2356,6 +2362,44 @@ function Controller:_run_brief(tool, args, prepared)
     table.insert(parts, 'Project goals (ledger):\n' .. goals)
   end
   return table.concat(parts, '\n\n')
+end
+
+--- What a BEFORE_RUN re-review adds to the brief: the advisor's previous
+--- points, the builder's answer to them and its changes since.
+---@param prev {advice:string, command:string?, msg:integer, snap:table}?
+---@param n integer this review's number
+---@param max integer
+---@return string
+function Controller:_rereview_brief(prev, n, max)
+  if not prev then
+    return ''
+  end
+  local said = {}
+  for i = prev.msg + 1, #self.session.messages do
+    local m = self.session.messages[i]
+    if m.role == 'assistant' and vim.trim(m.content or '') ~= '' then
+      table.insert(said, vim.trim(m.content))
+    end
+  end
+  local diff = self:_diff_since_run(prev.snap)
+  return table.concat({
+    '',
+    '',
+    string.format('RE-REVIEW (review %d of at most %d for this task). Your points at the previous review of this run:', n, max),
+    util.clip(vim.trim(prev.advice), 3000),
+    '',
+    'Command at the previous review: $ ' .. util.redact(tostring(prev.command or '')),
+    '',
+    "The builder's reply since then (its explanation of points it did not change):",
+    #said > 0 and util.truncate_middle(table.concat(said, '\n\n'), 4000) or '(none)',
+    '',
+    'Changes since the previous review:',
+    diff ~= '' and util.truncate_middle(diff, 8000) or '(none)',
+    '',
+    'Check each previous point: resolved by the change, answered by a sound explanation, or still open. Raise only '
+      .. 'points that are still open (say what is still wrong with the answer) or new and important. Answer LGTM when '
+      .. 'nothing important remains.',
+  }, '\n')
 end
 
 --- After a repeated failure: finish the task on the strong model
@@ -2854,19 +2898,34 @@ function Controller:_execute(gen, tc)
     local max = tonumber(self:roles().advisor_opts.max_run_reviews) or 3
     if (t.run_reviews or 0) < max then
       t.run_reviews = (t.run_reviews or 0) + 1
-      local verdict, advice, reason = self:_supervise(gen, 'BEFORE_RUN', self:_run_brief(tool, args, prepared))
+      local brief = self:_run_brief(tool, args, prepared) .. self:_rereview_brief(t.run_review, t.run_reviews, max)
+      local verdict, advice, reason = self:_supervise(gen, 'BEFORE_RUN', brief)
       if self.gen ~= gen then
         return nil
       end
       if verdict == 'block' then
+        t.run_review = nil
         return self:_blocked_action(gen, 'BEFORE_RUN', reason, item, fail)
       elseif verdict == 'points' then
+        -- the next review of this run sees these points, the builder's answer and its changes since
+        t.run_review = { advice = advice, command = prepared.command, msg = #self.session.messages, snap = self:_snapshot_files() }
+        local cmd = util.ellipsize((tostring(prepared.command or ''):gsub('%s+', ' ')), 100)
+        self:notice('warn', string.format('Run held back (BEFORE_RUN review %d of %d): `%s` did not start. The advisor asks the builder to address:\n%s\n%s',
+          t.run_reviews, max, cmd, vim.trim(advice),
+          t.run_reviews < max and 'The builder fixes the points (or explains why one does not apply) and starts the run again; the advisor then checks only what is still open.'
+            or ('This was the last review (roles.advisor.max_run_reviews = ' .. max .. '): the next attempt starts without one.')))
         return fail('deferred', 'NOT EXECUTED: an advisor reviewed this run before it starts (it would consume GPU hours):\n' .. advice
-          .. '\nAddress the points (fix the code or config, or explain briefly why a point does not apply), then start the run again.')
+          .. '\nAddress each point: fix the code or config, or state briefly in your reply why a point does not apply (the advisor reads your reply at the '
+          .. 're-review). Then start the run again.')
       end
+      t.run_review = nil
     elseif not t.run_reviews_noticed then
       t.run_reviews_noticed = true
-      self:notice('info', string.format('Advisor BEFORE_RUN reviews reached roles.advisor.max_run_reviews (%d) for this task; further runs start without one.', max))
+      local open = t.run_review and t.run_review.advice
+      self:notice('warn', string.format('Advisor BEFORE_RUN reviews reached roles.advisor.max_run_reviews (%d) for this task; this and further runs start without one.%s\n'
+        .. '/config set roles.advisor.max_run_reviews <n> allows more (the next run is reviewed again).', max,
+        open and ('\nPoints of the last review that were not confirmed as resolved:\n' .. vim.trim(open)) or ''))
+      t.run_review = nil
     end
   end
 

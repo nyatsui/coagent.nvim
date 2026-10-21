@@ -240,6 +240,37 @@ describe('supervision checkpoints', function()
     local runs = r.c.experiments:list()
     assert.are.equal(1, #runs)
     assert.is_truthy(runs[1].command:find('seed=1', 1, true))
+    -- the re-review sees its earlier points and what changed since
+    local again = by_role(r, 'advisor')[2].messages[3].content
+    assert.is_truthy(again:find('RE-REVIEW (review 2 of at most 3 for this task)', 1, true), again)
+    assert.is_truthy(again:find('Set a seed so the run can be compared.', 1, true))
+    assert.is_truthy(again:find('Command at the previous review: $ echo "val_loss=0.50"', 1, true))
+    -- the user sees why the run did not start
+    assert.is_truthy(notices(r):find('Run held back (BEFORE_RUN review 1 of 3): `echo "val_loss=0.50"` did not start', 1, true), notices(r))
+  end)
+
+  it('BEFORE_RUN re-reviews read the builder\'s answer; at the cap the open points are shown', function()
+    local r = build(root, steps({
+      { tool_calls = { { name = 'run_command', arguments = { command = 'echo "val_loss=0.50"', experiment = true } } } },
+      { content = 'Point 1 does not apply: the seed is fixed in configs/base.yaml.', tool_calls = { { name = 'run_command', arguments = { command = 'echo "val_loss=0.50"', experiment = true } } } },
+      { tool_calls = { { name = 'run_command', arguments = { command = 'echo "val_loss=0.50"', experiment = true } } } },
+      { content = 'Done.' },
+    }), function(kind)
+      if kind == 'BEFORE_RUN' then
+        return { content = '1. Set a seed.' }
+      end
+      return lgtm()
+    end, { roles = { preset = 'advisor', advisor = { tools = 'none', max_run_reviews = 2 } } })
+    r.c:submit('train')
+    local d = wait_done(r)
+    assert.are.equal('COMPLETED', d.state)
+    local second = by_role(r, 'advisor')[2].messages[3].content
+    assert.is_truthy(second:find("The builder's reply since then", 1, true))
+    assert.is_truthy(second:find('the seed is fixed in configs/base.yaml', 1, true), second)
+    local text = notices(r)
+    assert.is_truthy(text:find('This was the last review (roles.advisor.max_run_reviews = 2)', 1, true), text)
+    assert.is_truthy(text:find('Points of the last review that were not confirmed as resolved:\n1. Set a seed.', 1, true), text)
+    assert.is_truthy(text:find('/config set roles.advisor.max_run_reviews', 1, true))
   end)
 
   it('RESULTS reviews the reading of a monitored run against the experiment log', function()
