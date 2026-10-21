@@ -185,7 +185,9 @@ Press `<CR>` in the input box to start. Try approve `a`, deny `d`, hunk review `
 
 1. Open the panel on the right with `:Coagent` (or `<leader>aa`)
 2. Type a task in the input box at the bottom and send it with `<CR>` in Normal mode (`<C-s>` in Insert mode)
-3. Reading and searching run automatically; edits and commands ask for approval (`a` approve / `d` deny / `D` deny and stop / `r` hunk review)
+3. Reading and searching run automatically; edits and commands ask for approval (`a` approve / `d` deny / `D` deny and stop / `r` hunk review).
+   `d` moves to the input to write the reason for the agent — several lines are fine: `<CR>` (`<C-s>` in Insert mode)
+   denies with it, an empty submit denies without one, `<C-c>` cancels and the action keeps waiting
 4. When done, the verification result and changed files are shown. `gc` lists changes, `gd` shows the diff, `x` reverts
 
 For a step-by-step guide to ML (PyTorch) projects — applying coagent to an existing repository, building from data

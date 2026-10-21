@@ -95,7 +95,7 @@ end
 
 function Input:submit()
   local text = vim.trim(self:text())
-  if text == '' then
+  if text == '' and not self.empty_ok then
     return
   end
   -- Keep the text when the agent refuses it (e.g. busy) so nothing is lost.

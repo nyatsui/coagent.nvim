@@ -366,7 +366,10 @@ function actions.approve(action, ask_reason)
     notify('nothing is waiting for approval')
     return
   end
-  if ask_reason then
+  if ask_reason and state.view and state.view:visible() then
+    -- the reason is written in the input (several lines are fine)
+    state.view:ask_deny_reason(p.item.id, action)
+  elseif ask_reason then
     vim.ui.input({ prompt = 'Reason for the agent (optional): ' }, function(reason)
       if reason == nil then
         return -- <Esc> aborts the denial

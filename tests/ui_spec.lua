@@ -243,6 +243,62 @@ describe('ui', function()
     assert.is_truthy(panel_lines(view):find('⊘ Run echo hi', 1, true))
   end)
 
+  it('d asks for the deny reason in the input: several lines, sent with the denial; the stop key cancels', function()
+    local got
+    setup(function(messages, n)
+      if n == 1 then
+        return { tool_calls = { { name = 'run_command', arguments = { command = 'echo hi' } } } }
+      end
+      got = messages[#messages].content
+      return { content = 'ok' }
+    end)
+    agent.open({ focus = 'panel' })
+    local view = agent.view()
+    local c = agent.controller()
+    c:submit('run')
+    h.wait(function()
+      return c:state() == 'WAITING_APPROVAL'
+    end)
+    vim.api.nvim_set_current_win(view.wins.panel)
+    vim.cmd('normal d')
+    assert.are.equal(view.wins.input, vim.api.nvim_get_current_win())
+    assert.is_truthy(view.deny_pending)
+    assert.is_truthy(vim.wo[view.wins.input].statusline:find('deny: type the reason', 1, true))
+    -- the stop key leaves the reason input; the approval still waits
+    vim.api.nvim_feedkeys(vim.keycode('<C-c>'), 'x', false)
+    assert.is_nil(view.deny_pending)
+    assert.are.equal('WAITING_APPROVAL', c:state())
+    -- again, now with a reason over several lines
+    vim.api.nvim_set_current_win(view.wins.panel)
+    vim.cmd('normal d')
+    view.input:set_text('Do not run it on this machine.\nUse the GPU server:\n- conda env ml')
+    view.input:submit()
+    h.wait(function()
+      return got ~= nil
+    end)
+    assert.is_truthy(got:find('Do not run it on this machine.\nUse the GPU server:\n- conda env ml', 1, true), got)
+    assert.are.equal('', view.input:text())
+    assert.is_nil(view.deny_pending)
+  end)
+
+  it('an empty submit denies without a reason', function()
+    setup({ { tool_calls = { { name = 'run_command', arguments = { command = 'echo hi' } } } }, { content = 'ok' } })
+    agent.open({ focus = 'panel' })
+    local view = agent.view()
+    local c = agent.controller()
+    c:submit('run')
+    h.wait(function()
+      return c:state() == 'WAITING_APPROVAL'
+    end)
+    vim.api.nvim_set_current_win(view.wins.panel)
+    vim.cmd('normal d')
+    view.input:submit()
+    h.wait(function()
+      return c:state() == 'COMPLETED'
+    end)
+    assert.is_truthy(panel_lines(view):find('⊘ Run echo hi', 1, true))
+  end)
+
   it('reviews hunks and applies only accepted ones', function()
     local old = 'a\nb\nc\nd\ne\nf\ng\nh\n'
     setup({

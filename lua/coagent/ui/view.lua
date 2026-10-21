@@ -20,6 +20,9 @@ function View.new(config, actions)
   local self = setmetatable({ config = config, actions = actions, subs = {}, wins = nil, frame = 1 }, View)
   self.panel = Panel.new(config)
   self.input = Input.new(config, function(text)
+    if self.deny_pending then
+      return self:_submit_deny(text)
+    end
     local res, opts = actions.submit(text)
     if res ~= false and self.config.ui.auto_scroll then
       -- a new prompt: show its answer even if the panel was scrolled up
@@ -108,9 +111,16 @@ function View:attach(c)
     end
     local busy = c:busy()
     local hint = nil
+    if self.deny_pending and e.state ~= 'WAITING_APPROVAL' then
+      self:cancel_deny() -- decided another way, or the task stopped
+    end
     if e.state == 'WAITING_APPROVAL' then
       local ik = self.config.keymaps.input
-      hint = string.format('Approval needed: %s approve %s %s deny %s %s hunks (Normal mode)', ik.approve or '', icons.get(self.config.ui.icons).dot, ik.deny or '', icons.get(self.config.ui.icons).dot, ik.review or '')
+      hint = string.format('Approval needed: %s approve %s %s deny (then type the reason here) %s %s hunks (Normal mode)', ik.approve or '', icons.get(self.config.ui.icons).dot, ik.deny or '', icons.get(self.config.ui.icons).dot, ik.review or '')
+      self._approval_hint = hint
+      if self.deny_pending then
+        hint = self:_deny_hint()
+      end
     elseif busy then
       local ic = icons.get(self.config.ui.icons)
       hint = 'Agent is working' .. ic.ellipsis .. ' (messages are queued ' .. ic.dot .. ' <C-c> stop)'
@@ -271,6 +281,50 @@ function View:set_layout(name)
   if was then
     self:open({ focus = 'input' })
   end
+end
+
+--- Deny the pending approval with a reason written in the input (several
+--- lines are fine): the next submit denies with that text, an empty submit
+--- denies without one, the stop key cancels.
+---@param id string approval item id
+---@param action string 'deny' | 'deny_stop'
+function View:ask_deny_reason(id, action)
+  self.deny_pending = { id = id, action = action }
+  self.input.empty_ok = true
+  self:focus_input()
+  self.input:set_busy_hint(self:_deny_hint())
+  self:input_statusline()
+end
+
+function View:_deny_hint()
+  local ik = self.config.keymaps.input
+  local sk = type(ik.submit) == 'table' and (ik.submit.n .. ' / ' .. ik.submit.i) or tostring(ik.submit)
+  return string.format('Reason for denying, for the agent (several lines are fine; %s denies, empty = no reason, %s cancels)', sk, tostring(ik.stop))
+end
+
+--- Leave the deny-reason input (the approval is still waiting, or was decided elsewhere).
+function View:cancel_deny()
+  if not self.deny_pending then
+    return false
+  end
+  self.deny_pending = nil
+  self.input.empty_ok = false
+  self.input:set_busy_hint(self.c and self.c:state() == 'WAITING_APPROVAL' and self._approval_hint or nil)
+  self:input_statusline()
+  return true
+end
+
+function View:_submit_deny(text)
+  local d = self.deny_pending
+  local c = self.c
+  local p = c and c:pending()
+  self:cancel_deny()
+  if not (p and p.item.id == d.id) then
+    vim.notify('[coagent] the action is no longer waiting for approval; your text stays in the input', vim.log.levels.WARN)
+    return false
+  end
+  c:approve(d.id, { action = d.action, reason = vim.trim(text) ~= '' and text or nil })
+  return true, { history = false }
 end
 
 function View:focus_input()
@@ -809,7 +863,11 @@ function View:_keymaps()
       self.input:submit()
     end, 'submit')
   end
-  imap({ 'n', 'i' }, ik.stop, a.stop, 'stop')
+  imap({ 'n', 'i' }, ik.stop, function()
+    if not self:cancel_deny() then
+      a.stop()
+    end
+  end, 'stop (cancels a deny reason first)')
   imap({ 'n', 'i' }, ik.focus_panel, function()
     vim.cmd('stopinsert')
     self:focus_panel()
@@ -884,7 +942,9 @@ function View:input_statusline()
   end
   local d = ' ' .. icons.get(self.config.ui.icons).dot .. ' '
   local line
-  if self.c and not self.c:busy() and self.c:plan_phase() == 'ready' then
+  if self.deny_pending then
+    line = '%#CoagentApproval# deny: type the reason (several lines)' .. d .. k(ik.submit) .. ' deny' .. d .. k(ik.stop) .. ' cancel'
+  elseif self.c and not self.c:busy() and self.c:plan_phase() == 'ready' then
     line = '%#CoagentApproval# plan: ' .. k(ik.approve) .. ' approve' .. d .. k(ik.deny) .. ' discard' .. d .. 'type feedback to revise'
   elseif self.c and self.c:state() == 'WAITING_APPROVAL' then
     line = '%#CoagentApproval# ' .. k(ik.approve) .. ' approve' .. d .. k(ik.approve_always) .. ' always' .. d .. k(ik.deny) .. ' deny' .. d
