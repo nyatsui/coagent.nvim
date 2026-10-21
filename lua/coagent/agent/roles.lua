@@ -4,6 +4,9 @@
 ---   advisor    builder + an advisor reviewing at critical moments
 ---   explorers  builder + read-only explorer subagents (`explore` tool)
 ---   full       builder + explorers + advisor
+---   lead       the strong model leads (plans, decides, verifies) and hands
+---              pieces of work to a worker on the selected model (`worker`
+---              tool); explorers too
 ---
 --- Every role keeps its OWN conversation history and only compact messages
 --- travel between them (explorer -> summary, builder -> brief -> advisor), so
@@ -17,9 +20,10 @@ M.PRESETS = {
   advisor = { explorer = false, advisor = true, description = 'builder + advisor supervising at checkpoints (roles.supervision)' },
   explorers = { explorer = true, advisor = false, description = 'builder + parallel read-only explorer subagents' },
   full = { explorer = true, advisor = true, description = 'builder + explorers + advisor' },
+  lead = { explorer = true, advisor = false, lead = true, description = 'the strong model leads and delegates work to the selected model (worker)' },
 }
 
-M.ORDER = { 'single', 'advisor', 'explorers', 'full' }
+M.ORDER = { 'single', 'advisor', 'explorers', 'full', 'lead' }
 
 --- Supervision levels (presets with an advisor): each is a set of
 --- checkpoints where the advisor reviews the builder's work.
@@ -191,7 +195,18 @@ function M.resolve(config, session, builder_model)
   if strong == builder_model then
     strong = nil
   end
+  -- lead preset: the lead's model (else the strong one); the worker is the selected model
+  local lead_model = p.lead and (r.lead_model or r.strong_model or r.advisor_model) or nil
+  if lead_model == builder_model then
+    lead_model = nil
+  end
   return {
+    lead = lead_model ~= nil,
+    lead_wanted = p.lead == true,
+    lead_model = lead_model,
+    worker_model = r.worker_model or builder_model,
+    worker_opts = vim.tbl_extend('force', { max_steps = 30, max_report_bytes = 6000, max_diff_bytes = 12000 }, r.worker or {}),
+    lead_reads = vim.tbl_extend('force', { max_lines = 300, budget_bytes = 60 * 1024, verify_lines = 40 }, r.lead_reads or {}),
     preset = name,
     explorer = p.explorer,
     advisor = p.advisor,

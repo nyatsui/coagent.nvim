@@ -15,7 +15,7 @@ local function notice(level, text)
   app().controller():notice(level, text)
 end
 
-local ROLES = { 'builder', 'explorer', 'advisor' }
+local ROLES = { 'builder', 'explorer', 'advisor', 'lead' }
 
 ---@class Coagent.SlashCommand
 ---@field name string
@@ -168,11 +168,11 @@ M.COMMANDS = {
   {
     name = 'model',
     args = '[role]',
-    desc = 'Pick the model (of a role: builder | explorer | advisor)',
+    desc = 'Pick the model (of a role: builder | explorer | advisor | lead)',
     complete = ROLES,
     run = function(arg)
       if arg ~= '' and not vim.tbl_contains(ROLES, arg) then
-        notice('error', '/model: unknown role "' .. arg .. '" (builder | explorer | advisor)')
+        notice('error', '/model: unknown role "' .. arg .. '" (builder | explorer | advisor | lead)')
         return false
       end
       app().select_model(arg ~= '' and arg or nil)
@@ -208,8 +208,8 @@ M.COMMANDS = {
   {
     name = 'roles',
     args = '[preset]',
-    desc = 'Model roles preset: single | advisor | explorers | full',
-    complete = { 'single', 'advisor', 'explorers', 'full' },
+    desc = 'Model roles preset: single | advisor | explorers | full | lead',
+    complete = { 'single', 'advisor', 'explorers', 'full', 'lead' },
     run = function(arg)
       app().set_roles(arg)
     end,

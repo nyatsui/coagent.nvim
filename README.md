@@ -1566,6 +1566,7 @@ By default (`single`) the one model you picked with `:CoagentModel` does everyth
 | `advisor` | Builder + advisor supervising it at checkpoints (`roles.supervision`, see "Supervision" below) |
 | `explorers` | Builder + explorers (`explore` tool; read-only subagents running in parallel) |
 | `full` | Builder + explorers + advisor |
+| `lead` | **The strong model leads** (plans, decides, verifies) and hands pieces of work to a **worker** on the selected model (`worker` tool); explorers too. See "Lead and worker" below |
 
 - Set per-role models with `:CoagentModel` (pick the role, then the model) or `roles.explorer_model` / `roles.advisor_model`.
   Unset roles use the selected model
@@ -1599,6 +1600,48 @@ output. The advisor only sees short briefs (task, plan, diff, failing output, ev
 builder therefore costs far less than running the strong model as the builder, while it still reviews the decisions that
 matter. Compared with a single cheap model, it adds those reviews (see the table below). Explorers keep large search output
 out of the builder's history.
+
+### Lead and worker (`roles.preset = 'lead'`)
+
+Supervision is a review: the cheap builder still decides. With `lead`, the strong model is in charge and the cheap
+model does the legwork.
+
+```text
+/config set roles.preset lead
+/config set roles.lead_model claude-sonnet-4.6     # the lead (nil: roles.strong_model, else roles.advisor_model)
+/model builder                                       # the worker: the selected model (or roles.worker_model)
+```
+
+- **The lead** runs the task: it reads what it needs, plans, and delegates meaningful chunks with the `worker` tool —
+  implementing a change across a few files, running and fixing tests, preparing and starting an experiment, collecting
+  results. Each assignment is self-contained (goal, files, decisions, constraints, `done_when` checks). It does small
+  things itself and keeps the decisions (approach, evaluation protocol, what to try next)
+- **The worker** gets the normal tools (read, edit, commands, experiments). Every action goes through the same pipeline
+  as the lead's: permission mode, approvals (including `d` with a reason, and `D` stopping the whole task), the judge,
+  change tracking and `/rewind`, the read-before-edit rule, token budgets. In the timeline its actions show as
+  `worker · Edit a.txt`. It cannot nest workers, delegate to other chats or control loops
+- **The lead verifies**: the worker's reply comes with coagent's own record — each action with its result, the files
+  changed and the diff of the worker's changes — and the lead is told to check it (diff, `read_file`, test output)
+  before going on, and to send a corrective assignment when it is wrong
+- **What the lead reads itself.** What costs is not a read but carrying it: everything the lead reads is re-sent with
+  each of its later requests, at the strong model's price. So finding places and skimming long files is the worker's /
+  explorers' job — their reports quote the lines they point to (`path:line` + 1-3 verbatim lines), so the lead can check
+  a location without reading the file — and the lead reads what it decides on or verifies: the critical lines (loss,
+  metric, data split, an interface) or a quote that looks wrong. If a location was wrong, that costs one more narrow
+  read. Enforced by `roles.lead_reads`: at most `max_lines` (300) lines per `read_file` / `recall_output` call; past
+  `budget_bytes` (60 KB) in a task, only `verify_lines` (40) per call. A refused read tells the lead to narrow the range
+  or delegate. `:CoagentUsage` shows how much each role read into its context (lead, worker, explorer) and the lead's
+  share of the task budget
+- In the plan phase (`/plan`) the worker only has read tools, so the lead can have it investigate while it writes the
+  plan itself
+- **Tokens.** The worker's file contents, long logs and retries stay in its own short history on the cheap model; the
+  lead's history — re-sent on each of its requests — holds only assignments and reports, and the lead makes far fewer
+  requests than doing every step itself. Typically much cheaper than running the strong model alone (`/strong`), and more
+  than a cheap builder with an advisor; an assignment for a one-line change costs more than doing it, which is why the
+  lead keeps those. `:CoagentUsage` shows the lead (builder row, the strong model) and `worker` separately
+- The lead uses `roles.advisor_effort`, the worker `roles.builder_effort`; per assignment the worker has
+  `roles.worker.max_steps` (30) requests. Without a lead model different from the selected one, tasks run on the
+  selected model alone (with a notice)
 
 ### Supervision (how closely the advisor watches the builder)
 

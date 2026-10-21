@@ -146,6 +146,10 @@ function M.build(opts)
     table.insert(parts, M.experiment_section(opts.monitor))
   end
 
+  if opts.lead then
+    table.insert(parts, vim.trim(require('coagent.agent.worker').LEAD))
+  end
+
   if opts.skills then
     table.insert(parts, opts.skills)
   end

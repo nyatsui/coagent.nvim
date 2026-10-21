@@ -190,6 +190,15 @@ describe('reasoning effort in the agent', function()
     vim.cmd('close')
     assert.is_truthy(text:find('Reasoning effort   builder high', 1, true), text)
     assert.is_truthy(text:find('effort high x1', 1, true), text)
+    -- what was read into the context, per role
+    c.session.read_bytes = { builder = 4096, worker = 10240 }
+    agent.usage()
+    h.wait(function()
+      return vim.bo[vim.api.nvim_get_current_buf()].bufhidden == 'wipe'
+    end)
+    text = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), '\n')
+    vim.cmd('close')
+    assert.is_truthy(text:find('Read into the context this session (read_file / recall_output)\n    builder   4 KB\n    worker    10 KB', 1, true), text)
 
     c:set_model('auto')
     assert.is_falsy(agent.winbar():find('effort:', 1, true))

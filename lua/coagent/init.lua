@@ -1951,6 +1951,9 @@ function M.select_model(role)
   local roles = c:roles()
   if not role and roles.preset ~= 'single' then
     local choices = { 'builder' }
+    if roles.lead_wanted then
+      table.insert(choices, 1, 'lead')
+    end
     if roles.explorer then
       table.insert(choices, 'explorer')
     end
@@ -1960,8 +1963,8 @@ function M.select_model(role)
     vim.ui.select(choices, {
       prompt = 'Model for which role?',
       format_item = function(r)
-        local current = ({ builder = roles.builder_model, explorer = roles.explorer_model, advisor = roles.advisor_model })[r]
-        return string.format('%-9s %s', r, current)
+        local current = ({ builder = roles.builder_model, explorer = roles.explorer_model, advisor = roles.advisor_model, lead = roles.lead_model or '(not set)' })[r]
+        return string.format('%-9s %s', (r == 'builder' and roles.lead_wanted) and 'worker' or r, current)
       end,
     }, function(r)
       if r then
@@ -1983,7 +1986,7 @@ function M.select_model(role)
       local usable = vim.tbl_filter(function(m)
         return (m.tools or m.id == 'auto') and m.picker ~= false
       end, models)
-      local current = ({ builder = roles.builder_model, explorer = roles.explorer_model, advisor = roles.advisor_model })[role]
+      local current = ({ builder = roles.builder_model, explorer = roles.explorer_model, advisor = roles.advisor_model, lead = roles.lead_model })[role]
       local fmt = c.backend.format_multiplier or require('coagent.backend.copilotchat').format_multiplier
       local label_opts = { multiplier = config.options.ui.show_multiplier and fmt or nil, rates = config.options.usage.rates }
       vim.ui.select(usable, {
@@ -2039,7 +2042,12 @@ function M.set_roles(preset)
       return
     end
     local r = c:roles()
-    local parts = { 'builder ' .. r.builder_model }
+    local parts = { (r.lead and 'worker ' or 'builder ') .. r.builder_model }
+    if r.lead then
+      table.insert(parts, 1, 'lead ' .. r.lead_model)
+    elseif r.lead_wanted then
+      table.insert(parts, 'NO LEAD: set roles.lead_model (a model other than the selected one)')
+    end
     if r.explorer then
       table.insert(parts, 'explorer ' .. r.explorer_model)
     end
@@ -2641,6 +2649,23 @@ local function token_lines()
     end
     if any_credits then
       table.insert(lines, '    credits are an ESTIMATE from usage.rates (1 credit = $0.01), not billing data')
+    end
+    local rb = c.session.read_bytes
+    if rb and next(rb) then
+      local function kb(n)
+        return string.format('%d KB', math.floor((n or 0) / 1024 + 0.5))
+      end
+      table.insert(lines, '')
+      table.insert(lines, '  Read into the context this session (read_file / recall_output)')
+      for _, role in ipairs({ 'lead', 'builder', 'worker', 'explorer' }) do
+        if rb[role] then
+          local extra = ''
+          if role == 'lead' and c.task then
+            extra = string.format('  (this task %s of the %s budget)', kb(c.task.lead_read_bytes), kb(c:roles().lead_reads.budget_bytes))
+          end
+          table.insert(lines, string.format('    %-9s %s%s', role, kb(rb[role]), extra))
+        end
+      end
     end
     local b, bu = c:budgets(), c:budget_usage()
     if b.tokens or b.credits or b.session_tokens then

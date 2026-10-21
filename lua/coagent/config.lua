@@ -10,13 +10,25 @@ local defaults = {
   reasoning_effort = nil,
 
   -- Model roles (opt-in). preset: 'single' (default: the selected model does
-  -- everything) | 'advisor' | 'explorers' | 'full'. Each role keeps its own
+  -- everything) | 'advisor' | 'explorers' | 'full' | 'lead' (the strong model
+  -- leads - plans, decides, verifies - and hands pieces of work to a worker on
+  -- the selected model with the `worker` tool; lead_model, else strong_model /
+  -- advisor_model; the lead uses advisor_effort, the worker builder_effort). Each role keeps its own
   -- history; only summaries/briefs travel between roles (cache friendly).
   -- Models default to the selected model. Repository files cannot set these.
   roles = {
     preset = 'single',
     explorer_model = nil,
     advisor_model = nil,
+    lead_model = nil, -- preset 'lead': the lead (nil = strong_model, else advisor_model)
+    worker_model = nil, -- preset 'lead': the worker (nil = the selected model)
+    -- preset 'lead': per assignment
+    worker = { max_steps = 30, max_report_bytes = 6000, max_diff_bytes = 12000 },
+    -- preset 'lead': what the lead reads itself (read_file / recall_output).
+    -- Finding things and skimming long files is the worker's / explorers' job;
+    -- the lead reads what it decides on or verifies. max_lines per call;
+    -- past budget_bytes in a task, only reads up to verify_lines lines.
+    lead_reads = { max_lines = 300, budget_bytes = 60 * 1024, verify_lines = 40 },
     -- With an advisor (presets 'advisor' / 'full'): how closely it supervises
     -- the builder. nil = 'standard'. Each level is a set of checkpoints (more
     -- checkpoints = more advisor requests, each a brief of a few k tokens plus

@@ -218,6 +218,11 @@ function Controller:active_model()
       end
     end
   end
+  -- lead preset: the lead's model drives the task (the worker uses the selected one)
+  local roles = self:roles()
+  if roles.lead then
+    return roles.lead_model
+  end
   return self:model()
 end
 
@@ -1084,6 +1089,51 @@ function Controller:_set_watermark(wm)
     self.seen:reset()
   end
   self.session.compact_watermark = wm
+end
+
+--- A call by the lead itself (preset 'lead'; not the worker, not /strong).
+function Controller:_is_lead_call()
+  local t = self.task
+  return self:roles().lead and not self.worker_item and t ~= nil and not t.strong and not t.model_override
+end
+
+--- Text read into a model's context, per role (:CoagentUsage).
+function Controller:_count_read(role, text)
+  local n = #(text or '')
+  self.session.read_bytes = self.session.read_bytes or {}
+  self.session.read_bytes[role] = (self.session.read_bytes[role] or 0) + n
+  if role == 'lead' and self.task then
+    self.task.lead_read_bytes = (self.task.lead_read_bytes or 0) + n
+  end
+end
+
+local READS = { read_file = true, recall_output = true }
+
+--- roles.lead_reads: nil when the lead may read this, else why not.
+function Controller:_lead_read_check(tool, args, prepared)
+  if not READS[tool.name] or not self:_is_lead_call() then
+    return nil
+  end
+  if tool.name == 'recall_output' and type(args.query) == 'string' and args.query ~= '' then
+    return nil -- matching lines only
+  end
+  local o = self:roles().lead_reads
+  local Seen = require('coagent.tools.seen')
+  local text = tool.name == 'read_file' and (util.read_file(prepared.path.real) or '') or (prepared.text or '')
+  local total = Seen.line_count(text)
+  local s = math.max(1, tonumber(args.start_line) or 1)
+  local e = math.min(total, tonumber(args.end_line) or total)
+  local n = math.max(0, e - s + 1)
+  local over = (self.task.lead_read_bytes or 0) >= o.budget_bytes
+  local cap = over and o.verify_lines or o.max_lines
+  if n <= cap then
+    return nil
+  end
+  local what = tool.name == 'read_file' and prepared.path.rel or ('output ' .. tostring(args.id))
+  return string.format('LEAD READ LIMIT: this would read %d lines of %s (%d lines in total); you read at most %d lines per call%s. '
+    .. 'Read a narrower range (start_line / end_line) around what you decide on or verify, or let `explore` / `worker` find '
+    .. 'and summarize it (their reports quote the lines with path:line).',
+    n, what, total, cap, over and string.format(' now that your read budget for this task (%d KB) is used up: only short verification reads remain', math.floor(o.budget_bytes / 1024)) or '')
 end
 
 --- The saved full tool outputs of this session (nil: context.archive_outputs = false).
@@ -2453,13 +2503,18 @@ function Controller:_request(gen)
       instruction_files = self.config.instruction_files,
       skills = self.task.skills_section,
       monitor = require('coagent.agent.monitor').enabled(self.config) and require('coagent.agent.monitor').cfg(self.config) or nil,
+      lead = self:roles().lead and not self.task.strong and not self.task.model_override,
     })
     self.task.system_mode = key
   end
   local system_prompt = self.task.system_prompt
   local roles = self:roles()
   -- the builder on the strong / advisor model uses that role's effort
-  local strong_builder = (self.task.strong ~= nil and not self.task.model_override) or self:_builder_is_advisor(roles)
+  local strong_builder = (self.task.strong ~= nil and not self.task.model_override) or self:_builder_is_advisor(roles) or roles.lead
+  if roles.lead_wanted and not roles.lead and not self.task.lead_warned then
+    self.task.lead_warned = true
+    self:notice('warn', 'roles.preset = "lead" needs a stronger model for the lead: set roles.lead_model (or roles.strong_model / roles.advisor_model) to a model other than the selected one (' .. self:model() .. '). This task runs on the selected model alone.')
+  end
   local effort = strong_builder and roles.advisor_effort or roles.builder_effort
   if planning and strong_builder and not self.task.strong and not self.task.strong_plan_noticed then
     self.task.strong_plan_noticed = true
@@ -2474,6 +2529,9 @@ function Controller:_request(gen)
       return false
     end
     if t.name == 'loop_control' and not (self.loop and self.loop:active()) then
+      return false
+    end
+    if t.name == 'worker' and not roles.lead then
       return false
     end
     if t.name == 'ledger' and not (self.ledger and self.ledger:enabled()) then
@@ -2739,6 +2797,9 @@ function Controller:_tool_ctx(item, gen)
     explore = self:roles().explorer and function(args)
       return subagent.run(self, gen, args, item)
     end or nil,
+    worker = self:roles().lead and function(args)
+      return require('coagent.agent.worker').run(self, gen, args, item)
+    end or nil,
     on_file_changed = function(info)
       self.events:emit('file_changed', { path = info.real, rel = info.rel })
     end,
@@ -2786,6 +2847,7 @@ function Controller:_execute(gen, tc)
     status = 'pending',
     args_raw = tc.arguments,
     request_usage = request_usage,
+    worker = self.worker_item ~= nil or nil, -- an action of the lead's worker
   })
   local function fail(status, msg)
     item.status = status
@@ -2835,6 +2897,10 @@ function Controller:_execute(gen, tc)
     local msg = 'Error: ' .. tostring(okp and perr or prepared)
     self:_count_failure(tc.name, args)
     return fail('failed', msg)
+  end
+  local lead_limit = self:_lead_read_check(tool, args, prepared)
+  if lead_limit then
+    return fail('failed', lead_limit)
   end
   if prepared.preview_text then
     item.preview = { text = prepared.preview_text }
@@ -3009,6 +3075,9 @@ function Controller:_execute(gen, tc)
   item.status = res.ok and 'done' or 'failed'
   item.summary = res.summary
   item.output = util.redact(res.display or res.output or '')
+  if READS[tool.name] and res.ok then
+    self:_count_read(self.worker_item and 'worker' or (self:_is_lead_call() and 'lead' or 'builder'), res.output)
+  end
   item.meta = res.meta
   if not (res.meta and res.meta.bg_id) then
     item.live = nil -- background processes keep streaming into item.live
@@ -3126,7 +3195,7 @@ function Controller:_execute(gen, tc)
       end
     end
   end
-  return { content = content ~= '' and content or '(no output)', item = item, wait = res.ok and res.wait_external or nil }
+  return { content = content ~= '' and content or '(no output)', item = item, wait = res.ok and res.wait_external or nil, stop = res.stop }
 end
 
 --- Judge mode: ask the judge model about a command the policy left at 'ask'.

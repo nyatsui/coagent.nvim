@@ -144,7 +144,7 @@ local function tool(b, item, o)
   end
   local st = STATUS[item.status] or STATUS.pending
   local icon = o.icons[st[1]]
-  local title = item.title or item.tool or '?'
+  local title = (item.worker and 'worker · ' or '') .. (item.title or item.tool or '?')
   local head = icon .. ' ' .. title
   local inline_summary = item.kind ~= 'exec' and item.summary and item.summary ~= ''
   if inline_summary then

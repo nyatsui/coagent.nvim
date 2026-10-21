@@ -18,6 +18,7 @@ local builtin = {
   fs.search,
   fs.read_file,
   require('coagent.agent.subagent').tool,
+  require('coagent.agent.worker').tool,
   require('coagent.agent.skills').tool,
   require('coagent.agent.experiments').tool,
   require('coagent.agent.delegate').tool,
