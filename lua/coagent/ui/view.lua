@@ -447,7 +447,8 @@ function View:bar()
   end
   local n = c.session.changes:count()
   if n > 0 then
-    table.insert(segs, { 4, 4, n .. ' changed' })
+    local open_n = c.session.changes:unreviewed_count()
+    table.insert(segs, { 4, 4, n .. ' changed' .. ((open_n > 0 and open_n < n) and (' (' .. open_n .. ' to review)') or (open_n == 0 and ' ✓' or '')) })
   end
   if self.config.usage.show_in_bar and self.usage then
     -- the first limited quota the plan includes (usage.hide_quotas filtered out)

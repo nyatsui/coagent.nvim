@@ -14,17 +14,43 @@ function M.open(changes, opts)
   vim.bo[buf].buftype = 'nofile'
   vim.bo[buf].bufhidden = 'wipe'
   local entries = {}
+  local hide_reviewed = false
 
   local function draw()
-    entries = changes:list()
-    local lines = { 'Changes by Coagent', '<CR> unified, s side-by-side, o open, x revert, X revert all, R refresh, q close', '' }
+    local all = changes:list()
+    local reviewed, open_n = 0, 0
+    entries = {}
+    for _, e in ipairs(all) do
+      if e.status ~= 'unchanged' then
+        if e.reviewed then
+          reviewed = reviewed + 1
+        else
+          open_n = open_n + 1
+        end
+      end
+      if not (hide_reviewed and e.reviewed) then
+        table.insert(entries, e)
+      end
+    end
+    local title = string.format('Changes by Coagent  ·  %d to review, %d reviewed%s', open_n, reviewed, hide_reviewed and ' (hidden)' or '')
+    local lines = {
+      title,
+      '<CR> diff  s side-by-side  o open  k reviewed  K all reviewed  H hide reviewed  u undo last turn  x revert  X revert all  R  q',
+      '',
+    }
     local hls = { { 0, 'CoagentUser' }, { 1, 'CoagentDim' } }
     if #entries == 0 then
-      table.insert(lines, '  (no files changed)')
+      table.insert(lines, #all == 0 and '  (no files changed)' or '  (all reviewed; H shows them)')
     end
     for _, e in ipairs(entries) do
       local mark = ({ added = 'A', modified = 'M', deleted = 'D', unchanged = '=' })[e.status] or '?'
       local flags = {}
+      if e.reviewed then
+        table.insert(flags, 'reviewed')
+      end
+      if e.last_turn and not e.reverted then
+        table.insert(flags, 'changed in the last turn')
+      end
       if e.reverted then
         table.insert(flags, 'reverted')
       end
@@ -35,15 +61,15 @@ function M.open(changes, opts)
       if b and vim.bo[b].modified then
         table.insert(flags, 'UNSAVED BUFFER')
       end
-      table.insert(lines, string.format('  %s %s  +%d -%d%s', mark, e.rel, e.added, e.removed, #flags > 0 and ('  [' .. table.concat(flags, ', ') .. ']') or ''))
-      table.insert(hls, { #lines - 1, mark == 'D' and 'CoagentDiffDelete' or (mark == '=' and 'CoagentDim' or 'CoagentDiffAdd') })
+      table.insert(lines, string.format('  %s %s %s  +%d -%d%s', e.reviewed and '✓' or ' ', mark, e.rel, e.added, e.removed, #flags > 0 and ('  [' .. table.concat(flags, ', ') .. ']') or ''))
+      table.insert(hls, { #lines - 1, e.reviewed and 'CoagentDim' or (mark == 'D' and 'CoagentDiffDelete' or (mark == '=' and 'CoagentDim' or 'CoagentDiffAdd')) })
     end
     vim.bo[buf].modifiable = true
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
     vim.bo[buf].modifiable = false
     vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
     for _, h in ipairs(hls) do
-      vim.api.nvim_buf_set_extmark(buf, ns, h[1], 0, { end_row = h[1], end_col = math.min(3, #lines[h[1] + 1]), hl_group = h[2] })
+      vim.api.nvim_buf_set_extmark(buf, ns, h[1], 0, { end_row = h[1], end_col = math.min(h[1] >= 3 and #lines[h[1] + 1] or 3, #lines[h[1] + 1]), hl_group = h[2] })
     end
     vim.api.nvim_buf_set_extmark(buf, ns, 0, 0, { end_row = 1, end_col = 0, hl_group = 'CoagentUser' })
     vim.api.nvim_buf_set_extmark(buf, ns, 1, 0, { end_row = 2, end_col = 0, hl_group = 'CoagentDim' })
@@ -81,6 +107,57 @@ function M.open(changes, opts)
   map('q', close)
   map('<Esc>', close)
   map('R', draw)
+  local function changed()
+    draw()
+    if opts.on_change then
+      opts.on_change()
+    end
+  end
+  -- reviewed marks (the agent writing a file again unmarks it)
+  map('k', function()
+    local e = current()
+    if e then
+      changes:set_reviewed(e.abs, not e.reviewed)
+      local row = vim.api.nvim_win_get_cursor(win)[1]
+      changed()
+      pcall(vim.api.nvim_win_set_cursor, win, { math.min(row + (e.reviewed and 0 or 1), vim.api.nvim_buf_line_count(buf)), 0 })
+    end
+  end)
+  map('K', function()
+    for _, e in ipairs(changes:list()) do
+      changes:set_reviewed(e.abs, true)
+    end
+    changed()
+  end)
+  map('H', function()
+    hide_reviewed = not hide_reviewed
+    draw()
+  end)
+  -- discard only the agent's latest turn of edits to this file
+  map('u', function()
+    local e = current()
+    if not e then
+      return
+    end
+    if not e.last_turn then
+      vim.notify('[coagent] ' .. e.rel .. ': no agent edits of a turn left to discard', vim.log.levels.INFO)
+      return
+    end
+    local force = false
+    if e.user_modified then
+      if vim.fn.confirm(e.rel .. ' was edited after the agent changed it. Discard the agent\'s last turn anyway (also discarding those edits)?', '&Yes\n&No', 2) ~= 1 then
+        return
+      end
+      force = true
+    elseif vim.fn.confirm('Discard the agent\'s edits of its last turn to ' .. e.rel .. '? (earlier turns stay)', '&Yes\n&No', 2) ~= 1 then
+      return
+    end
+    local ok, err = changes:revert_turn(e.abs, { force = force })
+    if not ok then
+      vim.notify('[coagent] ' .. tostring(err), vim.log.levels.ERROR)
+    end
+    changed()
+  end)
   map('<CR>', function()
     local e = current()
     if e then

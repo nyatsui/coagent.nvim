@@ -188,7 +188,10 @@ Press `<CR>` in the input box to start. Try approve `a`, deny `d`, hunk review `
 3. Reading and searching run automatically; edits and commands ask for approval (`a` approve / `d` deny / `D` deny and stop / `r` hunk review).
    `d` moves to the input to write the reason for the agent — several lines are fine: `<CR>` (`<C-s>` in Insert mode)
    denies with it, an empty submit denies without one, `<C-c>` cancels and the action keeps waiting
-4. When done, the verification result and changed files are shown. `gc` lists changes, `gd` shows the diff, `x` reverts
+4. When done, the verification result and changed files are shown. `gc` lists changes, `gd` shows the diff, `x` reverts.
+   In the list, `k` marks a file reviewed (`K` all, `H` hides them; the agent changing it again brings it back for review,
+   and the winbar shows `3 changed (1 to review)`), and `u` discards only that file's edits of the agent's latest turn
+   (again: the turn before), leaving earlier turns and other files alone
 
 For a step-by-step guide to ML (PyTorch) projects — applying coagent to an existing repository, building from data
 only, and splitting work with another chat — see [docs/ml-workflow.md](docs/ml-workflow.md) (Japanese).

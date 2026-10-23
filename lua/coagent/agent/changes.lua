@@ -31,6 +31,7 @@ local diff = require('coagent.core.diff')
 ---@field ops integer number of agent writes
 ---@field reverted boolean?
 ---@field versions {seq:integer, before:string?}[] content before the first write after each mark
+---@field reviewed_ops integer? `ops` when the user marked the file reviewed (a later agent write unmarks it)
 
 ---@class Coagent.Changes
 ---@field files table<string, Coagent.Change> keyed by abs path
@@ -59,6 +60,7 @@ function Changes.new(data)
         current = f.current_exists and f.current or nil,
         ops = f.ops or 1,
         reverted = f.reverted,
+        reviewed_ops = f.reviewed_ops,
       }
       table.insert(self.order, f.abs)
     end
@@ -84,6 +86,7 @@ function Changes:serialize()
       current_exists = f.current ~= nil,
       ops = f.ops,
       reverted = f.reverted,
+      reviewed_ops = f.reviewed_ops,
     })
   end
   return out
@@ -160,6 +163,8 @@ end
 ---@field removed integer
 ---@field user_modified boolean disk differs from what the agent wrote
 ---@field reverted boolean
+---@field reviewed boolean the user marked it reviewed and the agent has not changed it since
+---@field last_turn boolean changed by the agent in the latest prompt's turn
 
 ---@return Coagent.ChangeInfo[]
 function Changes:list()
@@ -186,6 +191,8 @@ function Changes:list()
       removed = removed,
       user_modified = now ~= f.current,
       reverted = f.reverted or false,
+      reviewed = f.reviewed_ops ~= nil and f.reviewed_ops == f.ops,
+      last_turn = self:_last_turn_version(f) ~= nil,
     })
   end
   return out
@@ -297,6 +304,75 @@ function Changes:revert_hunk(abs, index)
     return false, err
   end
   f.current = content
+  return true
+end
+
+------------------------------------------------------------------------------
+-- Review marks and per-turn discard
+------------------------------------------------------------------------------
+
+--- Mark a file reviewed (`false`: unmark). The agent writing it again
+--- unmarks it, so it shows up for review again.
+---@param abs string
+---@param on boolean?
+---@return boolean ok
+function Changes:set_reviewed(abs, on)
+  local f = self.files[abs]
+  if not f then
+    return false
+  end
+  f.reviewed_ops = on ~= false and f.ops or nil
+  return true
+end
+
+--- Files the agent changed (still differing from the baseline) not reviewed yet.
+---@return integer
+function Changes:unreviewed_count()
+  local n = 0
+  for _, abs in ipairs(self.order) do
+    local f = self.files[abs]
+    if f.current ~= f.baseline and f.reviewed_ops ~= f.ops then
+      n = n + 1
+    end
+  end
+  return n
+end
+
+--- The version of the file's latest turn (the agent's writes after the most
+--- recent prompt that wrote it): nil when nothing is left to discard.
+function Changes:_last_turn_version(f)
+  local v = f.versions and f.versions[#f.versions]
+  if not v or f.reverted or v.before == f.current then
+    return nil
+  end
+  return v
+end
+
+--- Discard only the agent's latest turn of edits to one file (back to the
+--- file as it was right before that turn); earlier turns stay. Refuses
+--- (unless forced) when the file was edited after the agent's last write.
+---@param abs string
+---@param opts {force:boolean?}?
+---@return boolean ok, string? err
+function Changes:revert_turn(abs, opts)
+  local f = self.files[abs]
+  if not f then
+    return false, 'not changed by the agent: ' .. abs
+  end
+  local v = self:_last_turn_version(f)
+  if not v then
+    return false, 'no agent edits of this turn left to discard'
+  end
+  if disk(abs) ~= f.current and not (opts and opts.force) then
+    return false, 'file was modified after the agent changed it; use force to discard those edits too'
+  end
+  local ok, err = restore(abs, v.before, f.current)
+  if not ok then
+    return false, err
+  end
+  table.remove(f.versions)
+  f.current = v.before
+  f.reverted = v.before == f.baseline
   return true
 end
 
