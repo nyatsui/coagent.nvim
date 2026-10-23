@@ -47,6 +47,19 @@ function M.build(opts)
   -- entry commands of the ledger's "How to run" mark experiment runs
   experiments.ledger = c.ledger
   c.loop = require('coagent.agent.loop').new(c)
+  -- deletes without approval (auto / judge): files the agent created in this
+  -- session that nobody changed since
+  perms.agent_created = function(abs)
+    local f = c.session.changes:get(abs)
+    if not (f and f.baseline == nil and f.current ~= nil) then
+      return false
+    end
+    local buf = require('coagent.core.util').find_buf(abs)
+    if buf and vim.bo[buf].modified then
+      return false
+    end
+    return require('coagent.core.util').read_file(abs) == f.current
+  end
   if config.mode == 'auto' and perms.mode ~= 'auto' then
     c:notice('warn', 'mode = "auto" is not enabled for ' .. ws.root .. ' (not in auto.workspaces); using supervised. Enable it with :CoagentMode auto.')
   elseif config.mode == 'judge' and perms.mode ~= 'judge' then

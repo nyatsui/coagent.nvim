@@ -315,6 +315,11 @@ local defaults = {
     },
     -- File writes allowed without approval in auto mode (globs relative to root). Empty = all.
     writable_globs = {},
+    -- auto / judge: delete_file runs without approval only for files the agent
+    -- created in this session (unchanged since) and files matching these globs
+    -- (caches, temporary files); every other delete asks. `rm` and other
+    -- deleting commands always ask. Lists replace.
+    deletable_globs = { '**/__pycache__/**', '**/*.pyc', '**/.pytest_cache/**', '**/.mypy_cache/**', '**/.ruff_cache/**', '**/.ipynb_checkpoints/**' },
     -- Never auto-approved, even inside the workspace.
     protected_globs = { '.git/**', '.coagent/**', '.env', '.env.*', '**/*.pem', '**/*.key', '**/id_rsa*', '**/.ssh/**' },
   },
@@ -730,6 +735,9 @@ function M.setup(opts)
   end
   if opts and opts.auto and opts.auto.protected_globs then
     M.options.auto.protected_globs = opts.auto.protected_globs
+  end
+  if opts and opts.auto and opts.auto.deletable_globs then
+    M.options.auto.deletable_globs = opts.auto.deletable_globs
   end
   if opts and opts.delegate and opts.delegate.env_commands then
     M.options.delegate.env_commands = opts.delegate.env_commands

@@ -1216,6 +1216,11 @@ OS サンドボックスが邪魔になる（`bwrap` は GPU を隠す）場面�
    `conda install`・`npm install` など）、`unlink` / `rmdir` / `find -delete`、crontab・サービス操作、ワークスペース外の引数
    （`/etc/...`・`~/...`・`../..`・`$HOME/...`）、保護ファイル（`.env`・鍵・`.git/`）、スキルフォルダのスクリプト、ファイル削除、
    `writable_globs` 外への書込み、ワークスペース外や保護ファイルの読込、`delegate` ツール、MCP ツール。`supervised` で拒否されるものは拒否。
+   **承認なしで削除するもの**（auto と judge）は、モデルの判断ではなく事実で決めます: このセッションでエージェント自身が
+   作り、その後だれも変えていないファイル、または `auto.deletable_globs` に一致するパス（キャッシュ: `__pycache__/`・`*.pyc`・
+   `.pytest_cache/`・`.mypy_cache/`・`.ruff_cache/`・`.ipynb_checkpoints/`。一時フォルダを追加できます）への `delete_file`。
+   この削除も記録されるので `/changes` の `x` や `/rewind` で戻せます。それ以外の削除は確認し、コマンド中の `rm` /
+   `unlink` / `find -delete` は常に確認します。エージェントには `delete_file` で削除するよう指示しています
 2. ワークスペース内の**読込**はそのまま実行（従来どおり）。
 3. ワークスペース内の**ファイル編集**は実行（`auto` と同じく `writable_globs` / `protected_globs` に従う）。
 4. **それ以外で承認が必要になるもの**（`run_command`・`start_process`、パイプ・リダイレクト・`&&`・環境変数代入を含む複雑なシェル）を

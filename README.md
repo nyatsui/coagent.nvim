@@ -1256,8 +1256,13 @@ For hands-off work where an allowlist is impractical (training entry points vary
    `chmod -R`, publishing, ...), network transfer (`curl`, `wget`, `scp`, `ssh`, `nc`, `rsync` to a remote), package installs
    (`pip install`, `conda install`, `npm install`, ...), `unlink` / `rmdir` / `find -delete`, crontab / services, arguments
    outside the workspace (`/etc/...`, `~/...`, `../..`, `$HOME/...`), protected files (`.env`, keys, `.git/`), scripts from
-   skill folders, file deletes, writes outside `writable_globs`, reads outside the workspace or of protected files, the
-   `delegate` tool and MCP tools. Whatever `supervised` denies is denied.
+   skill folders, file deletes (see below), writes outside `writable_globs`, reads outside the workspace or of protected
+   files, the `delegate` tool and MCP tools. Whatever `supervised` denies is denied.
+   **Deletes without approval** (auto and judge), decided by facts, never by a model: `delete_file` of a file the agent
+   created in this session that nobody changed since, or of a path matching `auto.deletable_globs` (caches:
+   `__pycache__/`, `*.pyc`, `.pytest_cache/`, `.mypy_cache/`, `.ruff_cache/`, `.ipynb_checkpoints/`; add your
+   temporary folders). Such deletes are recorded too (`/changes` `x`, `/rewind`). Every other delete asks, and `rm` /
+   `unlink` / `find -delete` in a command always ask; the agent is told to delete with `delete_file`
 2. **Reads** inside the workspace run (as today).
 3. **Workspace file edits** run (as in `auto`, honouring `writable_globs` / `protected_globs`).
 4. **Everything else that would ask** (`run_command`, `start_process`, complex shell with pipes, redirects, `&&`, env

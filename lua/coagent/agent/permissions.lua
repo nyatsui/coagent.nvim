@@ -47,6 +47,24 @@ function Permissions.new(config, ws)
   return self
 end
 
+--- Why deleting this file needs no approval (nil: it does). Only facts:
+--- the agent created the file in this session and nobody changed it since,
+--- or it matches auto.deletable_globs (caches, temporary files).
+---@param p Coagent.PathInfo
+---@return string?
+function Permissions:safe_delete(p)
+  if self.agent_created and self.agent_created(p.real) then
+    return 'the agent created this file in this session'
+  end
+  local Roles = require('coagent.agent.roles')
+  for _, g in ipairs(self.config.auto.deletable_globs or {}) do
+    if Roles.glob_match(g, p.rel) then
+      return 'matches auto.deletable_globs (' .. g .. ')'
+    end
+  end
+  return nil
+end
+
 --- Is auto mode pre-authorized for this workspace in the config?
 ---@return boolean
 function Permissions:auto_configured()
@@ -224,7 +242,13 @@ function Permissions:decide(tool, args, prepared)
         return decision('allow', mode .. ' mode: workspace file')
       end
       if prepared.op == 'delete' then
-        return decision('ask', mode .. ' mode never deletes without approval', { warnings = warnings, grant_key = key, can_always = true, hard = true })
+        local safe = p and p.writable and self:safe_delete(p)
+        if safe then
+          -- a fact, not a guess: nothing of the user's can be lost (and
+          -- delete_file is recorded: /changes x and /rewind bring it back)
+          return decision('allow', mode .. ' mode: ' .. safe)
+        end
+        return decision('ask', mode .. ' mode deletes only files the agent created in this session or matching auto.deletable_globs without approval', { warnings = warnings, grant_key = key, can_always = true, hard = true })
       end
       return decision('ask', 'outside writable_globs', { warnings = warnings, grant_key = key, can_always = true, hard = true })
     end
