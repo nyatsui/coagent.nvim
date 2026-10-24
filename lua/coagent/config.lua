@@ -383,6 +383,10 @@ local defaults = {
     repo = true,
     max_listed = 50, -- skills listed in the system prompt
     max_description = 200, -- bytes of each description in the system prompt
+    -- /skills extract [user|repo] [focus]: ONE request drafts SKILL.md files
+    -- from the conversations, the ledger and the experiment log
+    extract_model = nil, -- nil = ledger.capture_model, else roles.strong_model, else the selected model
+    extract_max = 5, -- drafts per request
   },
 
   -- Experiment log (ML training / evaluation runs). Runs through

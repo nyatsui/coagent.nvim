@@ -642,6 +642,16 @@ Trust and safety:
 (re-scan) and `:CoagentSkills` work too. `/skill <name> [task]` loads a skill into the task message up front (its
 `allowed-tools` also shrink the tool list of that task).
 
+**Skills from how you work (`/skills extract [user|repo] [focus]`).** ONE request (`skills.extract_model`, else
+`ledger.capture_model`, else `roles.strong_model`, else the selected model) reads this session's conversation and the
+newest saved sessions of the project, the project ledger (goals, methods, decisions, findings), the experiment log and
+your existing skills, and drafts SKILL.md files for the procedures that recur — training on the GPU server, evaluating
+and plotting, preparing data — with the concrete commands, files and parameters you used, the checks, and the pitfalls
+the findings recorded. A procedure that already has a skill becomes an update of it, never a duplicate. **Nothing is
+saved:** the drafts (at most `skills.extract_max`, 5) open unsaved in a new tab at their target path — your skills
+folder, or `<repo>/.agents/skills/` with `repo` — and `:w` saves one (creating its folder; the skills reload), `:q!`
+drops it. `focus` narrows the search (`/skills extract evaluation and plots`).
+
 ### Experiment log (/exp)
 
 For ML work (PyTorch training, evaluation, data analysis) coagent keeps a local log of runs and their metrics, so you can

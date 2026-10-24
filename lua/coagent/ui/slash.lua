@@ -86,9 +86,9 @@ M.COMMANDS = {
   },
   {
     name = 'skills',
-    args = '[enable|disable <name>|reload]',
-    desc = 'List Agent Skills (user / repo); enable or disable one for the session',
-    complete = { 'enable', 'disable', 'reload' },
+    args = '[enable|disable <name>|reload|extract [user|repo] [focus]]',
+    desc = 'List Agent Skills (user / repo); enable or disable one; extract drafts from how you work (1 request)',
+    complete = { 'enable', 'disable', 'reload', 'extract' },
     run = function(arg)
       return app().skills(arg)
     end,

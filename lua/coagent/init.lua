@@ -1005,7 +1005,31 @@ function M.skills(arg)
   end
   arg = vim.trim(arg or '')
   local verb, name = arg:match('^(%S+)%s*(.-)$')
-  if verb == 'reload' then
+  if verb == 'extract' then
+    local target, hint = name:match('^(%S+)%s*(.-)$')
+    if target ~= 'user' and target ~= 'repo' then
+      target, hint = 'user', name
+    end
+    local chat, earlier = M._capture_transcripts(c)
+    local X = require('coagent.agent.skill_extract')
+    X.extract(c, { chat = chat, sessions = earlier, hint = hint, target = target }, function(drafts, err)
+      if not drafts then
+        c:notice('error', '/skills extract: ' .. tostring(err))
+        return
+      end
+      if #drafts == 0 then
+        c:notice('info', 'Skills: no recurring procedure found that is worth a skill yet.')
+        return
+      end
+      X.open(c, drafts)
+      local lines = { string.format('Skill drafts (%d), opened unsaved in a new tab. :w saves one (the folder is created), :q! drops it:', #drafts) }
+      for _, d in ipairs(drafts) do
+        table.insert(lines, string.format('  %s %s -> %s%s', d.update and 'UPDATE' or 'new', d.name, vim.fn.fnamemodify(d.path, ':~'), d.why and ('\n      ' .. d.why) or ''))
+      end
+      c:notice('info', table.concat(lines, '\n'))
+    end)
+    return true
+  elseif verb == 'reload' then
     skills:refresh()
     c:notice('info', M._skills_text(skills))
     return
@@ -1023,7 +1047,7 @@ function M.skills(arg)
     c:notice('info', string.format('Skill %s %sd for this session (from the next task).', name, verb))
     return
   elseif arg ~= '' then
-    c:notice('error', '/skills: unknown argument "' .. arg .. '" (enable <name> | disable <name> | reload)')
+    c:notice('error', '/skills: unknown argument "' .. arg .. '" (enable <name> | disable <name> | reload | extract [user|repo] [focus])')
     return false
   end
   c:notice('info', M._skills_text(skills))
@@ -1390,6 +1414,7 @@ local function capture_transcripts(c)
   end
   return chat, table.concat(parts, '\n\n')
 end
+M._capture_transcripts = capture_transcripts
 
 --- `/ledger ...` (see M.LEDGER_USAGE). Only init, refresh and update send a
 --- request (one each); everything else is local.
