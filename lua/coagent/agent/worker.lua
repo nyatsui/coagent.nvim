@@ -99,16 +99,18 @@ function M.run(ctrl, gen, args, item)
     root = ctrl.ws.root,
     mode = mode,
     instruction_files = ctrl.config.instruction_files,
+    instructions_override = (ctrl.config.instructions or {}).override,
     monitor = require('coagent.agent.monitor').enabled(ctrl.config) and require('coagent.agent.monitor').cfg(ctrl.config) or nil,
   }) .. '\n\n' .. M.ROLE
   local messages = { { role = 'user', content = brief(args) } }
   local tools = tools_for(ctrl)
   local before = ctrl:_snapshot_files()
   local actions, report, steps, stopped, ended = {}, nil, 0, nil, nil
-  local prev = ctrl.worker_item
+  local prev, prev_notes = ctrl.worker_item, ctrl.worker_notes
   ctrl.worker_item = item.id
+  ctrl.worker_notes = {} -- folder AGENTS.md delivered into this assignment's history
   local function done()
-    ctrl.worker_item = prev
+    ctrl.worker_item, ctrl.worker_notes = prev, prev_notes
   end
 
   while true do

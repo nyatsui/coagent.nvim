@@ -398,7 +398,7 @@ function M.run(ctrl, spec, cb)
       .. 'or a smaller target. Largest: %s', diff.label, math.ceil(total / 1024), math.floor(max / 1024), spec.target .. (spec.ref and (' ' .. spec.ref) or ''), table.concat(big, ', ')))
   end
   local user = {}
-  local notes = require('coagent.agent.prompt').project_notes(ctrl.ws.root, ctrl.config.instruction_files)
+  local notes = require('coagent.agent.prompt').project_notes(ctrl.ws.root, ctrl.config.instruction_files, { override = (ctrl.config.instructions or {}).override })
   if #notes > 0 then
     local nb = {}
     for _, n in ipairs(notes) do

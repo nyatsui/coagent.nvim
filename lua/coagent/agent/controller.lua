@@ -453,6 +453,7 @@ function Controller:submit(text, opts)
     prefix = Controller.PLAN_PREFIX
   end
   local user_item = self:_add({ type = 'user', text = text })
+  self:_ledger_cite(text)
   self:_ledger_stale_notice()
   if skill then
     self:_add({ type = 'tool', tool = 'use_skill', kind = 'read', title = 'skill: ' .. skill.name, status = 'done', summary = 'used for this task (/skill)', output = skill_text })
@@ -917,6 +918,7 @@ function Controller:_deliver_queue(gen)
   local parts = {}
   for _, q in ipairs(batch) do
     local item = self:_add({ type = 'user', text = q.text, followup = true })
+    self:_ledger_cite(q.text)
     local clean, atts, errors, infos = context.resolve_references(q.text, {
       ws = self.ws,
       source = q.opts.source or {},
@@ -1038,6 +1040,7 @@ function Controller:rewind(id, mode, opts)
   end
   if conv then
     self.session:truncate(cp)
+    require('coagent.agent.notes').reset(self.session)
     self.events:emit('plan', self.session.plan)
     if mode == 'all' then
       self.session.rewind_note = nil
@@ -1088,6 +1091,10 @@ Do not invent anything. Answer with the summary only.
 function Controller:_set_watermark(wm)
   if wm ~= self.session.compact_watermark and self.seen then
     self.seen:reset()
+  end
+  if wm ~= self.session.compact_watermark then
+    -- folder notes in compacted outputs are gone: deliver them again
+    require('coagent.agent.notes').reset(self.session)
   end
   self.session.compact_watermark = wm
 end
@@ -1224,6 +1231,7 @@ function Controller:_compact_view(watermark)
       root = self.ws.root,
       mode = self.permissions:effective_mode(),
       instruction_files = self.config.instruction_files,
+      instructions_override = (self.config.instructions or {}).override,
       skills = self.skills and self.skills:prompt_section() or nil,
       monitor = require('coagent.agent.monitor').enabled(self.config) and require('coagent.agent.monitor').cfg(self.config) or nil,
     })
@@ -1725,6 +1733,7 @@ function Controller:_loop(gen)
       content = res.content or '',
       tool_calls = #tool_calls > 0 and tool_calls or nil,
     })
+    self:_ledger_cite(res.content)
 
     -- RESULTS: the first words after a finished run are the builder's
     -- reading of its metrics (reviewed before the builder acts on them)
@@ -2145,6 +2154,15 @@ function Controller:_diff_since_run(snap)
   return table.concat(parts, '\n'), snap ~= nil
 end
 
+--- Ledger entries (D-3 / F-12) named in a message count as used.
+---@param text string?
+function Controller:_ledger_cite(text)
+  local l = self.ledger
+  if l and type(text) == 'string' and text:find('[DF]%-%d') then
+    pcall(l.cite, l, text)
+  end
+end
+
 --- Goals from the project ledger (empty when there is none).
 function Controller:_ledger_goals()
   local l = self.ledger
@@ -2502,6 +2520,7 @@ function Controller:_request(gen)
       mode = mode,
       plan = planning,
       instruction_files = self.config.instruction_files,
+      instructions_override = (self.config.instructions or {}).override,
       skills = self.task.skills_section,
       monitor = require('coagent.agent.monitor').enabled(self.config) and require('coagent.agent.monitor').cfg(self.config) or nil,
       lead = self:roles().lead and not self.task.strong and not self.task.model_override,
@@ -3206,6 +3225,17 @@ function Controller:_execute(gen, tc)
           self:_escalate()
         end
       end
+    end
+  end
+  -- AGENTS.md of the folder this call touched (first time in the session)
+  local touched = prepared and prepared.path
+  if not (type(touched) == 'table' and touched.rel) and type(args.path) == 'string' and args.path ~= '' then
+    touched = self.ws:check(args.path)
+  end
+  if res.ok and type(touched) == 'table' then
+    local ok_n, notes = pcall(require('coagent.agent.notes').for_path, self, touched)
+    if ok_n and notes ~= '' then
+      content = content .. notes
     end
   end
   return { content = content ~= '' and content or '(no output)', item = item, wait = res.ok and res.wait_external or nil, stop = res.stop }

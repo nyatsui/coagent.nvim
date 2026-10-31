@@ -962,7 +962,9 @@ The agent's `ledger` tool reads a whole file, records a finding or decision
 Digest: at the start of a local task a compact digest (goals, status,
 methods.md with each section clipped to `digest_method_bytes`, the last
 `digest_decisions` decisions and `digest_findings` findings, at most
-`digest_max_bytes`) is appended
+`digest_max_bytes`; with more entries than fit, the newest half plus the
+most cited older ones: ids such as D-3 / F-12 named in your messages or the
+model's answers are counted, see /ledger info) is appended
 to the task's first message as <project_ledger rev="...">, as
 lower-priority project notes. It is injected once per change and never
 touches the system prompt, so the prompt cache keeps hitting; the task's
@@ -1304,6 +1306,19 @@ judge       Only for workspaces in `judge.workspaces` / `auto.workspaces`
 
 Claude Code equivalents: supervised = default (ask), auto = accept edits +
 a command allowlist, judge = auto mode (a model decides), /plan = plan mode.
+
+                                                  *coagent-instructions*
+Instruction files ~
+
+The root's `instruction_files` (AGENTS.md, .github/copilot-instructions.md,
+CLAUDE.md) are in the system prompt as lower-priority project notes. An
+AGENTS.md / CLAUDE.md in a subfolder is added, once per session, to the
+result of the first tool call that touches a path under that folder
+(outermost first; again when it changes, after compaction or /rewind;
+`instructions.max_file_bytes`, `instructions.max_total_bytes`). Protected
+files never. AGENTS.override.md (CLAUDE.override.md) replaces AGENTS.md in
+its folder: your own version, kept out of git. `instructions.nested = false`
+and `instructions.override = false` turn these off.
 
                                                          *coagent-rules*
 Prefix rules ~

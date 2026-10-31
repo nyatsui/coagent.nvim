@@ -268,6 +268,8 @@ function Session:serialize(opts)
     }) or nil,
     skills_disabled = next(self.skills_disabled or {}) and vim.tbl_keys(self.skills_disabled) or nil,
     terminal = self.terminal,
+    nested_notes = self.nested_notes,
+    nested_notes_bytes = self.nested_notes_bytes,
     judge_log = self.judge_log and vim.tbl_map(function(e)
       return vim.tbl_extend('force', e, { command = clean(e.command, 2000), reason = clean(e.reason) })
     end, self.judge_log) or nil,
@@ -305,6 +307,8 @@ function M.deserialize(data)
   s.plan = data.plan
   s.waiting = data.waiting
   s.judge_log = data.judge_log
+  s.nested_notes = data.nested_notes
+  s.nested_notes_bytes = data.nested_notes_bytes
   s.terminal = data.terminal
   for _, name in ipairs(data.skills_disabled or {}) do
     s.skills_disabled[name] = true

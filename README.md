@@ -923,7 +923,11 @@ each write can be undone.
 **Local tasks get a digest.** At the start of a task, a compact digest — goals, status, `methods.md` (each section
 clipped to `digest_method_bytes`), the last `digest_decisions` (5) decisions and `digest_findings` (8) findings as one
 line each, at most `digest_max_bytes` — is appended to the task's first message
-as `<project_ledger rev="...">`, framed as lower-priority project notes. Prompt-cache friendly: it is injected once
+as `<project_ledger rev="...">`, framed as lower-priority project notes. **Entries in use stay**: the model is asked to
+name the decisions and findings it relies on by id (`D-3`, `F-12`), and ids named in your messages or its answers are
+counted (`.meta.json`; "F-1 score" is not a citation). When there are more entries than fit, the digest shows the newest
+half plus the most cited older ones (fading after ~30 days without a citation) instead of only the newest; `/ledger
+info` shows the most cited entries and how many were never cited. Prompt-cache friendly: it is injected once
 per change (an unchanged ledger is not sent again; the system prompt never changes), and the task's messages stay
 byte-identical on every step even if the ledger changes meanwhile. `ledger.inject = false` turns it off.
 
@@ -1348,7 +1352,13 @@ For hands-off work where an allowlist is impractical (training entry points vary
    an error or a timeout (`judge.timeout_ms`) means **ask**; "allow" with high risk means ask. Its policy: allow reasonable,
    reversible steps toward your task inside the workspace (training / eval / tests / linters / project scripts), nothing
    installed, no network unless the task clearly needs it; ask for anything destructive, irreversible, outside the
-   workspace, network-sending, credential-touching or unrelated to the task.
+   workspace, network-sending, credential-touching or unrelated to the task. It judges what will actually run (variables,
+   globs, chained parts, wrapper scripts) rather than the stated purpose; overriding `HOME` / `PATH` / `LD_*` and the like
+   asks; truncated parts count as unknown, not harmless; earlier verdicts are context, not precedent; a broad goal does
+   not authorize shortcuts (skipping tests, changing the evaluation or the split); getting a withheld action by another
+   route asks. **Scripts the agent wrote or changed** in this session that the command runs (`python cleanup.py`) are
+   shown to the judge as the agent's diff (a new file: its content), and a cached verdict is not reused once such a
+   script changes.
 
 - The verdict is shown on the tool item as a dim line (`judge: allowed — runs the project's training script`, or
   `judge: asks (risk medium) — …` above the usual approval). `/judge log` lists every verdict of the session with its
@@ -1383,7 +1393,12 @@ for repositories you do not trust.
 - Automatic formatting (`format_after_edit`) is off by default. Even when on, protected files, files outside the workspace and
   files with unsaved buffers are not formatted, and formatting is revertible
 - Repository documents such as `AGENTS.md` are given to the model as "lower-priority reference information", stating that
-  they cannot override permissions or rules. Repository skills (`.github/skills/` etc.) are treated the same way, and
+  they cannot override permissions or rules. The root's are in the system prompt; an `AGENTS.md` / `CLAUDE.md` in a
+  **subfolder** is added, once per session, to the result of the first tool call that touches a path under that folder
+  (outermost first; again when it changes, after compaction or `/rewind`; `instructions.max_file_bytes` 8 KB each,
+  `instructions.max_total_bytes` 32 KB per session; protected files never). **`AGENTS.override.md`** (and
+  `CLAUDE.override.md`) replaces `AGENTS.md` in its folder: your own version, kept out of git. `instructions.nested`
+  / `instructions.override = false` turn these off. Repository skills (`.github/skills/` etc.) are treated the same way, and
   scripts in any skill run only through an approved `run_command`
 - Token-like strings are masked in the UI, saved history, and tool results sent to the model
 - There is no tool that lets the model pick and fetch URLs itself (only `#url:` references you type are fetched)

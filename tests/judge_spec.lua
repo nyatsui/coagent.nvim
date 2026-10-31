@@ -546,3 +546,34 @@ describe('judge mode: switching', function()
     vim.cmd('silent! tabonly | silent! only')
   end)
 end)
+
+describe('judge: scripts the agent wrote', function()
+  it('shows the agent\'s version of a script the command runs; a changed script is judged again', function()
+    local root = h.workspace({ ['train.py'] = 'print(1)\n' })
+    local r = build(root, {
+      { tool_calls = { { name = 'write_file', arguments = { path = 'cleanup.py', content = 'import shutil\nprint("would remove data")\n' } } } },
+      run_cmd('python3 cleanup.py'),
+      run_cmd('python3 cleanup.py'),
+      { tool_calls = { { name = 'write_file', arguments = { path = 'cleanup.py', content = 'print("safe")\n' } } } },
+      run_cmd('python3 cleanup.py'),
+      run_cmd('python3 train.py'),
+      { content = 'ok' },
+    }, { ALLOW }, { limits = { max_identical_calls = 10 } })
+    r.c:submit('clean up')
+    wait_done(r)
+    local jr = judge_requests(r.backend)
+    -- cleanup.py (cached the second time), cleanup.py changed, train.py (not the agent's: no SCRIPTS)
+    assert.are.equal(3, #jr)
+    local first = jr[1].messages[1].content
+    local id = first:match('<<<DATA command (%w+)>>>')
+    local scripts = first:match('<<<DATA scripts ' .. id .. '>>>\n(.-)\n<<<END scripts ' .. id .. '>>>')
+    assert.is_truthy(scripts, first)
+    assert.is_truthy(scripts:find('### cleanup.py', 1, true))
+    assert.is_truthy(scripts:find('(new file)', 1, true))
+    assert.is_truthy(scripts:find('would remove data', 1, true))
+    assert.is_truthy(jr[2].messages[1].content:find('print("safe")', 1, true))
+    assert.is_falsy(jr[3].messages[1].content:find('<<<DATA scripts', 1, true))
+    assert.is_truthy(Judge.PROMPT:find('not precedent', 1, true))
+    assert.is_truthy(Judge.PROMPT:find('HOME, PATH', 1, true))
+  end)
+end)

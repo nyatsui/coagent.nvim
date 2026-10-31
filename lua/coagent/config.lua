@@ -388,6 +388,16 @@ local defaults = {
 
   -- Repository instruction files injected as *untrusted, lower-priority* project notes.
   instruction_files = { 'AGENTS.md', '.github/copilot-instructions.md', 'CLAUDE.md' },
+  instructions = {
+    -- AGENTS.md / CLAUDE.md in a subfolder: added (once per session) to the
+    -- result of the first tool call that touches a path under that folder
+    nested = true,
+    -- AGENTS.override.md (CLAUDE.override.md, ...) replaces AGENTS.md in its
+    -- folder: your own version, kept out of git
+    override = true,
+    max_file_bytes = 8000, -- per subfolder file
+    max_total_bytes = 32 * 1024, -- subfolder notes per session (until compaction)
+  },
 
   -- Agent Skills (SKILL.md folders, the format of Claude Code / VS Code
   -- Copilot). Only `name: description` of each skill is in the system prompt

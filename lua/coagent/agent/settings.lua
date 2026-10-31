@@ -15,7 +15,7 @@ local M = {}
 local FILE_MODE = tonumber('600', 8)
 
 --- Settings that change what the agent may do without asking.
-M.SENSITIVE = { 'mode', 'auto', 'judge', 'commands', 'terminal', 'delegate', 'instruction_files', 'skills', 'references' }
+M.SENSITIVE = { 'mode', 'auto', 'judge', 'commands', 'terminal', 'delegate', 'instruction_files', 'instructions', 'skills', 'references' }
 --- Applied after a restart only.
 M.RESTART = { 'keymaps', 'hide_copilotchat_ui', 'session.dir', 'usage.dir', 'settings_file' }
 --- Never set from here.

@@ -51,9 +51,12 @@ run tests/builds/linters, read the results, fix problems and repeat until the ta
 ---@param root string
 ---@param files string[]
 ---@return {path:string, content:string}[]
-function M.project_notes(root, files)
+function M.project_notes(root, files, opts)
   local out = {}
-  for _, rel in ipairs(files or {}) do
+  local override = not opts or opts.override ~= false
+  for _, f in ipairs(files or {}) do
+    -- AGENTS.override.md (yours, out of git) replaces AGENTS.md
+    local rel = require('coagent.agent.notes').resolve(root, f, override)
     local path = root .. '/' .. rel
     local data = util.read_file(path)
     if data and vim.trim(data) ~= '' then
@@ -170,7 +173,7 @@ function M.build(opts)
     table.insert(parts, opts.skills)
   end
 
-  local notes = M.project_notes(opts.root, opts.instruction_files)
+  local notes = M.project_notes(opts.root, opts.instruction_files, { override = opts.instructions_override })
   if #notes > 0 then
     local n = {
       '<project_notes>',
