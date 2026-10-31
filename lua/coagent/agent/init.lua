@@ -28,6 +28,8 @@ function M.build(opts)
   session.skills_disabled = session.skills_disabled or {}
   local skills = Skills.new(config, ws, session.skills_disabled)
   perms.skills = skills
+  -- command prefix rules: the config's and the ones saved for this project
+  perms.rules = require('coagent.agent.rules').new(config, ws.root)
   local experiments = Experiments.new(config, ws)
   local c = Controller.new({
     skills = skills,

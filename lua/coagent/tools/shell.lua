@@ -84,6 +84,7 @@ M.run_command = {
       purpose = { type = 'string', description = 'One short sentence explaining why the command is needed.' },
       experiment = { type = 'boolean', description = 'true for a training / evaluation run: record it in the experiment log.' },
       name = { type = 'string', description = 'Short name of the experiment run (with experiment = true), e.g. "baseline-seed1".' },
+      prefix_rule = { type = 'array', items = { type = 'string' }, description = 'Optional, for a command you will run again with other arguments: the argv prefix to offer the user as a reusable approval rule, e.g. ["python", "train.py"]. The user decides; never a bare interpreter.' },
       on = { type = 'string', enum = { 'terminal', 'local' }, description = 'With the user\'s terminal attached: "local" runs this command on this machine instead (git, rg, file tools). Default: the terminal.' },
     },
   },

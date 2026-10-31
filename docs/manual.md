@@ -48,7 +48,10 @@
 
 1. **計画フェーズ**: そのタスクは読み込み・検索・LSP・`explore` ツールだけ（読み取り専用テンプレートと同じ仕組み）。
    編集・コマンドのツールはモデルに渡されず、呼ばれても拒否されます。winbar は `plan`
-2. 調査が済むとモデルは計画（手順・変更するファイル・検証方法・リスク）で締めくくり、それが **Plan** 項目として表示されます。
+2. 調査が済むとモデルは**決定済み**の計画（目的・決めたこと・手順・変更するファイル・検証方法・リスク・質問）で締めくくり、
+   それが **Plan** 項目として表示されます。実行する側（モデル自身や lead の作業役）が何も決めずに済むよう、方針・名前・
+   パラメータ・境界条件・確認方法まで決めます。コードで分かることは調べ、あなたにしか決められないことだけを推奨案付きで
+   「Questions」に書きます（答えはフィードバックとして入力）。
    winbar は `plan ready`、`approval` 通知（ベル等）が届きます
 3. 次のどれかを選びます
 
@@ -120,7 +123,9 @@
 | `/delegate <種類> [指示]\|list\|open\|cancel\|detach` / `/receive [id]` | 別のチャットに任せる / 結果を取り込む（[サブタスクを別のチャットに任せる](#サブタスクを別のチャットに任せるdelegate--receive)。ローカルのみ） |
 | `/new` `/sessions` `/model [role]` `/mode [mode]` `/roles [preset]` | 対応する `:Coagent*` コマンドと同じ |
 | `/judge [log [n]\|clear]` | judge モードの判定一覧 / キャッシュした判定を忘れる（`:CoagentJudge` と同じ。[6. モードとモデル](#6-モードとモデル)。ローカルのみ） |
-| `/usage [billing]` `/changes` `/diff` `/review` `/stop` `/processes` | 同上（`/usage billing` は GitHub の請求ページを開く） |
+| `/usage [billing]` `/changes` `/diff` `/stop` `/processes` | 同上（`/usage billing` は GitHub の請求ページを開く） |
+| `/review [session\|uncommitted\|staged\|base <branch>\|commit <sha>] [焦点] [-- パス]` / `/review fix [番号 ...]` | diff のコードレビュー（1 リクエスト、指摘は quickfix にも）/ 指摘をエージェントに渡す。引数なしで編集が承認待ちならその hunk レビュー（[diff のコードレビュー](#diff-のコードレビューreview)） |
+| `/rules [add <語...>\|remove <番号>]` | コマンドの前方一致ルール（[前方一致ルール](#前方一致ルールrules)） |
 | `/terminal [attach\|detach\|status]` | コマンドを自分の `:terminal` で実行（`:CoagentTerminal` と同じ。[9. 自分のターミナルで実行](#9-自分のターミナルで実行coagentterminal)） |
 | `/resume` | 一時停止したタスクを再開（`:CoagentResume` と同じ。上限による一時停止ならカウンタをリセット） |
 | `/effort <level\|off\|default> [role]` | 推論の強さをこのセッションだけ変更（`:CoagentEffort` と同じ。[6. モードとモデル](#6-モードとモデル)） |
@@ -166,7 +171,19 @@
 - `:'<,'>CoagentPrompt explain` / `:'<,'>Coagent /explain` / パネル入力で `/explain ここが遅い理由も`
 - `/explain` `/codereview` `/commit` はそのタスクだけ読み取り専用（winbar `read-only (task)`）。終われば元のモードに戻る
 - テンプレートは権限を上げない（設定で `mode = 'auto'` と書いても無視して警告）
-- `/review` は hunk レビューのまま。コードレビューは `/codereview`
+- `/codereview` は指定したコードをエージェントのツールでレビュー。diff のレビューは `/review`（次の節）
+
+### diff のコードレビュー（`/review`）
+
+- `/review`（このセッションのエージェントの変更。なければ未コミットの変更）、`/review uncommitted`（未追跡ファイルも含む）、
+  `/review staged`、`/review base main`、`/review commit HEAD~1`。後ろに焦点、`-- パス` で対象ファイルを絞る
+- ツールなしの 1 回のリクエスト（`review.model` → `roles.strong_model` → 選択中のモデル）。新しい版の行番号付きの diff・
+  指示ファイル（AGENTS.md など）・焦点を送り、**その変更で入った、作者が直したいバグ**だけを P0〜P3・確信度・行範囲付きで
+  返させ、最後に変更全体の判定（correct / incorrect）
+- 指摘はタイムラインと quickfix リスト（`:copen`・`:cnext`）。`/review fix` で全部、`/review fix 1 3` でその番号だけを
+  エージェントに渡す（エージェントはまずコードで確かめ、本当の問題だけ直す）
+- 保護ファイル（`.env`・鍵など）は送らない。`review.max_diff_bytes`（160 KB）を超える diff は断るので `-- パス` で絞る
+- 送信前の通知に diff の大きさと入力トークンの見積もり
 - 独自テンプレートは設定の `prompts = { Name = { prompt = '...', mode = 'readonly', description = '...' } }` のみ
   （リポジトリのファイルからは定義不可）。`Name = false` で組み込みを無効化
 
@@ -537,6 +554,13 @@ Neovim にフォーカスが無いとき、承認待ち・完了・失敗・上�
     `judge.notify_on_allow = true` で確認なしの実行時にベル
   - 判定のリクエストは `gu` / `:CoagentUsage` に役割 `judge` として表示
   - モード変更は次のツール実行から有効（実行時にも再判定されます）
+- **前方一致ルール（`/rules`）**
+  - 承認の「常に許可」で、合うときは「`python train.py` で始まるコマンド（このプロジェクトに保存）」か「この行だけ（このセッション）」を選べます
+  - ルールが効くのは、各部分（`|`・`&&`・`;` で区切る）がルール・`auto.allowed_commands`・フィルタ（`tail`・`tee`・`grep` など）で
+    始まり、ほかに確認する理由がないときだけ（危険パターン・削除・ネットワーク転送・インストール・ワークスペース外や保護ファイル・
+    `$(...)`・変数・`&` があれば確認）。`CUDA_VISIBLE_DEVICES=1` などのリテラル代入は可
+  - `supervised`・`auto`・`judge` で有効（judge への問い合わせなし）。`python` や `bash` など単体のルールは不可
+  - `/rules` で一覧、`/rules remove <番号>`、`/rules add <語...>`。全プロジェクト共通は `commands.allow_prefixes`
 - `:CoagentModel` — tool calling 対応モデルから選択（セッションごとに保持）。`usage.rates` を設定したモデルには単価を表示
   （旧方式の料金倍率は `ui.show_multiplier = true` のときだけ `(legacy x1)` と表示。現在のトークン課金とは対応しません）
 - `/effort` / `:CoagentEffort` — 推論の強さ（reasoning effort）

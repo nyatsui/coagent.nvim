@@ -273,7 +273,11 @@ vim.keymap.set('x', '<leader>ai', ':CoagentInline<CR>', { desc = 'Coagent inline
 
 1. **計画フェーズ**: 読み取り専用テンプレートと同じく、そのタスクは読み込み・検索・LSP・`explore` ツールだけに制限されます。
    編集・コマンドのツールはモデルに渡されません（呼ばれても拒否）。winbar には `plan` と表示されます
-2. モデルは調査したうえで、簡潔な計画（**手順・変更するファイル・検証方法・リスク**）で締めくくります。最後の回答は
+2. モデルは調査したうえで、簡潔で**決定済み**の計画（**目的・決めたこと・手順・変更するファイル・検証方法・リスク・
+   質問**）で締めくくります。決定済みとは、実行する側（承認後のモデル自身、`roles.preset = 'lead'` なら安い作業役）が
+   何も決めたり推測したりせずに済む状態のことです。方針・名前・パラメータ・境界条件・確認方法まで計画で決めます。
+   コードを読めば分かることは質問せずに調べ、あなたにしか決められないことだけを推奨案付きで **Questions** に書きます
+   （フィードバックとして入力して答えます）。最後の回答は
    タイムラインの **Plan** 項目になり、winbar は `plan ready` になり、`approval` 通知が送られます
 3. その後の操作:
 
@@ -325,7 +329,9 @@ vim.keymap.set('x', '<leader>ai', ':CoagentInline<CR>', { desc = 'Coagent inline
 | `/mode [mode]` / `/roles [preset]` | 承認モード（`supervised` / `readonly` / `auto` / `judge`）/ 役割分担の切替 |
 | `/judge [log [n]\|clear]` | judge モード: このセッションの判定一覧（コマンド・判定・リスク・理由・結果）/ キャッシュした判定を忘れる（「judge モード」参照。ローカル処理、リクエストなし） |
 | `/effort <level\|off\|default> [role]` | 推論の強さ（reasoning effort）をこのセッションだけ変更（下記「推論の強さ」） |
-| `/usage [billing]` / `/changes` / `/diff` / `/review` | 利用量（`billing` で GitHub の請求ページ） / 変更一覧 / diff / hunk レビュー |
+| `/usage [billing]` / `/changes` / `/diff` | 利用量（`billing` で GitHub の請求ページ） / 変更一覧 / diff |
+| `/review [session\|uncommitted\|staged\|base <branch>\|commit <sha>] [焦点] [-- パス]` | diff のコードレビュー（1 回のリクエスト）。指摘はタイムラインと quickfix リストへ。`/review fix [番号 ...]` で指摘をエージェントに渡す。引数なしで編集が承認待ちのときはその hunk レビュー（下記「diff のコードレビュー」） |
+| `/rules [add <語...>\|remove <番号>]` | このプロジェクトのコマンドの前方一致ルール（下記「前方一致ルール」） |
 | `/rewind` | 過去のプロンプトの直前まで巻き戻す（コード + 会話 / 会話のみ / コードのみ。下記「巻き戻し」） |
 | `/format [changed\|file]` | このセッションで AI が変更したファイルを整形（既定 `changed` = AI が変更した行だけ。下記「AI が編集したファイルの整形」） |
 | `/resume` | 一時停止したタスクを再開（上限で止まった場合はカウンタをリセットして続行。`:CoagentResume` と同じ） |
@@ -548,7 +554,8 @@ Visual 選択から起動したときは `#selection`、それ以外は `#buffer
 | `/tests` | テストを書いて実行 | 現在のモード |
 | `/commit` | ステージ済み変更（`#gitdiff:staged`）のコミットメッセージ作成（`git commit` はしない） | **読み取り専用** |
 
-- `/review` は従来どおり承認待ち編集の hunk レビューです。コードレビューは `/codereview` を使います
+- `/codereview` は指定したコード（選択範囲・バッファ）をエージェントのツールでレビューします。**diff**（エージェントの
+  変更・未コミットの変更・ブランチ・コミット）を 1 回のリクエストでレビューするには `/review`（次の節）を使います
 - 読み取り専用のテンプレートは**そのタスクだけ** read/search ツールに制限します（winbar に `read-only (task)`）。
   タスクが終われば元のモードに戻ります。テンプレートが権限を上げることはありません（`mode = 'auto'` などは無視して警告）
 - `:'<,'>CoagentPrompt explain 境界条件に注目` や `:Coagent /explain` でも実行できます（`:CoagentPrompt` は名前を補完、
@@ -570,6 +577,34 @@ require('coagent').setup({
 名前は大文字小文字を区別せず、小文字のスラッシュコマンド（`/summarize`）になります。組み込みのスラッシュコマンド
 （`/review` など）と同名のテンプレートは `:CoagentPrompt` からのみ使えます。`context = false` で `#selection` / `#buffer`
 の自動添付を止められます。
+
+### diff のコードレビュー（/review）
+
+```
+/review                          " このセッションのエージェントの変更（なければ未コミットの変更）
+/review uncommitted              " 作業ツリーと HEAD の差分（未追跡ファイルも含む）
+/review staged
+/review base main                " main から分かれてからの変更（未コミットの変更も含む）
+/review commit HEAD~1
+/review uncommitted データ分割を重点的に -- src/data.py src/train.py
+/review fix                      " 指摘をすべてエージェントに渡す。/review fix 1 3 でその番号だけ
+```
+
+ツールなしの 1 回のリクエストです（`review.model`、なければ `roles.strong_model`、なければ選択中のモデル）。レビュー役には
+新しい版の行番号を振った diff（報告される行番号が正確になる）、プロジェクトの指示ファイル（AGENTS.md など）、焦点を渡し、
+**その変更で入った、作者が直したいと思うバグ**だけを報告させます。1 つの欠陥・1 か所で、どんな入力や状況で問題になるかを
+示せるものに限ります。スタイル・命名・ドキュメントは、バグを隠しているかプロジェクトの指示に反する場合を除き対象外です。
+指摘ごとに優先度 **P0〜P3**・確信度・短い行範囲が付き、最後に変更全体の判定（correct / incorrect）が付きます。
+
+- 指摘はタイムラインと **quickfix リスト**に入ります（`:copen`、`:cnext`。`review.open_quickfix = true` で自動で開く）
+- `/review fix [番号 ...]` は指摘を通常のタスクとしてエージェントに渡します。エージェントは指摘ごとにまずコードで確かめ、
+  本当の問題だけを直し、問題でなかったものはそう報告します
+- 保護ファイル（`auto.protected_globs`: `.env`、鍵など）は送信対象から外します。`review.max_untracked_bytes` を超える
+  未追跡ファイルとバイナリも外します。`review.max_diff_bytes`（160 KB）を超える diff は大きいファイルを示して断るので、
+  `-- パス` で絞ってください
+- トークン: diff（変更の前後に `review.context_lines` = 8 行）と指示ファイルを 1 回分。送信前の通知にサイズと入力
+  トークンの見積もりを表示します
+- 指摘の言語は `review.language`、なければ焦点の言語、なければ変更内のコメントの言語です
 
 ### Agent Skills
 
@@ -1211,6 +1246,31 @@ terminal = {
 セッションでのみ有効になります。`judge` も同様に `judge.workspaces`（または `auto.workspaces`）への登録か、
 `:CoagentMode judge` の確認ダイアログへの同意が必要です。一方を有効にしても他方は有効になりません。
 
+### 前方一致ルール（/rules）
+
+承認の「常に許可」は、そのコマンド行をこのセッションの間だけ許可します。引数を変えて何度も実行するコマンド
+（`python train.py --lr 3e-4 --epochs 10`）では、代わりにプロジェクト単位の**前方一致ルール**を選べます:
+
+```
+Always allow
+  Commands starting with `python train.py` (saved for this project; /rules removes it)
+  Only this exact command (this session)
+```
+
+- ルールでコマンドが許可されるのは、コマンドの各部分（`|`・`&&`・`||`・`;` で区切った部分）がルールか
+  `auto.allowed_commands` で始まり（または `tail`・`head`・`tee`・`grep` などのフィルタ）、**ほかに確認が必要な理由が
+  何もない**ときだけです。危険なパターン、削除・ネットワーク転送・インストール（judge モードの固定ルールを全モードで適用）、
+  ワークスペース外のパスや保護ファイル、スキルのスクリプト、`$(...)`・変数・サブシェル・`&` があれば確認します。
+  `CUDA_VISIBLE_DEVICES=1` のようなリテラルの代入（`commands.rule_env`）は問題ありません。つまりルールは、一度承認した
+  ものを別の引数に広げるだけで、別の種類の操作には広げません
+- `supervised`・`auto`・`judge` で有効です（judge へのリクエストが減り AI クレジットの節約になります）。`readonly` では無効
+- 提案されるルールは、プログラムとそのスクリプトまたはサブコマンドです（`python train.py`・`python -m pytest`・
+  `make test`・`uv run python train.py`）。モデルが `prefix_rule` で提案することもあり、コマンドに合う場合だけ使います。
+  インタプリタや実行ツール単体（`python`・`bash`・`uv run`・`make`・`git`）や危険なものはルールにできません
+- プロジェクトごとに `stdpath('state')/coagent/command_rules.json`（0600、`commands.rules_file`）へ保存します。全プロジェクト
+  共通のルールは `commands.allow_prefixes` に書きます。`/rules` で一覧、`/rules remove <番号>` で削除、`/rules add <語...>`
+  で追加。`commands.prefix_rules = false` で無効化。リポジトリ内のファイルがルールを追加することはありません
+
 Claude Code の権限モードとの対応: `supervised` ≈ default（毎回確認）、`auto` ≈ accept edits + コマンドの許可リスト、
 `judge` ≈ auto モード（分類モデルが判定）、`/plan` ≈ plan モード。`readonly` に直接の対応はありません。
 
@@ -1300,6 +1360,7 @@ require('coagent').setup({
   },
   mode = 'supervised',
   plan = { default = false }, -- true: 新しいタスクはすべて計画フェーズから（/go で省略。「計画を先に確認する」参照）
+  review = { model = nil, context_lines = 8, max_diff_bytes = 160 * 1024 }, -- /review（「diff のコードレビュー」参照）
   limits = { -- 暴走ループの歯止め（「タスクごとの上限」参照）
     max_steps = 40,               -- 1 タスクあたりのモデル要求数（到達で一時停止、/resume で続行）
     max_tool_calls = 120,         -- 同上（ツール実行回数）

@@ -73,17 +73,31 @@ end
 M.PLAN = [[
 <plan_mode>
 You are in the PLAN PHASE. Only read/search tools are available; nothing may be changed and no command may run.
-Investigate just enough to be confident (read the relevant code, find callers and tests), then reply WITHOUT
-calling tools with a concise plan in Markdown:
+The plan must be DECISION COMPLETE: whoever executes it (you after approval, or a cheaper worker model) makes no
+decision of their own. The approach, the files and functions, names and interfaces, parameters and data choices,
+the behavior on edge cases and errors, and the checks that define done are all settled in the plan.
+- Facts are found, not asked: read the code, callers, tests and configs until you know them (an "I assume X" that a
+  read would settle is not acceptable).
+- Only what the user alone can decide (a trade-off, a preference, missing information) is a question. Ask it under
+  "Questions" with the option you recommend, and plan with that option; keep the questions few and real.
+- Investigate just enough to be confident, not more.
+Then reply WITHOUT calling tools with a concise plan in Markdown:
+## Goal
+the outcome in one or two sentences, and what "done" means
+## Decisions
+the choices made and why (approach, names, interfaces, parameters, edge cases)
 ## Steps
-numbered, concrete steps
+numbered, concrete steps: file, function, what changes
 ## Files to change
 path: what changes (and new files)
 ## Verification
 the commands or checks you will run and what they must show
 ## Risks
-risks, open questions and assumptions (say "none" if there are none)
-The user approves, revises or discards the plan. Once approved you will execute it with the normal tools.
+risks and remaining assumptions (say "none" if there are none)
+## Questions
+decisions only the user can make, each with your recommended answer (say "none" if there are none)
+The user approves, revises (answering the questions) or discards the plan. Once approved you will execute it with
+the normal tools.
 </plan_mode>
 ]]
 

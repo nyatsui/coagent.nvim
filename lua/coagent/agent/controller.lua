@@ -837,7 +837,8 @@ end
 
 --- Resolve the pending approval.
 ---@param item_id integer
----@param decision {action:'approve'|'approve_always'|'deny'|'deny_stop', reason:string?, content:string?}
+---@param decision {action:'approve'|'approve_always'|'deny'|'deny_stop', reason:string?, content:string?, rule:boolean?}
+---  rule: with approve_always, save the item's offered prefix rule instead of allowing the exact command
 ---@return boolean
 function Controller:approve(item_id, decision)
   local p = self.pending_approval
@@ -3008,7 +3009,7 @@ function Controller:_execute(gen, tc)
       return nil
     end
   end
-  item.decision = { action = decision.action, reason = decision.reason, warnings = decision.warnings, can_always = decision.can_always, sandbox = decision.sandbox }
+  item.decision = { action = decision.action, reason = decision.reason, warnings = decision.warnings, can_always = decision.can_always, sandbox = decision.sandbox, rule = decision.rule }
 
   if decision.action == 'deny' then
     return fail('denied', 'DENIED by policy: ' .. tostring(decision.reason))
@@ -3047,7 +3048,19 @@ function Controller:_execute(gen, tc)
     end
     self.task.denials = 0
     if d.action == 'approve_always' and decision.can_always then
-      self.permissions:grant(decision.grant_key)
+      if d.rule and decision.rule and self.permissions.rules then
+        -- the rule computed by the policy, never one from the request
+        local ok, err = self.permissions.rules:add(decision.rule)
+        if ok then
+          self:notice('info', string.format('Rule saved for this project: commands starting with `%s` run without asking (still asking for dangerous '
+            .. 'patterns, deletes, network transfer, installs, outside or protected paths). /rules lists and removes rules.', table.concat(decision.rule, ' ')))
+        else
+          self:notice('warn', 'The rule was not saved (' .. tostring(err) .. '); this exact command is allowed for the session.')
+          self.permissions:grant(decision.grant_key)
+        end
+      else
+        self.permissions:grant(decision.grant_key)
+      end
     end
     approval = { content = d.content }
   end

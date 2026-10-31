@@ -299,9 +299,20 @@ M.COMMANDS = {
   },
   {
     name = 'review',
-    desc = 'Review the pending edit hunk by hunk',
-    run = function()
-      app().review()
+    args = '[session|uncommitted|staged|base <branch>|commit <sha>|fix [n ...]] [focus] [-- paths]',
+    desc = 'Code review of a diff (1 request; findings in quickfix); no argument with an edit pending: its hunks',
+    complete = { 'session', 'uncommitted', 'staged', 'base', 'commit', 'fix' },
+    run = function(arg)
+      return app().code_review(arg)
+    end,
+  },
+  {
+    name = 'rules',
+    args = '[add <words...> | remove <n>]',
+    desc = 'Command prefix rules of this project (commands starting with them run without asking)',
+    complete = { 'add', 'remove' },
+    run = function(arg)
+      return app().rules(arg)
     end,
   },
   {

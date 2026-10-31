@@ -343,8 +343,18 @@ Commands go into the input history like prompts.
                       Delegate a subtask to another chat you operate and
                       import its result (|coagent-delegate|; local).
   /new  /sessions  /model [role]  /mode [mode]  /roles [preset]
-  /usage [billing]  /changes  /diff  /review  /stop  /processes
+  /usage [billing]  /changes  /diff  /stop  /processes
                       Same as the matching :Coagent* command.
+  /review [session|uncommitted|staged|base <branch>|commit <sha>]
+          [focus] [-- paths]
+                      Code review of a diff in one request; findings in
+                      the timeline and the quickfix list. /review fix
+                      [n ...] hands them to the agent. No argument while
+                      an edit waits for approval: its hunk review.
+                      See |coagent-codereview|.
+  /rules [add <words...>|remove <n>]
+                      Command prefix rules of this project
+                      (|coagent-rules|).
   /effort <level> [role]
                       Same as :CoagentEffort (|coagent-effort|).
   /terminal [attach|detach|status]
@@ -398,8 +408,12 @@ plan mode). >
 The plan phase restricts the task to the read, search, LSP and explore tools
 (like read-only templates): edit and command tools are not offered and are
 refused if called. The winbar shows "plan". The model investigates and ends
-with a plan (steps, files to change, verification, risks), shown as a plan
-item; the winbar shows "plan ready" and an "approval" notification is sent
+with a DECISION-COMPLETE plan (goal, decisions, steps, files to change,
+verification, risks, questions): whoever executes it (the model, or the
+worker with roles.preset = 'lead') has nothing left to decide or guess.
+Facts are looked up in the code; only what you alone can decide goes under
+Questions, with the recommended answer (answer by typing feedback). The plan
+is shown as a plan item; the winbar shows "plan ready" and an "approval" notification is sent
 (|coagent-notify|). Then:
 
   approve   a (panel), ga (input), /plan approve, :CoagentApprove
@@ -590,8 +604,8 @@ mode) or #buffer is attached unless your text names a source.
   /tests              Write tests and run them.
   /commit             Commit message for #gitdiff:staged.    (read-only)
 
-/review stays the hunk review of a pending edit; /codereview is the code
-review. A read-only template limits only its own task to read/search tools
+/codereview reviews the code you point at with the agent's tools; /review
+reviews a diff in one request (|coagent-codereview|). A read-only template limits only its own task to read/search tools
 (the bar shows "read-only (task)"); the mode returns afterwards. Templates
 never raise the permission mode. Unknown names are not sent.
 
@@ -1290,6 +1304,45 @@ judge       Only for workspaces in `judge.workspaces` / `auto.workspaces`
 
 Claude Code equivalents: supervised = default (ask), auto = accept edits +
 a command allowlist, judge = auto mode (a model decides), /plan = plan mode.
+
+                                                         *coagent-rules*
+Prefix rules ~
+
+"Always" on a command offers, when it fits, a rule for the project instead
+of the exact line: "Commands starting with `python train.py`". A rule
+allows a command when every part (split at |, &&, ||, ;) starts with a rule,
+auto.allowed_commands or a filter (tail, head, tee, grep, ...), and nothing
+else would ask: no dangerous pattern, delete, network transfer or install
+(the judge hard rules, in every mode), no outside path or protected file,
+no skill script, no $(...), variables, subshells or &. Literal assignments
+such as CUDA_VISIBLE_DEVICES=1 (`commands.rule_env`) are fine. Works in
+supervised, auto and judge (no judge request), never in readonly. A rule is
+never a bare interpreter or runner (python, bash, uv run, make, git).
+Saved rules: stdpath('state')/coagent/command_rules.json (0600,
+`commands.rules_file`), per project; `commands.allow_prefixes` holds rules
+for every project; `commands.prefix_rules = false` turns them off. /rules
+lists, /rules add <words...> adds, /rules remove <n> removes.
+
+                                                    *coagent-codereview*
+Code review of a diff ~
+
+  /review                     the agent's changes (else uncommitted)
+  /review uncommitted         working tree vs HEAD, untracked included
+  /review staged
+  /review base main           since the branch left main
+  /review commit HEAD~1
+  /review uncommitted the data split -- src/data.py
+  /review fix [n ...]         hand the findings to the agent
+
+One request without tools (`review.model`, else roles.strong_model, else
+the selected model). The diff is numbered with the new version's lines;
+the project's instruction files and your focus go with it. Only bugs the
+change introduces and its author would fix are reported, each with a
+priority P0-P3, a confidence and a line range, plus a verdict on the whole
+change. Findings go to the timeline and the quickfix list (:copen;
+`review.open_quickfix`). Protected files are left out; a diff over
+`review.max_diff_bytes` is refused (narrow it with -- paths). /review fix
+sends a task: the agent checks each finding before fixing it.
 
                                                          *coagent-judge*
 Judge mode ~

@@ -40,6 +40,8 @@ and verify; the worker implements and runs.
   and starting an experiment, collecting results. Give each assignment the goal, the files and functions involved,
   the decisions you made (approach, names, parameters), the constraints and the exact checks that define done.
   Each assignment is self-contained: the worker sees only what you write, not this conversation.
+- Make each assignment DECISION COMPLETE: the worker chooses nothing - not the approach, names, interfaces,
+  parameters or what to do on an edge case. Decide (or investigate) first; a worker left to guess costs a retry.
 - Do small things yourself (a one-line fix, reading a few lines): an assignment costs a report too.
 - Never trust a report blindly: check the diff and the results coagent appends to it before you go on. Send a
   corrective assignment, or fix it yourself, when it is wrong.

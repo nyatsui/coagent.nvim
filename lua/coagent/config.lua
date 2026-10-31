@@ -215,6 +215,29 @@ local defaults = {
     -- run_command / start_process in it (except terminal.local_commands and
     -- on = 'local'); 'local' keeps every command local.
     target = 'terminal',
+    -- Prefix rules ("always allow commands starting with `python train.py`"):
+    -- when you press "always" on a command, you can save a rule for this
+    -- project instead of allowing only that exact line. A rule allows the
+    -- command with other arguments; anything that would ask anyway (dangerous
+    -- patterns, deletes, network transfer, installs, outside or protected
+    -- paths, skill scripts, $(...), variables, subshells, &) still asks.
+    -- /rules lists / adds / removes them. Lists replace.
+    prefix_rules = true,
+    allow_prefixes = {}, -- rules for every project: { { 'python', 'train.py' }, { 'make', 'test' } }
+    rules_file = nil, -- nil = stdpath('state')/coagent/command_rules.json (0600); false = do not save rules
+    rule_env = nil, -- NAME=value prefixes a rule-allowed command may carry; nil = CUDA_VISIBLE_DEVICES, OMP_NUM_THREADS, ...
+  },
+
+  -- /review [session|uncommitted|staged|base <branch>|commit <sha>] [focus] [-- paths]:
+  -- a code review of a diff in one request (no tools). Findings: timeline +
+  -- quickfix list (:copen); /review fix [n ...] hands them to the agent.
+  review = {
+    model = nil, -- nil = roles.strong_model, else the selected model
+    context_lines = 8, -- unchanged lines around each change
+    max_diff_bytes = 160 * 1024, -- larger diffs are refused (narrow with -- paths)
+    max_untracked_bytes = 64 * 1024, -- untracked files larger than this are left out (uncommitted)
+    language = nil, -- language of the findings; nil = the focus's language, else the change's comments, else English
+    open_quickfix = false, -- open the quickfix list (:botright copen) when there are findings
   },
 
   -- Your own terminal (:CoagentTerminal attach): run the agent's commands in a
@@ -726,6 +749,12 @@ function M.setup(opts)
   end
   if opts and opts.skills and opts.skills.paths then
     M.options.skills.paths = opts.skills.paths
+  end
+  if opts and opts.commands and opts.commands.allow_prefixes then
+    M.options.commands.allow_prefixes = opts.commands.allow_prefixes
+  end
+  if opts and opts.commands and opts.commands.rule_env then
+    M.options.commands.rule_env = opts.commands.rule_env
   end
   if opts and opts.judge and opts.judge.allowed_paths then
     M.options.judge.allowed_paths = opts.judge.allowed_paths

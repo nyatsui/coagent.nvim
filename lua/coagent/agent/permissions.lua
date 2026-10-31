@@ -18,6 +18,9 @@
 ---               tools always ask); what remains asks a separate judge model
 ---               (agent/judge.lua), which can only turn "ask" into "allow".
 ---               Only in workspaces the user explicitly enabled.
+---
+--- Prefix rules (agent/rules.lua) the user saved allow a command in every
+--- mode but read-only, after the dangerous patterns and before the judge.
 local cmdparse = require('coagent.agent.cmdparse')
 local sandbox = require('coagent.tools.sandbox')
 
@@ -31,6 +34,7 @@ local sandbox = require('coagent.tools.sandbox')
 ---@field judge boolean? judge mode: the judge model may turn this 'ask' into 'allow'
 ---@field hard boolean? a hard rule asked (never sent to the judge)
 ---@field inspection Coagent.CommandInspection? judge mode: command description
+---@field rule string[]? a prefix rule "always" may save for this project instead of the exact command
 
 ---@class Coagent.Permissions
 local Permissions = {}
@@ -279,8 +283,28 @@ function Permissions:decide(tool, args, prepared)
     if self.grants[key] then
       return decision('allow', 'previously approved command', { sandbox = sandbox_all })
     end
+    local command = prepared.command or args.command or ''
+    local cwd = prepared.cwd or self.ws.root
+    local ropts = { allowed = self.config.auto.allowed_commands, allowed_paths = (self.config.judge or {}).allowed_paths, skills = self.skills }
+    if self.rules then
+      local rule = self.rules:match(command, cwd, self.ws, ropts)
+      if rule then
+        local sb = sandbox_all
+        if mode == 'auto' then
+          sb = self.config.commands.sandbox ~= 'off' and sandbox.backend() ~= nil
+        end
+        return decision('allow', 'prefix rule: ' .. table.concat(rule, ' '), { sandbox = sb })
+      end
+    end
+    -- the rule "always" may save instead of this exact line (nil: none fits)
+    local function offer(d)
+      if d.action == 'ask' and d.can_always and self.rules then
+        d.rule = self.rules:offer(command, cwd, self.ws, ropts, args.prefix_rule)
+      end
+      return d
+    end
     if mode == 'judge' then
-      return self:_judge_exec(prepared, args, a, key)
+      return offer(self:_judge_exec(prepared, args, a, key))
     end
     if mode == 'auto' then
       local why
@@ -299,9 +323,9 @@ function Permissions:decide(tool, args, prepared)
         local use_sandbox = self.config.commands.sandbox ~= 'off' and sandbox.backend() ~= nil
         return decision('allow', 'auto mode: allowlisted command', { sandbox = use_sandbox })
       end
-      return decision('ask', why, { warnings = warnings, grant_key = key, can_always = true, sandbox = sandbox_all })
+      return offer(decision('ask', why, { warnings = warnings, grant_key = key, can_always = true, sandbox = sandbox_all }))
     end
-    return decision('ask', 'command execution', { warnings = warnings, grant_key = key, can_always = true, sandbox = sandbox_all })
+    return offer(decision('ask', 'command execution', { warnings = warnings, grant_key = key, can_always = true, sandbox = sandbox_all }))
   end
 
   return decision('ask', 'unknown tool kind')

@@ -337,6 +337,7 @@ M.start_process = {
       purpose = { type = 'string', description = 'Why the process is needed.' },
       experiment = { type = 'boolean', description = 'true for a training / evaluation run: record it in the experiment log.' },
       name = { type = 'string', description = 'Short name of the experiment run (with experiment = true), e.g. "lr3e-4-warmup".' },
+      prefix_rule = { type = 'array', items = { type = 'string' }, description = 'Optional, for a command you will run again with other arguments: the argv prefix to offer the user as a reusable approval rule, e.g. ["python", "train.py"]. The user decides; never a bare interpreter.' },
     },
   },
   title = function(args)

@@ -366,6 +366,21 @@ function actions.approve(action, ask_reason)
     notify('nothing is waiting for approval')
     return
   end
+  local rule = action == 'approve_always' and p.item.decision and p.item.decision.rule
+  if rule then
+    -- "always": this exact command for the session, or a prefix rule for the project
+    local words = table.concat(rule, ' ')
+    local choices = {
+      'Commands starting with `' .. words .. '` (saved for this project; /rules removes it)',
+      'Only this exact command (this session)',
+    }
+    vim.ui.select(choices, { prompt = 'Always allow' }, function(_, idx)
+      if idx and c:pending() and c:pending().item.id == p.item.id then
+        c:approve(p.item.id, { action = 'approve_always', rule = idx == 1 })
+      end
+    end)
+    return
+  end
   if ask_reason and state.view and state.view:visible() then
     -- the reason is written in the input (several lines are fine)
     state.view:ask_deny_reason(p.item.id, action)
@@ -991,6 +1006,143 @@ function M._skills_text(skills)
   return table.concat(lines, '\n')
 end
 
+--- `/review [session|uncommitted|staged|base <branch>|commit <sha>] [focus] [-- paths]`:
+--- a code review of a diff in one request; `/review fix [n ...]` hands the
+--- last review's findings to the agent. Without arguments while a file
+--- change waits for approval: review that change hunk by hunk.
+---@param arg string?
+---@return boolean?
+function M.code_review(arg)
+  local c = M.controller()
+  arg = vim.trim(arg or '')
+  local p = c:pending()
+  if arg == '' and p and p.item.kind == 'write' then
+    return M.review()
+  end
+  local R = require('coagent.agent.review')
+  local fix = arg:match('^fix%f[%s%z]%s*(.-)$')
+  if fix then
+    local review = c.last_review
+    if not review then
+      c:notice('error', '/review fix: no review yet in this session (/review first)')
+      return false
+    end
+    local pick = {}
+    for n in fix:gmatch('%d+') do
+      table.insert(pick, tonumber(n))
+    end
+    local prompt, err = R.fix_prompt(review, pick)
+    if not prompt then
+      c:notice('error', '/review fix: ' .. err)
+      return false
+    end
+    local ok, serr = c:submit(prompt, { input = '/review fix' .. (fix ~= '' and (' ' .. fix) or ''), skip_plan = true })
+    if not ok then
+      c:notice('error', '/review fix: ' .. tostring(serr))
+    end
+    return ok
+  end
+  local spec, perr = R.parse(arg)
+  if not spec then
+    c:notice('error', perr)
+    return false
+  end
+  R.run(c, spec, function(review, err)
+    if not review then
+      c:notice('error', '/review: ' .. tostring(err))
+      return
+    end
+    c.last_review = review
+    R.to_quickfix(c, review)
+    local n = #review.findings
+    local head = string.format('Review of %s (%s): %s%s', review.label, review.model,
+      n == 0 and 'no findings' or (n .. ' finding' .. (n == 1 and '' or 's')),
+      review.verdict and (' · verdict: ' .. review.verdict .. (review.confidence and string.format(' (%.1f)', review.confidence) or '')) or '')
+    local lines = { head }
+    if review.explanation then
+      table.insert(lines, review.explanation)
+    end
+    if n > 0 then
+      table.insert(lines, '')
+      table.insert(lines, R.format(review.findings, { numbered = true }))
+      table.insert(lines, '')
+      table.insert(lines, 'In the quickfix list (:copen, :cnext). /review fix hands them all to the agent, /review fix 1 3 only those; '
+        .. 'the agent checks each one before fixing it.')
+    end
+    c:notice(n > 0 and review.verdict == 'incorrect' and 'warn' or 'info', table.concat(lines, '\n'))
+    if n > 0 and (c.config.review or {}).open_quickfix then
+      pcall(vim.cmd, 'botright copen')
+    end
+  end)
+  return true
+end
+
+--- `/rules [add <words...> | remove <n>]`: command prefix rules of this
+--- project (and the config's commands.allow_prefixes).
+---@param arg string?
+---@return boolean?
+function M.rules(arg)
+  local c = M.controller()
+  local rules = c.permissions.rules
+  if not rules then
+    c:notice('warn', 'Prefix rules are not available.')
+    return false
+  end
+  arg = vim.trim(arg or '')
+  local verb, rest = arg:match('^(%S+)%s*(.-)$')
+  if verb == 'add' then
+    local words = {}
+    for w in rest:gmatch('%S+') do
+      table.insert(words, w)
+    end
+    local ok, err = rules:add(words)
+    if not ok then
+      c:notice('error', '/rules add: ' .. tostring(err))
+      return false
+    end
+    c:notice('info', 'Rule saved for this project: commands starting with `' .. table.concat(words, ' ') .. '` run without asking.')
+    return true
+  elseif verb == 'remove' or verb == 'rm' then
+    local n = tonumber(rest)
+    local all = rules:all()
+    local r = n and all[n]
+    if not r then
+      c:notice('error', '/rules remove: give the number of a rule (/rules lists them)')
+      return false
+    end
+    if r.source ~= 'saved' then
+      c:notice('error', '/rules remove: rule ' .. n .. ' comes from commands.allow_prefixes in your config; change it there')
+      return false
+    end
+    local ok, err = rules:remove(r.prefix)
+    if not ok then
+      c:notice('error', '/rules remove: ' .. tostring(err))
+      return false
+    end
+    c:notice('info', 'Rule removed: `' .. table.concat(r.prefix, ' ') .. '`.')
+    return true
+  elseif arg ~= '' then
+    c:notice('error', '/rules: unknown argument "' .. arg .. '" (add <words...> | remove <n>)')
+    return false
+  end
+  local all = rules:all()
+  local lines = {}
+  if not rules:enabled() then
+    table.insert(lines, 'Prefix rules are off (commands.prefix_rules = false).')
+  end
+  if #all == 0 then
+    table.insert(lines, 'No prefix rules for this project. Press "always" on a command waiting for approval to save one, or /rules add <words...>.')
+  else
+    table.insert(lines, 'Commands starting with these run without asking (dangerous patterns, deletes, network transfer, installs, '
+      .. 'outside or protected paths still ask):')
+    for i, r in ipairs(all) do
+      table.insert(lines, string.format('  %d. %s  (%s)', i, table.concat(r.prefix, ' '), r.source == 'config' and 'config: commands.allow_prefixes' or ('saved ' .. (r.added or ''))))
+    end
+    table.insert(lines, '/rules remove <n> removes a saved rule.')
+  end
+  c:notice('info', table.concat(lines, '\n'))
+end
+
 --- `/skills [enable|disable <name>|reload]`. Without arguments: list them
 --- and pick one to enable/disable for this session. Changes apply from the
 --- next task (the skills list in the system prompt is fixed per task).
@@ -1164,6 +1316,9 @@ local function exp_run(c, command)
     return true
   end
   local choices = { 'Run' }
+  if decision.rule then
+    table.insert(choices, 'Run, and always allow commands starting with `' .. table.concat(decision.rule, ' ') .. '` (this project)')
+  end
   if decision.can_always then
     table.insert(choices, 'Run, and always allow this command')
   end
@@ -1171,6 +1326,13 @@ local function exp_run(c, command)
   local why = tostring(decision.reason) .. (#(decision.warnings or {}) > 0 and ('; ' .. table.concat(decision.warnings, '; ')) or '')
   vim.ui.select(choices, { prompt = string.format('Run experiment `%s`? (%s)', command, why) }, function(choice)
     if choice == 'Run' then
+      go(decision.sandbox)
+    elseif choice and choice:match('^Run, and always allow commands starting') then
+      local ok, err = c.permissions.rules:add(decision.rule)
+      if not ok then
+        c:notice('warn', 'The rule was not saved: ' .. tostring(err))
+        c.permissions:grant(decision.grant_key)
+      end
       go(decision.sandbox)
     elseif choice and choice:match('^Run, and always') then
       c.permissions:grant(decision.grant_key)

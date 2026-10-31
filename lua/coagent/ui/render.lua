@@ -281,7 +281,8 @@ local function tool(b, item, o)
     local k = o.keys or {}
     local parts = { key(k, 'approve') .. ' approve' }
     if item.decision and item.decision.can_always then
-      table.insert(parts, key(k, 'approve_always') .. ' always')
+      local r = item.decision.rule
+      table.insert(parts, key(k, 'approve_always') .. ' always' .. (r and (' (or rule `' .. table.concat(r, ' ') .. ' …`)') or ''))
     end
     table.insert(parts, key(k, 'deny') .. ' deny')
     table.insert(parts, key(k, 'deny_stop') .. ' stop')

@@ -284,7 +284,11 @@ Check the direction before anything changes (like Claude Code's plan mode):
 
 1. **Plan phase**: the task is restricted to the read / search / LSP / `explore` tools, like the read-only templates. Edit
    and command tools are not offered to the model (and are refused if it calls them anyway). The winbar shows `plan`
-2. The model investigates and ends with a concise plan: **steps, files to change, how it will verify, risks**. The final
+2. The model investigates and ends with a concise, **decision-complete** plan: **goal, decisions, steps, files to change,
+   how it will verify, risks, questions**. Decision complete means whoever executes it (the model itself, or a cheaper
+   worker with `roles.preset = 'lead'`) has nothing left to decide or guess: the approach, names, parameters, edge cases
+   and checks are settled. Facts are looked up in the code, not asked; only what you alone can decide goes under
+   **Questions**, each with the answer the model recommends (answer by typing feedback). The final
    answer becomes a **plan** item in the timeline, the winbar shows `plan ready`, and an `approval` notification is sent
 3. Then:
 
@@ -336,7 +340,9 @@ input history (`<C-p>`/`<C-n>`) like normal prompts.
 | `/mode [mode]` / `/roles [preset]` | Switch approval mode (`supervised` / `readonly` / `auto` / `judge`) / model roles |
 | `/judge [log [n]\|clear]` | Judge mode: list the judge's decisions in this session (command, verdict, risk, reason, outcome) / forget cached verdicts (see "Judge mode"; local, no request) |
 | `/effort <level\|off\|default> [role]` | Change the reasoning effort for this session (see "Reasoning effort") |
-| `/usage [billing]` / `/changes` / `/diff` / `/review` | Usage (`billing` opens GitHub's billing page) / changes / diff / hunk review |
+| `/usage [billing]` / `/changes` / `/diff` | Usage (`billing` opens GitHub's billing page) / changes / diff |
+| `/review [session\|uncommitted\|staged\|base <branch>\|commit <sha>] [focus] [-- paths]` | Code review of a diff in one request; findings in the timeline and the quickfix list. `/review fix [n ...]` hands them to the agent. Without arguments while an edit waits for approval: its hunk review (see "Code review of a diff") |
+| `/rules [add <words...>\|remove <n>]` | Command prefix rules of this project (see "Prefix rules") |
 | `/rewind` | Rewind to just before an earlier prompt (code + conversation / conversation / code; see "Rewind") |
 | `/format [changed\|file]` | Format files the AI changed in this session (default `changed` = only the lines the AI changed; see "Formatting AI-edited files") |
 | `/resume` | Resume a paused task (after a limit: continues with fresh counters; same as `:CoagentResume`) |
@@ -566,7 +572,8 @@ input already has references such as `#file:` or `@path`).
 | `/tests` | Write and run tests | Current mode |
 | `/commit` | Write a commit message for the staged changes (`#gitdiff:staged`; does not run `git commit`) | **Read-only** |
 
-- `/review` remains the hunk review of pending edits. Use `/codereview` for code review
+- `/codereview` reviews the code you point at (selection, buffer) with the agent's tools. To review a **diff** (the
+  agent's changes, uncommitted changes, a branch, a commit) in one request, use `/review` (next section)
 - Read-only templates restrict **that task only** to read/search tools (winbar: `read-only (task)`) and the previous mode
   returns when it ends. Templates never raise permissions (`mode = 'auto'` and the like are ignored with a warning)
 - `:'<,'>CoagentPrompt explain focus on edge cases` and `:Coagent /explain` work too (`:CoagentPrompt` completes names and
@@ -589,6 +596,36 @@ require('coagent').setup({
 Names are case-insensitive and become lowercase slash commands (`/summarize`). A template with the same name as a built-in
 slash command (`/review`, ...) is only available through `:CoagentPrompt`. `context = false` stops the automatic
 `#selection` / `#buffer` attachment.
+
+### Code review of a diff (/review)
+
+```
+/review                          " the agent's changes in this session (else the uncommitted changes)
+/review uncommitted              " working tree vs HEAD, untracked files included
+/review staged
+/review base main                " this branch since it left main (plus uncommitted changes)
+/review commit HEAD~1
+/review uncommitted check the data split -- src/data.py src/train.py
+/review fix                      " hand all findings to the agent; /review fix 1 3 only those
+```
+
+ONE request (`review.model`, else `roles.strong_model`, else the selected model) with no tools. The reviewer gets the
+diff, numbered with the new version's line numbers so that reported lines are right, the project's instruction files
+(AGENTS.md, ...) and your focus, and reports only **bugs the change introduces and its author would fix**: one defect,
+one place, with the inputs or situation where it goes wrong. Style, naming and docs are left out unless they hide a bug
+or break a rule in the project's instructions. Each finding has a priority **P0–P3**, a confidence and a short line
+range; the review ends with a verdict on the whole change (correct / incorrect).
+
+- The findings appear in the timeline and in the **quickfix list** (`:copen`, `:cnext`; `review.open_quickfix = true`
+  opens it)
+- `/review fix [n ...]` sends them to the agent as a normal task: it checks each finding against the code first, fixes
+  the real ones and says which were not a problem
+- Protected files (`auto.protected_globs`: `.env`, keys, ...) are left out of what is sent; untracked files larger than
+  `review.max_untracked_bytes` and binary files too. A diff over `review.max_diff_bytes` (160 KB) is refused with the
+  largest files listed: narrow it with `-- paths`
+- Tokens: the diff (with `review.context_lines`, 8, unchanged lines around each change) plus the instruction files, once.
+  The notice before the request shows the size and the estimated input tokens
+- Findings are written in `review.language`, else the language of your focus, else that of the change's comments
 
 ### Agent Skills
 
@@ -1253,6 +1290,31 @@ Alt are not used as defaults.
 `:CoagentMode auto`. `judge` likewise needs `judge.workspaces` (or `auto.workspaces`) or the confirmation dialog of
 `:CoagentMode judge`; confirming one mode does not enable the other.
 
+### Prefix rules (/rules)
+
+"Always" on an approval allows that exact command line for the session. For a command you run again and again with other
+arguments (`python train.py --lr 3e-4 --epochs 10`), it offers a **prefix rule** for the project instead:
+
+```
+Always allow
+  Commands starting with `python train.py` (saved for this project; /rules removes it)
+  Only this exact command (this session)
+```
+
+- A rule allows a command when every part of it (split at `|`, `&&`, `||`, `;`) starts with a rule or with
+  `auto.allowed_commands` (or is a filter such as `tail`, `head`, `tee`, `grep`), and **nothing else would ask**: no
+  dangerous pattern, no delete, network transfer or install (the judge-mode hard rules apply in every mode), no path
+  outside the workspace or protected file, no skill script, no `$(...)`, variables, subshells or `&`. Literal
+  `CUDA_VISIBLE_DEVICES=1`-style assignments (`commands.rule_env`) are fine. So a rule widens what you approved to its
+  other arguments, never to another kind of action
+- It works in `supervised`, `auto` and `judge` (no judge request: fewer AI credits); never in `readonly`
+- The offered rule is the program plus its script or subcommand (`python train.py`, `python -m pytest`, `make test`,
+  `uv run python train.py`); the model may propose one (`prefix_rule`), used only when it fits the command. A rule may
+  not be a bare interpreter or runner (`python`, `bash`, `uv run`, `make`, `git`), nor anything dangerous
+- Saved per project in `stdpath('state')/coagent/command_rules.json` (0600; `commands.rules_file`); rules for every
+  project go in `commands.allow_prefixes`. `/rules` lists them, `/rules remove <n>` removes one, `/rules add <words...>`
+  adds one. `commands.prefix_rules = false` turns rules off. Repository files never add rules
+
 Compared with Claude Code's permission modes: `supervised` ≈ default (ask), `auto` ≈ accept edits + an allowlist of
 commands, `judge` ≈ auto mode (a classifier model decides), `/plan` ≈ plan mode, `readonly` has no direct equivalent.
 
@@ -1348,6 +1410,7 @@ require('coagent').setup({
   },
   mode = 'supervised',
   plan = { default = false }, -- true: every new task starts in the plan phase (/go skips it; see "Plan first")
+  review = { model = nil, context_lines = 8, max_diff_bytes = 160 * 1024 }, -- /review (see "Code review of a diff")
   limits = { -- brakes for runaway loops (see "Per-task limits")
     max_steps = 40,               -- model requests per task (pauses when reached; /resume continues)
     max_tool_calls = 120,         -- same, for tool calls
