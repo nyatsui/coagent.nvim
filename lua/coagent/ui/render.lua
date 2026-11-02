@@ -377,7 +377,10 @@ local function summary(b, item, o)
     b.line('  ' .. Usage.long(item.usage, ' ' .. i.dot .. ' ', i.approx), 'CoagentDim')
   end
   if item.strong then
-    b.line(string.format('  Builder: %s (%s)', item.strong, item.escalated and 'escalated after a repeated failure' or '/strong'), 'CoagentDim')
+    b.line(string.format('  Builder: %s (%s)', item.strong, item.escalated == 'gate' and 'took over from the draft, quality gate' or (item.escalated and 'escalated after a repeated failure' or '/strong')), 'CoagentDim')
+  end
+  if item.final_check then
+    b.line('  Final check: ' .. item.final_check, 'CoagentDim')
   end
   if item.supervision and #item.supervision > 0 then
     -- every advisor checkpoint of the task and its result
@@ -469,8 +472,8 @@ function M.item(item, o)
   elseif item.type == 'advisor' then
     -- one item per checkpoint (name, verdict, the advisor's points)
     local label = require('coagent.agent.advisor').LABEL[item.kind] or 'review'
-    local verdict = item.verdict == 'block' and ' · BLOCK' or (item.verdict == 'points' and ' · points' or (item.verdict == 'lgtm' and ' · LGTM' or ''))
-    local head = string.format('%s Advisor · %s (%s)%s · %s', i.advisor or '#', tostring(item.kind or ''), label, verdict, tostring(item.model or ''))
+    local verdict = item.verdict == 'block' and ' · BLOCK' or (item.verdict == 'points' and ' · points' or (item.verdict == 'lgtm' and ' · LGTM' or (item.verdict == 'escalate' and ' · escalate' or '')))
+    local head = string.format('%s %s · %s (%s)%s · %s', i.advisor or '#', item.who or 'Advisor', tostring(item.kind or ''), label, verdict, tostring(item.model or ''))
     local r = b.line(head)
     b.hl(r, 0, -1, item.failed and 'CoagentWarn' or (item.verdict == 'block' and 'CoagentError' or 'CoagentSummary'))
     for _, ch in ipairs(item.children or {}) do

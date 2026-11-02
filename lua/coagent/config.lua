@@ -42,6 +42,21 @@ local defaults = {
     strong_model = nil,
     -- After REPEATED_FAILURE, finish the task on the strong model.
     escalate_on_repeated_failure = false,
+    -- How the result is checked when the agent is about to finish; the preset
+    -- decides who works during the task, so any preset works with any of these.
+    -- `/finalcheck` changes it for the session; `/finalcheck <name> <task>` for one task.
+    --   'off'    no check of its own (with an advisor, its final review)
+    --   'gate'   a quality gate (gate_model) checks the draft in one request; if
+    --            it fails, or the same check failed twice, the strong model
+    --            takes over (the switch costs a one-time cache miss)
+    --   'critic' an independent read-only critic (critic_model) reviews the
+    --            draft with its own history; the author revises it once
+    -- Either one replaces the advisor's final review (BEFORE_DONE / ANSWER).
+    final_check = 'off',
+    gate_model = nil, -- nil = strong_model, else the lead's
+    critic_model = nil, -- nil = strong_model, else another model of this session; best another family
+    gate = { max_brief_bytes = 24000, answer_min_chars = 400 }, -- shorter answers without changes are not checked
+    critic = { max_brief_bytes = 24000, answer_min_chars = 400, tools = 'read', max_tool_steps = 4, max_tool_result_bytes = 4000 },
     -- Per-role reasoning effort (nil = use `reasoning_effort`; 'off' = never send).
     builder_effort = nil,
     explorer_effort = nil,
@@ -775,6 +790,10 @@ function M.setup(opts)
   local sup = (M.options.roles or {}).supervision
   if sup ~= nil and not require('coagent.agent.roles').valid_supervision(sup) then
     vim.notify(string.format("[coagent] roles.supervision = %q is not 'light' | 'standard' | 'strict'; 'standard' is used", tostring(sup)), vim.log.levels.WARN)
+  end
+  local fc = (M.options.roles or {}).final_check
+  if not require('coagent.agent.roles').valid_final_check(fc) then
+    vim.notify(string.format("[coagent] roles.final_check = %q is not 'off' | 'gate' | 'critic'; 'off' is used", tostring(fc)), vim.log.levels.WARN)
   end
   if opts and opts.auto and opts.auto.protected_globs then
     M.options.auto.protected_globs = opts.auto.protected_globs

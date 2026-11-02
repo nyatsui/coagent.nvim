@@ -62,6 +62,16 @@ end, {
     return { 'light', 'standard', 'strict', 'default' }
   end,
 })
+cmd('CoagentFinalCheck', function(a)
+  agent().finalcheck(a.args, { range = a.range > 0 and { a.line1, a.line2 } or nil, open = a.args:find('%s%S') ~= nil })
+end, {
+  nargs = '*',
+  range = true,
+  desc = 'How a result is checked before a task finishes: off | gate | critic | default, optionally with a task for one run',
+  complete = function()
+    return { 'off', 'gate', 'critic', 'default' }
+  end,
+})
 cmd('CoagentSkills', function(a)
   agent().skills(a.args)
 end, {

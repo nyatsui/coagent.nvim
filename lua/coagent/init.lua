@@ -917,6 +917,85 @@ function M.supervision(arg)
   return true
 end
 
+--- One line describing the effective final check.
+---@param c Coagent.Controller
+---@return string
+function M._finalcheck_text(c)
+  local r = c:roles()
+  local FinalCheck = require('coagent.agent.final_check')
+  local why = FinalCheck.problem(r, r.final_check)
+  local author = r.lead_model or r.builder_model
+  local adv = r.advisor and ' It replaces the advisor\'s final review; the other checkpoints stay.' or ''
+  if why then
+    return string.format('Final check: %s, NOT RUNNING: %s.', r.final_check, why)
+  elseif r.final_check == 'gate' then
+    local fix = (r.lead or not r.strong_model) and (author .. ' repairs the draft itself') or (r.strong_model .. ' takes over')
+    return string.format('Final check: gate. %s checks the draft of %s (1 request, about 3-8k input tokens); when it fails, %s.', r.gate_model, author, fix) .. adv
+  elseif r.final_check == 'critic' then
+    return string.format('Final check: critic. %s reviews the draft of %s (read-only, 1-5 requests of about 3-8k input tokens); the author revises once.', FinalCheck.critic_for(r, author), author) .. adv
+  end
+  return 'Final check: off. ' .. require('coagent.agent.roles').FINAL_CHECK_DESCRIPTION.off .. '.'
+end
+
+--- `/finalcheck [name|default] [task]`: how a result is checked before a task
+--- finishes. With a task: for that task only. No argument: show / pick.
+---@param arg string?
+---@param opts {range:integer[]?, open:boolean?}?
+---@return boolean ok
+function M.finalcheck(arg, opts)
+  opts = opts or {}
+  local c = M.controller()
+  local Roles = require('coagent.agent.roles')
+  local function apply(name)
+    local ok, err = c:set_final_check(name ~= 'default' and name or nil)
+    if not ok then
+      c:notice('error', '/finalcheck: ' .. tostring(err))
+      return false
+    end
+    c:notice('info', M._finalcheck_text(c))
+    return true
+  end
+  local name, task = vim.trim(arg or ''):match('^(%S+)%s*(.-)$')
+  if name and task ~= '' then
+    if not vim.tbl_contains(Roles.FINAL_CHECKS, name) then
+      c:notice('error', '/finalcheck: unknown final check: ' .. name .. ' (' .. table.concat(Roles.FINAL_CHECKS, ' | ') .. ')')
+      return false
+    end
+    if opts.open then
+      track_editor()
+      capture_selection(opts.range)
+      M.view():open()
+    end
+    c.source = source()
+    local sel = state.selection
+    state.selection = nil
+    local text = task
+    if sel and opts.range and not text:find('#selection', 1, true) then
+      text = text .. ' #selection'
+    end
+    -- like /go: the check belongs to this task, so it runs without a plan phase
+    local ok, err = c:submit(text, { final_check = name, skip_plan = true, source = c.source, selection = sel, input = '/finalcheck ' .. arg })
+    if not ok then
+      c:notice('warn', '/finalcheck: ' .. tostring(err))
+    end
+    return ok
+  end
+  if name then
+    return apply(name)
+  end
+  vim.ui.select(vim.list_extend(vim.deepcopy(Roles.FINAL_CHECKS), { 'default' }), {
+    prompt = 'Final check (current: ' .. c:roles().final_check .. ')',
+    format_item = function(l)
+      return string.format('%-8s %s', l, Roles.FINAL_CHECK_DESCRIPTION[l] or 'back to the config')
+    end,
+  }, function(l)
+    if l then
+      apply(l)
+    end
+  end)
+  return true
+end
+
 --- :CoagentUsage: advisor requests / tokens and checkpoint results (task,
 --- session). Empty without an advisor.
 ---@param c Coagent.Controller?
@@ -2132,11 +2211,14 @@ end
 
 --- Pick a model. With a roles preset other than 'single' you first choose
 --- which role (builder / explorer / advisor) to configure.
----@param role 'builder'|'explorer'|'advisor'|nil
+---@param role 'builder'|'explorer'|'advisor'|'lead'|'strong'|'gate'|'critic'|nil
 function M.select_model(role)
   local c = M.controller()
   local roles = c:roles()
-  if not role and roles.preset ~= 'single' then
+  local function current_of(r)
+    return ({ builder = roles.builder_model, explorer = roles.explorer_model, advisor = roles.advisor_model, lead = roles.lead_model, strong = roles.strong_model, gate = roles.gate_model, critic = roles.critic_model })[r]
+  end
+  if not role and (roles.preset ~= 'single' or roles.final_check ~= 'off') then
     local choices = { 'builder' }
     if roles.lead_wanted then
       table.insert(choices, 1, 'lead')
@@ -2147,11 +2229,15 @@ function M.select_model(role)
     if roles.advisor then
       table.insert(choices, 'advisor')
     end
+    if roles.final_check == 'gate' then
+      vim.list_extend(choices, { 'strong', 'gate' })
+    elseif roles.final_check == 'critic' then
+      table.insert(choices, 'critic')
+    end
     vim.ui.select(choices, {
       prompt = 'Model for which role?',
       format_item = function(r)
-        local current = ({ builder = roles.builder_model, explorer = roles.explorer_model, advisor = roles.advisor_model, lead = roles.lead_model or '(not set)' })[r]
-        return string.format('%-9s %s', (r == 'builder' and roles.lead_wanted) and 'worker' or r, current)
+        return string.format('%-9s %s', (r == 'builder' and roles.lead_wanted) and 'worker' or r, current_of(r) or '(not set)')
       end,
     }, function(r)
       if r then
@@ -2173,7 +2259,7 @@ function M.select_model(role)
       local usable = vim.tbl_filter(function(m)
         return (m.tools or m.id == 'auto') and m.picker ~= false
       end, models)
-      local current = ({ builder = roles.builder_model, explorer = roles.explorer_model, advisor = roles.advisor_model, lead = roles.lead_model })[role]
+      local current = current_of(role)
       local fmt = c.backend.format_multiplier or require('coagent.backend.copilotchat').format_multiplier
       local label_opts = { multiplier = config.options.ui.show_multiplier and fmt or nil, rates = config.options.usage.rates }
       vim.ui.select(usable, {
@@ -2242,7 +2328,8 @@ function M.set_roles(preset)
       table.insert(parts, 'advisor ' .. r.advisor_model)
     end
     c:notice('info', 'Model roles: ' .. p .. ' (' .. table.concat(parts, ', ') .. '). Change a role\'s model with :CoagentModel.'
-      .. (r.advisor and ('\n' .. M._supervision_text(r) .. ' /supervision changes the level.') or ''))
+      .. (r.advisor and ('\n' .. M._supervision_text(r) .. ' /supervision changes the level.') or '')
+      .. (r.final_check ~= 'off' and ('\n' .. M._finalcheck_text(c)) or ''))
   end
   if preset and preset ~= '' then
     return apply(preset)
@@ -2913,7 +3000,7 @@ function M.usage(arg)
     if stats and next(stats) then
       table.insert(lines, '')
       table.insert(lines, '  Requests by role (this session)')
-      for _, role in ipairs({ 'builder', 'explorer', 'advisor', 'judge', 'ledger' }) do
+      for _, role in ipairs({ 'builder', 'explorer', 'advisor', 'gate', 'critic', 'judge', 'ledger' }) do
         local s = stats[role]
         if s then
           local models = {}

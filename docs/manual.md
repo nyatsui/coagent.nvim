@@ -114,6 +114,7 @@
 | `/go <task>` | 計画フェーズなしで実行（`plan.default = true` のとき） |
 | `/strong <task>` | 強いモデル（`roles.strong_model`、なければアドバイザーのモデル）を作業担当にして 1 タスクだけ実行（`:CoagentStrong` と同じ。[6. モードとモデル](#6-モードとモデル)） |
 | `/supervision [light\|standard\|strict\|default]` | アドバイザーの監督レベルをこのセッションだけ変更（`:CoagentSupervision` と同じ） |
+| `/finalcheck [off\|gate\|critic\|default] [task]` | タスクを終える前の確認を変更。タスクを付けるとそのタスクだけ（`:CoagentFinalCheck` と同じ。[6. モードとモデル](#6-モードとモデル)） |
 | `/skills [enable\|disable <name>\|reload]` | Agent Skills の一覧 / このセッションだけ有効・無効（[Agent Skills](#agent-skills)） |
 | `/skill <name> [task]` | スキルを最初から読み込んでタスクを実行 |
 | `/exp [show\|diff\|note\|compare\|run ...]` | 実験ログ（[実験ログ](#実験ログexp)。ローカルのみ、リクエストなし） |
@@ -592,6 +593,12 @@ Neovim にフォーカスが無いとき、承認待ち・完了・失敗・上�
     REPEATED_FAILURE のあと残りを強いモデルで仕上げる。モデルの切り替えでプロンプトキャッシュが 1 回効かない
   - アドバイザーのトークンも予算に数え、予算が `budget_warn_at` に達したら PROGRESS だけ省く
   - 詳細とトークンの目安は README_ja.md の「監督」、機械学習向けの設定は [ml-workflow.md](ml-workflow.md)
+
+- **最後の確認** — `roles.preset` はタスクの間の体制、`roles.final_check`（`/finalcheck`）はタスクを終える前の確認を決める。どの preset とも組み合わせられる
+  - `gate`: 品質ゲートが下書きを 1 リクエストで確認。`ESCALATE` なら強いモデルが引き継いで修正（`lead` と `/strong` は自分で修正）。同じチェックが 2 回続けて失敗しても引き継ぐ
+  - `critic`: 批評役が読み取り専用でレビューし、書いたモデルが 1 回だけ修正
+  - どちらも 1 タスク最大 1 回。短い回答と計画は対象外で、アドバイザーの最終レビューの代わりに動く（途中の節目はそのまま）。権限は変わらない
+  - 詳細とトークンの目安は README_ja.md の「最後の確認」
 
 ## 7. セッション
 

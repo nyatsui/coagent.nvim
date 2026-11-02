@@ -316,6 +316,7 @@ vim.keymap.set('x', '<leader>ai', ':CoagentInline<CR>', { desc = 'Coagent inline
 | `/go <task>` | 計画フェーズなしでタスクを実行（`plan.default = true` のとき） |
 | `/strong <task>` | 強いモデル（`roles.strong_model`、なければアドバイザーのモデル）を作業担当にして 1 タスクだけ実行。次のタスクは元のモデルに戻る（下記「監督」） |
 | `/supervision [light\|standard\|strict\|default]` | このセッションでアドバイザーが作業担当をどこまで監督するか（下記「監督」） |
+| `/finalcheck [off\|gate\|critic\|default] [task]` | タスクを終える前の確認: 品質ゲートと引き継ぎ（gate）、独立した批評役（critic）（下記「最後の確認」） |
 | `/skills [enable\|disable <name>\|reload]` | Agent Skills の一覧（パス、user / repo）。このセッションだけ有効 / 無効を切替（下記「Agent Skills」） |
 | `/skill <name> [task]` | スキルを最初から読み込んだ状態でタスクを実行 |
 | `/exp [show\|diff\|note\|compare\|run\|watch\|unwatch ...]` | 実験ログ: 表・詳細・差分・メモ・Markdown の比較・実行の記録（ローカルのみ、リクエストなし）。実行中の `/exp run` をエージェントの見守りに渡す（下記「実験ログ」） |
@@ -1204,6 +1205,7 @@ terminal = {
 | `:CoagentModel` | モデル選択（tool calling 対応モデルのみ。役割分担中は役割ごと）。`usage.rates` を設定したモデルには単価（`$3/$15 per 1M`）を表示 |
 | `:CoagentRoles [preset]` | モデルの役割分担: `single` / `advisor` / `explorers` / `full` |
 | `:CoagentSupervision [level]` | このセッションの監督レベル: `light` / `standard` / `strict` / `default`（`/supervision` と同じ） |
+| `:CoagentFinalCheck [name] [task]` | タスクを終える前の確認: `off` / `gate` / `critic` / `default`（`/finalcheck` と同じ。範囲指定で選択範囲を添付） |
 | `:CoagentStrong <task>` | 強いモデルを作業担当にして 1 タスク実行（`/strong` と同じ。範囲指定で選択範囲を添付） |
 | `:CoagentEffort [level] [role]` | 推論の強さ: `minimal` / `low` / `medium` / `high` / `off` / `default`（`/effort` と同じ） |
 | `:CoagentNew` / `:CoagentSessions` | 新規セッション / 保存済みセッション一覧 |
@@ -1670,6 +1672,41 @@ opts = {
   高くつくので、そうした作業は主導役が自分で行います。`:CoagentUsage` では主導役（builder の行、強いモデル）と `worker` を分けて表示
 - 主導役は `roles.advisor_effort`、作業役は `roles.builder_effort` を使います。作業役は依頼ごとに `roles.worker.max_steps`（30）回まで
   リクエストできます。選択中のモデルと違う主導役のモデルが無いときは、選択中のモデルだけで実行します（お知らせを表示）
+
+### 最後の確認（final_check）
+
+`roles.preset` はタスクの間の体制を、`roles.final_check` はタスクを終える前の確認方法を決めます。どの preset とも組み合わせられます。
+`/finalcheck <名前>` でこのセッションの設定を変え、`/finalcheck <名前> <task>` でそのタスクだけに適用します（`/go` と同じく計画フェーズなし）。
+
+| final_check | 動き | タスクの最後にかかるトークン |
+|---|---|---|
+| `off`（既定） | 独自の確認はしない（アドバイザーがいれば、その最終レビュー） | なし |
+| `gate` | 品質ゲートが下書きを読み、`LGTM` なら終了、`ESCALATE` なら強いモデルが引き継いで修正する。同じチェックが 2 回続けて失敗したときは、ゲートに聞かずに引き継ぐ。Copilot Fusion の Cascade に相当 | ゲートは 1 リクエスト（入力 3〜8k トークン程度）。引き継ぐと、会話全体が強いモデルの料金で新規入力になる |
+| `critic` | 独自の履歴と読み取り専用ツールを持つ批評役が下書きをレビューし、書いたモデルが 1 回だけ修正する。2 回目のレビューはない。Fusion の Critique に相当 | 批評役は 1〜5 リクエスト（各入力 3〜8k トークン程度）と、修正の分 |
+
+```lua
+roles = {
+  final_check = 'gate',            -- または 'critic'
+  strong_model = '強いモデルのID',  -- gate: 引き継ぐモデル
+  gate_model = nil,                -- nil = strong_model、なければ主導役のモデル
+  critic_model = nil,              -- nil = strong_model、なければこのセッションの別のモデル
+}
+```
+
+| preset | `gate` | `critic` |
+|---|---|---|
+| `single`、`explorers` | 強いモデルが引き継ぐ | 別のモデルがレビューする |
+| `advisor`、`full` | 途中はアドバイザーが監督し、最後は最終レビューの代わりにゲートが判定する | 途中はアドバイザーが監督し、最後は最終レビューの代わりに批評役がレビューする |
+| `lead` | 主導役が自分で修正する | 既定では選択中のモデルがレビューする（`roles.critic_model` で変更可） |
+
+- `/strong` のタスクは `lead` の行と同じ動きになります。
+- 1 タスクにつき最大 1 回です。ファイル変更のない短い回答（`answer_min_chars` の 400 文字未満）と計画は確認しません。ゲートと批評役は `BLOCK` を使えないので、最後の段階でもアドバイザーに止めさせたいときは `off` にしてください。
+- 動かないのはモデルが足りないときだけです。`gate` には強いモデルか主導役、`critic` には 2 つ目のモデルが必要です。
+- 同じ系統のモデルは見落としも似やすいため、批評役と書いたモデルが同じ系統だと 1 回だけお知らせを出します。
+- 権限は変わりません。強いモデルも同じルールで動き、批評役のツール呼び出しで承認を求めることはありません。保護ファイルの内容は渡しません。モデルは設定かセッションでのみ選べます（`/model strong`・`/model gate`・`/model critic`）。
+- ゲートや批評役が失敗したときはタイムラインに表示し、下書きはレビューなしのまま残ります。何が起きたかはタスクのまとめ（`Final check: ...`）に出ます。`gate` と `critic` のリクエストは `:CoagentUsage` に表示され、すべての予算に数えます。
+
+詳細は `:help coagent-finalcheck` を参照してください。
 
 ### 監督（アドバイザーが作業担当をどこまで見るか）
 

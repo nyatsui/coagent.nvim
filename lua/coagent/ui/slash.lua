@@ -15,7 +15,7 @@ local function notice(level, text)
   app().controller():notice(level, text)
 end
 
-local ROLES = { 'builder', 'explorer', 'advisor', 'lead' }
+local ROLES = { 'builder', 'explorer', 'advisor', 'lead', 'strong', 'gate', 'critic' }
 
 ---@class Coagent.SlashCommand
 ---@field name string
@@ -82,6 +82,15 @@ M.COMMANDS = {
     complete = { 'light', 'standard', 'strict', 'default' },
     run = function(arg)
       return app().supervision(arg)
+    end,
+  },
+  {
+    name = 'finalcheck',
+    args = '[off|gate|critic|default] [task]',
+    desc = 'How a result is checked before a task finishes: a quality gate with takeover, or an independent critic',
+    complete = { 'off', 'gate', 'critic', 'default' },
+    run = function(arg)
+      return app().finalcheck(arg)
     end,
   },
   {
@@ -168,11 +177,11 @@ M.COMMANDS = {
   {
     name = 'model',
     args = '[role]',
-    desc = 'Pick the model (of a role: builder | explorer | advisor | lead)',
+    desc = 'Pick the model (of a role: builder | explorer | advisor | lead | strong | gate | critic)',
     complete = ROLES,
     run = function(arg)
       if arg ~= '' and not vim.tbl_contains(ROLES, arg) then
-        notice('error', '/model: unknown role "' .. arg .. '" (builder | explorer | advisor | lead)')
+        notice('error', '/model: unknown role "' .. arg .. '" (' .. table.concat(ROLES, ' | ') .. ')')
         return false
       end
       app().select_model(arg ~= '' and arg or nil)

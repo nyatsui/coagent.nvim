@@ -51,6 +51,16 @@ M.SUPERVISION_DESCRIPTION = {
   strict = 'standard + progress checks, every edit, plan written by the advisor model',
 }
 
+--- How the result is checked when the agent is about to finish
+--- (final_check.lua). Any preset works with any of them.
+M.FINAL_CHECKS = { 'off', 'gate', 'critic' }
+
+M.FINAL_CHECK_DESCRIPTION = {
+  off = 'no check of its own (with an advisor, its final review)',
+  gate = 'a quality gate checks the draft; if it fails, the strong model takes over',
+  critic = 'an independent critic (another model) reviews the draft; the author revises it once',
+}
+
 --- Default critical files for CRITICAL_EDIT (ML-sensitive code and configs).
 M.CRITICAL_GLOBS = { '**/*loss*', '**/*metric*', '**/eval*', '**/*dataset*', '**/*split*', '**/*config*', '**/*config*/**' }
 
@@ -58,6 +68,12 @@ M.CRITICAL_GLOBS = { '**/*loss*', '**/*metric*', '**/eval*', '**/*dataset*', '**
 ---@return boolean
 function M.valid_supervision(v)
   return v == nil or vim.tbl_contains(M.SUPERVISION, v)
+end
+
+---@param v any
+---@return boolean
+function M.valid_final_check(v)
+  return v == nil or vim.tbl_contains(M.FINAL_CHECKS, v)
 end
 
 --- Does `rel` (workspace-relative, '/' separated) match the glob? `**/`
@@ -123,6 +139,11 @@ end
 ---@field checkpoints table<string, boolean> effective checkpoints (empty without an advisor)
 ---@field strong_model string? model for /strong and escalation (nil: none configured)
 ---@field escalate boolean finish a task on the strong model after REPEATED_FAILURE
+---@field final_check 'off'|'gate'|'critic'
+---@field gate_model string? the model of the quality gate
+---@field critic_model string? the critic the user chose (final_check.critic_for picks one)
+---@field gate_opts table
+---@field critic_opts table
 
 --- Reasoning effort levels a user can choose (`reasoning_effort`, `/effort`).
 M.EFFORTS = { 'minimal', 'low', 'medium', 'high' }
@@ -234,6 +255,11 @@ function M.resolve(config, session, builder_model)
     checkpoints = checkpoints,
     strong_model = strong,
     escalate = r.escalate_on_repeated_failure == true,
+    final_check = vim.tbl_contains(M.FINAL_CHECKS, r.final_check) and r.final_check or 'off',
+    gate_model = r.gate_model or strong or lead_model,
+    critic_model = r.critic_model,
+    gate_opts = vim.tbl_extend('force', { max_brief_bytes = 24000, answer_min_chars = 400 }, r.gate or {}),
+    critic_opts = vim.tbl_extend('force', { max_brief_bytes = 24000, answer_min_chars = 400, tools = 'read', max_tool_steps = 4, max_tool_result_bytes = 4000 }, r.critic or {}),
   }
 end
 

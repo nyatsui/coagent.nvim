@@ -39,11 +39,11 @@ M.TOOLS = {
 M.LABEL = {
   PLAN = 'plan review', REPEATED_FAILURE = 'repeated failure', BEFORE_DONE = 'final review', ANSWER = 'answer review',
   BEFORE_RUN = 'before run', RESULTS = 'results review', FAILURE = 'check failed', CRITICAL_EDIT = 'critical edit',
-  EVERY_EDIT = 'edit review', PROGRESS = 'progress check',
+  EVERY_EDIT = 'edit review', PROGRESS = 'progress check', GATE = 'quality gate', CRITIC = 'independent review',
 }
 
 -- checkpoints reviewed at most once per task
-M.ONCE = { PLAN = true, REPEATED_FAILURE = true, BEFORE_DONE = true, ANSWER = true }
+M.ONCE = { PLAN = true, REPEATED_FAILURE = true, BEFORE_DONE = true, ANSWER = true, GATE = true, CRITIC = true }
 
 M.STEP_LIMIT = 'Tool call limit for this checkpoint reached. Answer now (LGTM, numbered points or BLOCK: <reason>) without calling tools.'
 
@@ -51,8 +51,12 @@ M.STEP_LIMIT = 'Tool call limit for this checkpoint reached. Answer now (LGTM, n
 local Advisor = {}
 Advisor.__index = Advisor
 
-function M.new(ctrl)
-  return setmetatable({ ctrl = ctrl, history = {}, used = {} }, Advisor)
+--- `spec` makes it another reviewer on the same mechanics (final_check.lua: the
+--- quality gate, the critic), with its own model, prompt and limits.
+---@param ctrl Coagent.Controller
+---@param spec {who:string, role:string, model:string, prompt:string, opts:table, step_limit:string?}?
+function M.new(ctrl, spec)
+  return setmetatable({ ctrl = ctrl, history = {}, used = {}, spec = spec }, Advisor)
 end
 
 --- Is the advice an approval?
@@ -155,11 +159,13 @@ function Advisor:review(gen, kind, brief, opts)
   end
   local ctrl = self.ctrl
   local roles = ctrl:roles()
-  local aopts = roles.advisor_opts
-  local model = roles.advisor_model
+  local spec = self.spec or {}
+  local aopts = spec.opts or roles.advisor_opts
+  local model = spec.model or roles.advisor_model
+  local role = spec.role or 'advisor'
   local mark = #self.history
   table.insert(self.history, { role = 'user', content = '[' .. kind .. ']\n' .. util.clip(brief, aopts.max_brief_bytes) })
-  local item = { type = 'advisor', kind = kind, model = model, text = '', streaming = true, title = opts.title }
+  local item = { type = 'advisor', kind = kind, who = spec.who, model = model, text = '', streaming = true, title = opts.title }
   if opts.item ~= false then
     ctrl:_add(item)
   end
@@ -170,7 +176,7 @@ function Advisor:review(gen, kind, brief, opts)
   local res, err
   local function fail(why)
     item.streaming = false
-    item.text = 'Advisor unavailable: ' .. tostring(why or 'no answer') .. '\nThe task continues without this review.'
+    item.text = (spec.who or 'Advisor') .. ' unavailable: ' .. tostring(why or 'no answer') .. '\nThe task continues without this review.'
     item.failed = true
     ctrl:_update(item)
     -- keep the advisor history consistent: drop the unanswered checkpoint
@@ -182,18 +188,18 @@ function Advisor:review(gen, kind, brief, opts)
   while true do
     res, err = ctrl.backend:ask({
       messages = self.history,
-      system_prompt = M.PROMPT,
+      system_prompt = spec.prompt or M.PROMPT,
       tools = tools,
       model = model,
       temperature = ctrl.config.temperature,
       effort = roles.advisor_effort,
-      role = 'advisor',
+      role = role,
     })
     async.main()
     if ctrl.gen ~= gen then
       return nil
     end
-    ctrl:_record_role('advisor', model, res)
+    ctrl:_record_role(role, model, res)
     if not res or res.cancelled then
       return fail(err)
     end
@@ -221,10 +227,10 @@ function Advisor:review(gen, kind, brief, opts)
       if vim.trim(res.content or '') ~= '' then
         break
       end
-      return fail('it kept calling tools past roles.advisor.max_tool_steps')
+      return fail('it kept calling tools past its max_tool_steps')
     end
     if calls >= max_steps then
-      table.insert(self.history, { role = 'user', content = M.STEP_LIMIT })
+      table.insert(self.history, { role = 'user', content = spec.step_limit or M.STEP_LIMIT })
     end
   end
   item.streaming = false

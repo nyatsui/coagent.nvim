@@ -17,6 +17,7 @@ local Background = require('coagent.tools.background')
 local Roles = require('coagent.agent.roles')
 local subagent = require('coagent.agent.subagent')
 local Advisor = require('coagent.agent.advisor')
+local FinalCheck = require('coagent.agent.final_check')
 local Judge = require('coagent.agent.judge')
 local Usage = require('coagent.agent.usage')
 local Monthly = require('coagent.agent.monthly')
@@ -250,6 +251,24 @@ function Controller:set_supervision(level)
   return true
 end
 
+--- Final check for this session (`/finalcheck`): 'off' | 'gate' | 'critic',
+--- or nil (back to the config).
+---@return boolean ok, string? err
+function Controller:set_final_check(name)
+  if name ~= nil and not Roles.valid_final_check(name) then
+    return false, 'unknown final check: ' .. tostring(name) .. ' (' .. table.concat(Roles.FINAL_CHECKS, ' | ') .. ' | default)'
+  end
+  local why = name and FinalCheck.problem(self:roles(), name)
+  if why then
+    return false, why
+  end
+  self.session.roles = self.session.roles or {}
+  self.session.roles.final_check = name
+  self.events:emit('roles', self:roles())
+  self:save()
+  return true
+end
+
 --- Per-role request/token accounting (shown in :CoagentUsage), plus the
 --- running task's and the session's totals.
 function Controller:_record_role(role, model, res)
@@ -386,7 +405,7 @@ function Controller:submit(text, opts)
     end
   end
   if self:busy() then
-    if opts.plan or opts.plan_approved or opts.skill or opts.strong then
+    if opts.plan or opts.plan_approved or opts.skill or opts.strong or opts.final_check then
       return false, 'the agent is busy; wait for it or stop it first (<C-c>)'
     end
     -- Follow-up while the agent works: delivered at the next step boundary
@@ -398,6 +417,15 @@ function Controller:submit(text, opts)
     strong = self:roles().strong_model
     if not strong then
       return false, 'no strong model: set roles.strong_model or roles.advisor_model (a model other than the builder\'s)'
+    end
+  end
+  if opts.final_check then
+    if not Roles.valid_final_check(opts.final_check) then
+      return false, 'unknown final check: ' .. tostring(opts.final_check)
+    end
+    local why = FinalCheck.problem(self:roles(), opts.final_check)
+    if why then
+      return false, why
     end
   end
   local phase = self:plan_phase()
@@ -516,6 +544,7 @@ function Controller:submit(text, opts)
     skill_names = skill and skill.tools and { skill.name } or nil,
     forced_tools = skill and skill.tools and vim.deepcopy(skill.tools) or nil,
     strong = strong,
+    final_check = opts.final_check,
   })
 end
 
@@ -1764,6 +1793,14 @@ function Controller:_loop(gen)
         end
       end
       if not note then
+        -- the quality gate or the independent critic
+        local stopped
+        note, stopped = FinalCheck.final(self, gen, res.content)
+        if self.gen ~= gen or stopped then
+          return
+        end
+      end
+      if not note then
         return self:_finish(gen, S.COMPLETED, { reason = 'model_done' })
       end
       -- the advisor found issues: hand them to the builder and keep going
@@ -2216,6 +2253,9 @@ end
 ---@return string?, boolean?
 function Controller:_review_final(gen, answer)
   local t = self.task
+  if FinalCheck.active(self) then
+    return nil -- roles.final_check takes the place of this review
+  end
   local verdict, text, reason, kind
   if t.edit_seq then
     kind = 'BEFORE_DONE'
@@ -2476,12 +2516,21 @@ end
 function Controller:_escalate()
   local t = self.task
   local roles = self:roles()
-  if not roles.escalate or not roles.strong_model or t.strong or t.model_override then
+  if not (roles.escalate or FinalCheck.escalates(self)) or not roles.strong_model or t.strong or t.model_override then
     return
   end
-  t.strong, t.escalated = roles.strong_model, true
-  self:notice('warn', string.format('Escalated: the same check failed twice, so %s finishes this task (roles.escalate_on_repeated_failure); the next task is back on %s. The switch costs a one-time prompt-cache miss.', roles.strong_model, self:model()))
-  self.events:emit('model', roles.strong_model)
+  self:_take_over(roles.strong_model, true, 'the same check failed twice')
+end
+
+--- The strong model finishes this task; the next task is back on the selected model.
+---@param model string
+---@param marker true|'gate' what the task summary reports
+---@param why string
+function Controller:_take_over(model, marker, why)
+  local t = self.task
+  t.strong, t.escalated = model, marker
+  self:notice('warn', string.format('Escalated: %s, so %s finishes this task; the next task is back on %s. The switch costs a one-time prompt-cache miss: %s reads this conversation again as fresh input.', why, model, self:model(), model))
+  self.events:emit('model', model)
 end
 
 --- Context budget in tokens.
@@ -3390,6 +3439,7 @@ function Controller:_finish_now(state, info)
     end, t.sup.list) or nil,
     strong = t.strong, -- the task ran (or finished, after escalation) on this model
     escalated = t.escalated,
+    final_check = t.final_check_result,
   }
   local u = t.usage
   if u and u.requests > 0 then

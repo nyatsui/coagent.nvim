@@ -327,6 +327,7 @@ input history (`<C-p>`/`<C-n>`) like normal prompts.
 | `/go <task>` | Run a task without the plan phase (with `plan.default = true`) |
 | `/strong <task>` | Run one task with the strong model (`roles.strong_model`, else the advisor model) as the builder; the next task is back on the selected model (see "Supervision") |
 | `/supervision [light\|standard\|strict\|default]` | How closely the advisor supervises the builder in this session (see "Supervision") |
+| `/finalcheck [off\|gate\|critic\|default] [task]` | How a result is checked before a task finishes: a quality gate with takeover, or an independent critic (see "Final check") |
 | `/skills [enable\|disable <name>\|reload]` | List Agent Skills (source path, user / repo); enable or disable one for this session (see "Agent Skills") |
 | `/skill <name> [task]` | Run a task with a skill loaded up front |
 | `/exp [show\|diff\|note\|compare\|run\|watch\|unwatch ...]` | Experiment log: table, details, diff, notes, Markdown comparison, record a run (local, no request); hand a running `/exp run` to the agent for monitoring (see "Experiment log") |
@@ -1247,6 +1248,7 @@ terminal = {
 | `:CoagentModel` | Pick a model (tool-calling capable only; per role when roles are on). Models with `usage.rates` show their price (`$3/$15 per 1M`) |
 | `:CoagentRoles [preset]` | Model roles: `single` / `advisor` / `explorers` / `full` |
 | `:CoagentSupervision [level]` | Advisor supervision for this session: `light` / `standard` / `strict` / `default` (same as `/supervision`) |
+| `:CoagentFinalCheck [name] [task]` | How a result is checked before a task finishes: `off` / `gate` / `critic` / `default` (same as `/finalcheck`; a range attaches the selection) |
 | `:CoagentStrong <task>` | Run one task with the strong model as the builder (same as `/strong`; a range attaches the selection) |
 | `:CoagentEffort [level] [role]` | Reasoning effort: `minimal` / `low` / `medium` / `high` / `off` / `default` (same as `/effort`) |
 | `:CoagentNew` / `:CoagentSessions` | New session / saved sessions |
@@ -1738,6 +1740,45 @@ model does the legwork.
 - The lead uses `roles.advisor_effort`, the worker `roles.builder_effort`; per assignment the worker has
   `roles.worker.max_steps` (30) requests. Without a lead model different from the selected one, tasks run on the
   selected model alone (with a notice)
+
+### Final check (how a result is checked before a task finishes)
+
+`roles.preset` decides who works during a task. `roles.final_check` decides how the result is checked when the agent is about to
+finish. Any preset works with any final check. `/finalcheck <name>` changes it for the session, `/finalcheck <name> <task>` for one
+task (without a plan phase, like `/go`).
+
+| Final check | What it does | Tokens at the end of a task |
+|---|---|---|
+| `off` (default) | No check of its own (with an advisor: its final review) | None |
+| `gate` | A quality gate reads the draft. On `LGTM` the task finishes. On `ESCALATE` the strong model takes over and repairs it. The same check failing twice also hands over, without asking the gate. Copilot Fusion calls this pattern Cascade | 1 gate request of about 3-8k input tokens. A takeover adds the whole conversation as fresh input at the strong model's rate |
+| `critic` | An independent critic with its own history and read-only tools reviews the draft. The author revises once, and there is no second review. Fusion's Critique | 1-5 critic requests of about 3-8k input tokens, plus the revision |
+
+```lua
+roles = {
+  final_check = 'gate',            -- or 'critic'
+  strong_model = 'a strong model', -- gate: who takes over
+  gate_model = nil,                -- nil = strong_model, else the lead's
+  critic_model = nil,              -- nil = strong_model, else another model of this session
+}
+```
+
+| Preset | `gate` | `critic` |
+|---|---|---|
+| `single`, `explorers` | The strong model takes over | Another model reviews |
+| `advisor`, `full` | The advisor during the task, then the gate instead of its final review | The advisor during the task, then the critic instead of its final review |
+| `lead` | The lead repairs the draft itself | The selected model reviews by default (`roles.critic_model` picks another) |
+
+- A task on `/strong` behaves like the `lead` row.
+- The final check runs at most once per task. Short answers without file changes (below `answer_min_chars`, 400) and plans are not
+  checked. The gate and the critic cannot `BLOCK`: keep `off` when the advisor may have to stop a step at the very end.
+- Only a missing model stops one from running: `gate` needs a strong model or a lead, `critic` a second model.
+- Same-family models tend to share blind spots, so a one-time note appears when the critic and the author are of the same family.
+- Neither changes permissions: the strong model works under the same rules, and the critic's tool calls never ask. Protected files are
+  left out of what they read. Models come from your config or session only (`/model strong`, `/model gate`, `/model critic`).
+- When the gate or the critic fails, the timeline says so and the draft stands unreviewed. The task summary shows what happened
+  (`Final check: ...`), and `:CoagentUsage` shows `gate` and `critic` requests, which count toward every budget.
+
+Details: `:help coagent-finalcheck`.
 
 ### Supervision (how closely the advisor watches the builder)
 

@@ -24,6 +24,7 @@ CONTENTS                                              *coagent-contents*
   5. Modes ................................... |coagent-modes|
      Judge mode .............................. |coagent-judge|
      Supervision ............................. |coagent-supervision|
+     Final check ............................. |coagent-finalcheck|
   6. Lua API ................................. |coagent-api|
 
 ==============================================================================
@@ -115,6 +116,11 @@ Check the setup with |:checkhealth| coagent.
 :CoagentModel            Pick a tool-calling capable model (per role when roles are on).
                          Models with `usage.rates` show their price per 1M tokens.
 :CoagentRoles [preset]   Model roles: single (default) | advisor | explorers | full
+:CoagentFinalCheck [name] [task]
+                              How a result is checked before a task finishes:
+                              off, gate, critic or default; with a task, for
+                              that task only. See |coagent-finalcheck|.
+
 :CoagentSupervision [level]
                          How closely the advisor supervises the builder in
                               this session: light | standard | strict |
@@ -316,6 +322,9 @@ Commands go into the input history like prompts.
   /go <task>          Run a task without the plan phase (plan.default).
   /strong <task>      Run one task with the strong model as the builder
                       (|coagent-supervision|).
+  /finalcheck [off|gate|critic|default] [task]
+                      A quality gate with takeover, or an independent critic,
+                      before a task finishes (|coagent-finalcheck|).
   /supervision [light|standard|strict|default]
                       Supervision level for this session.
   /skills [enable|disable <name>|reload]
@@ -1407,6 +1416,71 @@ and an allowed command runs with your full user permissions. The judge can
 be wrong; destructive, remote and outside actions stay behind rules it
 cannot override. Use a version-controlled workspace and a branch.
 
+                                                    *coagent-finalcheck*
+`roles.preset` decides who works during a task. `roles.final_check` decides how
+the result is checked when the agent is about to finish. Any preset works with
+any final check. `/finalcheck <name>` changes it for the session,
+`/finalcheck <name> <task>` for one task (without a plan phase, like /go).
+
+  off     No check of its own (default). With an advisor: its final review.
+  gate    A quality gate (`roles.gate_model`, else the strong model, else the
+          lead's) reads the task, the verification and the diff, or the answer
+          and its evidence, in one request without tools. LGTM: the task
+          finishes. ESCALATE: the strong model (`roles.strong_model`) takes
+          over in the same conversation and repairs the draft; the next task is
+          back on the selected model. The same check failing twice also hands
+          over, without asking the gate. (GitHub Copilot Fusion calls this
+          pattern Cascade.)
+  critic  A critic with its own history and read-only tools reviews the draft:
+          LGTM or numbered points. The author revises once. There is no second
+          review. (Fusion's Critique.) The critic is the first of
+          `roles.critic_model`, the strong model, the lead's and the selected
+          model that did not write the draft. Same-family models tend to share
+          blind spots (a one-time note says so).
+
+Combinations:
+
+  preset      gate                              critic
+  single      strong model takes over           another model reviews
+  explorers   same as single                    same as single
+  advisor     advisor during the task, then     advisor during the task, then
+  full        gate instead of its final review  critic instead of its final review
+  lead        the lead repairs it itself        the selected model reviews by
+                                                default
+
+A task on /strong behaves like the lead preset. The final check runs at most
+once per task. An answer without file changes below `answer_min_chars` (400) is
+not checked, and plans are not (they go to you). The gate and the critic cannot
+BLOCK: for an advisor that may stop a step at the very end, keep final_check off.
+Only a missing model stops one from running: gate needs a strong model or a
+lead, critic a second model. /finalcheck then refuses it; set in the config, it
+warns once and tasks finish without it. When the gate or the critic fails, the
+timeline says so and the draft stands unreviewed.
+
+Neither changes permissions: the strong model works under the same rules, and
+the critic's tool calls never ask. Protected files (auto.protected_globs) are
+left out of what the gate and the critic read. Models come from your config or
+session only (`/model strong`, `/model gate`, `/model critic`), never from
+repository files.
+
+Tokens: the gate and the critic count toward every budget and appear as `gate`
+and `critic` in :CoagentUsage. A gate is one request of about 3-8k input tokens
+(`roles.gate.max_brief_bytes`). A critic is 1-5 requests of about that size
+(`roles.critic.max_tool_steps`), and a revision is one or more requests of the
+author. A takeover is the expensive case: the strong model reads the whole
+conversation as fresh input (a one-time prompt-cache miss), then at its own rate.
+>lua
+  roles = {
+    final_check = 'off',                 -- 'gate' | 'critic'
+    strong_model = nil,                  -- gate: who takes over
+    gate_model = nil,                    -- nil = strong_model, else the lead's
+    critic_model = nil,                  -- nil = see above
+    gate = { max_brief_bytes = 24000, answer_min_chars = 400 },
+    critic = { max_brief_bytes = 24000, answer_min_chars = 400,
+               tools = 'read', max_tool_steps = 4,
+               max_tool_result_bytes = 4000 },
+  }
+<
                                                    *coagent-supervision*
 Supervision. With an advisor (roles.preset 'advisor' or 'full'),
 `roles.supervision` decides where the advisor (a strong model) reviews the
