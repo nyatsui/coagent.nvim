@@ -14,7 +14,7 @@ describe('/skills extract', function()
     h.write(userdir .. '/gpu-train/SKILL.md', '---\nname: gpu-train\ndescription: old way to train\n---\n\n1. python train.py\n')
     backend = Mock.new(function(_, _, req)
       if req.system_prompt == X.PROMPT then
-        return { content = vim.json.encode(reply) }
+        return { content = type(reply) == 'string' and reply or vim.json.encode(reply) }
       end
       return { content = 'ok' }
     end)
@@ -113,5 +113,39 @@ describe('/skills extract', function()
         end
       end
     end))
+  end)
+
+  it('reads a long reply with the usual JSON slips; shows a reply it cannot read', function()
+    local c = setup()
+    c:_add({ type = 'user', text = '新しいデータで再実験して' })
+    -- prose with braces, a fence, a raw newline in the body, a regex backslash, a trailing comma
+    reply = 'Here are the skills for {data}:\n```json\n{"skills": [{"name": "rerun-new-data", "description": "新データで再実験", '
+      .. '"body": "# 再実験\n1. `grep -E \'\\d+\' data.csv`\n2. python train.py", "why": "twice",},]}\n```\n'
+    agent.skills('extract')
+    assert.is_true(h.wait(function()
+      return drafts_open()['rerun-new-data'] ~= nil
+    end))
+    local text = table.concat(vim.api.nvim_buf_get_lines(drafts_open()['rerun-new-data'], 0, -1, false), '\n')
+    assert.is_truthy(text:find("1. `grep -E '\\d+' data.csv`\n2. python train.py", 1, true))
+    vim.cmd('silent! tabonly! | silent! only!')
+    -- cut off: the error says so and the reply opens in a scratch tab
+    reply = '{"skills": [{"name": "x", "description": "y", "body": "1. step one\n2. step'
+    agent.skills('extract')
+    assert.is_true(h.wait(function()
+      for _, it in ipairs(c.session.items) do
+        if it.type == 'notice' and (it.text or ''):find('cut off before its JSON ended', 1, true) then
+          return true
+        end
+      end
+    end))
+    local found
+    for _, b in ipairs(vim.api.nvim_list_bufs()) do
+      if vim.api.nvim_buf_get_name(b):find('coagent://skills%-extract%-reply') then
+        found = b
+      end
+    end
+    assert.is_truthy(found)
+    assert.are.equal('nofile', vim.bo[found].buftype)
+    assert.is_truthy(table.concat(vim.api.nvim_buf_get_lines(found, 0, -1, false), '\n'):find('2. step', 1, true))
   end)
 end)

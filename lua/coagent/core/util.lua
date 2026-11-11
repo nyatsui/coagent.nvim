@@ -198,6 +198,138 @@ function M.json_decode(s)
   return res
 end
 
+--- The JSON object starting at text[s] ('{'), found by matching braces
+--- outside strings. nil when it never closes (the reply was cut off).
+---@param text string
+---@param s integer
+---@return string?
+local function balanced_object(text, s)
+  local depth, in_str, esc = 0, false, false
+  for i = s, #text do
+    local c = text:byte(i)
+    if in_str then
+      if esc then
+        esc = false
+      elseif c == 92 then -- \
+        esc = true
+      elseif c == 34 then -- "
+        in_str = false
+      end
+    elseif c == 34 then
+      in_str = true
+    elseif c == 123 then -- {
+      depth = depth + 1
+    elseif c == 125 then -- }
+      depth = depth - 1
+      if depth == 0 then
+        return text:sub(s, i)
+      end
+    end
+  end
+  return nil
+end
+
+--- Fix what models commonly get wrong in long JSON replies, outside of what
+--- would change the meaning: raw newlines / tabs / control characters inside
+--- strings, backslashes that are not valid JSON escapes (`\d`, `\(` in a
+--- regex or a Windows path), and trailing commas before } or ].
+---@param s string
+---@return string
+local function repair_json(s)
+  local out, in_str, i, n = {}, false, 1, #s
+  while i <= n do
+    local c = s:sub(i, i)
+    if in_str then
+      if c == '\\' then
+        local nx = s:sub(i + 1, i + 1)
+        if nx:match('^["\\/bfnrt]$') or (nx == 'u' and s:sub(i + 2, i + 5):match('^%x%x%x%x$')) then
+          table.insert(out, c .. nx)
+          i = i + 1
+        else
+          table.insert(out, '\\\\')
+        end
+      elseif c == '"' then
+        in_str = false
+        table.insert(out, c)
+      elseif c == '\n' then
+        table.insert(out, '\\n')
+      elseif c == '\r' then
+        table.insert(out, '\\r')
+      elseif c == '\t' then
+        table.insert(out, '\\t')
+      elseif c:byte() < 32 then
+        table.insert(out, string.format('\\u%04x', c:byte()))
+      else
+        table.insert(out, c)
+      end
+    elseif c == '"' then
+      in_str = true
+      table.insert(out, c)
+    elseif c == ',' and s:find('^%s*[}%]]', i + 1) then
+      -- trailing comma: drop it
+    else
+      table.insert(out, c)
+    end
+    i = i + 1
+  end
+  return table.concat(out)
+end
+M._repair_json = repair_json
+
+--- The JSON object in a model's reply: prose or a ``` fence around it is
+--- fine, and so are the usual slips in long replies (see repair_json). With
+--- `want` (a key or a list of keys), only an object that has one of them
+--- counts (so a small example object inside a string is never mistaken for
+--- the answer).
+--- Returns nil and why: 'cut off' when the object never closes, else
+--- 'invalid'.
+---@param text string
+---@param want string|string[]?
+---@return table?, string?
+function M.extract_json(text, want)
+  if type(text) ~= 'string' or text == '' then
+    return nil, 'empty'
+  end
+  local wants = type(want) == 'string' and { want } or want
+  local function wanted(obj)
+    if not wants then
+      return true
+    end
+    for _, k in ipairs(wants) do
+      if obj[k] ~= nil then
+        return true
+      end
+    end
+    return false
+  end
+  local why, pos, tries = 'invalid', 1, 0
+  while tries < 50 do
+    local s = text:find('{', pos, true)
+    if not s then
+      break
+    end
+    tries = tries + 1
+    local chunk = balanced_object(text, s)
+    if not chunk then
+      if tries == 1 then
+        why = 'cut off'
+      end
+      pos = s + 1
+    else
+      local ok, obj = pcall(vim.json.decode, chunk, { luanil = { object = true, array = true } })
+      if not (ok and type(obj) == 'table') then
+        ok, obj = pcall(vim.json.decode, repair_json(chunk), { luanil = { object = true, array = true } })
+      end
+      if ok and type(obj) == 'table' and not vim.islist(obj) and wanted(obj) then
+        return obj
+      end
+      -- the outermost object did not parse: an inner one is a part of it, not the answer
+      pos = (ok and type(obj) == 'table') and (s + #chunk) or (s + 1)
+    end
+  end
+  return nil, why
+end
+
 ---@param v any
 ---@return string
 function M.json_encode(v)

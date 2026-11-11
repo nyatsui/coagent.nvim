@@ -688,7 +688,10 @@ and plotting, preparing data — with the concrete commands, files and parameter
 the findings recorded. A procedure that already has a skill becomes an update of it, never a duplicate. **Nothing is
 saved:** the drafts (at most `skills.extract_max`, 5) open unsaved in a new tab at their target path — your skills
 folder, or `<repo>/.agents/skills/` with `repo` — and `:w` saves one (creating its folder; the skills reload), `:q!`
-drops it. `focus` narrows the search (`/skills extract evaluation and plots`).
+drops it. `focus` narrows the search (`/skills extract evaluation and plots`). A reply that is not valid JSON is still read when the
+slip is a usual one (raw newlines or stray backslashes in the Markdown, trailing commas, prose around it); one that
+cannot be read — or was cut off because it is too long, then narrow the focus — opens in a scratch tab so the tokens
+are not wasted.
 
 ### Experiment log (/exp)
 

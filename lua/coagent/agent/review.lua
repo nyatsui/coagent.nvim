@@ -434,7 +434,7 @@ function M.run(ctrl, spec, cb)
     async.main()
     pcall(ctrl._record_role, ctrl, 'review', model, res)
     local text = res and not res.cancelled and vim.trim(res.content or '') or ''
-    local obj = text ~= '' and require('coagent.agent.ledger').extract_json(text) or nil
+    local obj = text ~= '' and require('coagent.agent.ledger').extract_json(text, { 'findings', 'verdict' }) or nil
     if not obj then
       if text ~= '' then
         return cb(nil, 'the reply was not JSON')

@@ -1851,23 +1851,13 @@ Rules:
 - No headers ("#") anywhere.
 ]]
 
-local function extract_json(text)
-  local inner = text:match('```%w*\n(.-)\n```')
-  if inner then
-    text = inner
-  end
-  local s, e = text:find('{', 1, true), nil
-  for i = #text, 1, -1 do
-    if text:sub(i, i) == '}' then
-      e = i
-      break
-    end
-  end
-  if not (s and e and e > s) then
-    return nil
-  end
-  local obj = util.json_decode(text:sub(s, e))
-  return type(obj) == 'table' and obj or nil
+--- The JSON object in a reply (util.extract_json: tolerant of prose, fences
+--- and the usual slips of long replies).
+---@param text string
+---@param want string|string[]? keys the object must have one of
+---@return table?, string? why
+local function extract_json(text, want)
+  return util.extract_json(text, want)
 end
 M.extract_json = extract_json
 
@@ -2011,7 +2001,7 @@ function Ledger:record(ev, opts, cb)
       table.insert(parts, '<experiment_log>\n' .. exp .. '\n</experiment_log>')
     end
     local text, err = self:_ask('update', M.UPDATE_PROMPT, table.concat(parts, '\n\n'))
-    local obj = text and extract_json(text)
+    local obj = text and extract_json(text, { 'subtask', 'decisions', 'findings', 'methods', 'status' })
     self:snapshot('update ' .. (ev.kind or ''))
     if not obj then
       local id = self:_apply_update(ev, nil)
@@ -2348,7 +2338,7 @@ function Ledger:capture(opts, cb)
       self:_notice('error', 'Ledger capture: the request failed: ' .. tostring(err))
       return false, err
     end
-    local obj = extract_json(text)
+    local obj = extract_json(text, { 'methods', 'goals', 'decisions', 'findings', 'status' })
     if not obj then
       self:_notice('error', 'Ledger capture: the reply was not JSON; the ledger is unchanged.')
       return false, 'invalid reply'

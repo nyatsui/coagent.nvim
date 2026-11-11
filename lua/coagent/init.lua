@@ -1243,8 +1243,12 @@ function M.skills(arg)
     end
     local chat, earlier = M._capture_transcripts(c)
     local X = require('coagent.agent.skill_extract')
-    X.extract(c, { chat = chat, sessions = earlier, hint = hint, target = target }, function(drafts, err)
+    X.extract(c, { chat = chat, sessions = earlier, hint = hint, target = target }, function(drafts, err, reply)
       if not drafts then
+        if reply then
+          X.show_reply(reply)
+          err = tostring(err) .. ' -- the reply is open in a new tab'
+        end
         c:notice('error', '/skills extract: ' .. tostring(err))
         return
       end

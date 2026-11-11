@@ -430,7 +430,7 @@ function M.propose(ctrl, request, cb)
     async.main()
     pcall(ctrl._record_role, ctrl, 'config', model, res)
     local text = res and not res.cancelled and vim.trim(res.content or '') or ''
-    local obj = text ~= '' and require('coagent.agent.ledger').extract_json(text) or nil
+    local obj = text ~= '' and require('coagent.agent.ledger').extract_json(text, { 'set', 'unset', 'question' }) or nil
     if not obj then
       return cb(nil, { err = text == '' and ('the request failed: ' .. tostring(err or 'no reply')) or 'the reply was not JSON' })
     end
