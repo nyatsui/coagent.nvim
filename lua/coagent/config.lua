@@ -29,6 +29,12 @@ local defaults = {
     -- the lead reads what it decides on or verifies. max_lines per call;
     -- past budget_bytes in a task, only reads up to verify_lines lines.
     lead_reads = { max_lines = 300, budget_bytes = 60 * 1024, verify_lines = 40 },
+    -- preset 'lead': may the lead edit files and run commands itself? false
+    -- (default): every edit and command goes to the worker on the cheaper
+    -- model; the lead reads, plans, delegates and verifies (its requests
+    -- re-send its whole context at the lead model's rate). true: the lead
+    -- also does small steps itself.
+    lead_hands = false,
     -- With an advisor (presets 'advisor' / 'full'): how closely it supervises
     -- the builder. nil = 'standard'. Each level is a set of checkpoints (more
     -- checkpoints = more advisor requests, each a brief of a few k tokens plus
@@ -377,7 +383,11 @@ local defaults = {
     timeout_ms = 15000, -- no answer in time -> ask
     workspaces = {}, -- absolute paths where judge mode may be enabled (auto.workspaces count too)
     cache = true, -- remember verdicts per (command, cwd) for the session
-    max_context_bytes = 8000, -- request, notes and recent actions sent to the judge
+    max_context_bytes = 12000, -- request, notes, recent actions and scripts sent to the judge
+    -- After this many 'ask' verdicts in a row (no judge allow and no approval
+    -- of yours in between) the judge pauses: commands ask you directly until
+    -- you approve one. 0 = never pause.
+    pause_after = 3,
     -- Absolute paths that command arguments may name without forcing a
     -- question (datasets, caches, scratch dirs: { '/data', '/scratch' }).
     -- The judge still sees and judges them. Read/write tools are unaffected.

@@ -1401,15 +1401,20 @@ vary) and the OS sandbox gets in the way (bwrap hides GPUs). Per tool call:
 
 The verdict is a dim line on the tool item ("judge: allowed — runs the
 project's training script"). Verdicts are cached per (command, cwd) for the
-session. After `limits.max_consecutive_denials` "ask" verdicts in a row the
-judge is paused for the rest of the task (every command asks you). Judge
+session. After `judge.pause_after` (3) "ask" verdicts in a row with no allow
+and no approval of yours in between, the judge pauses: commands ask you
+directly until you approve one, then it is back on (approving a command it
+asked about starts the count again; 0 = never pause). The scripts a command
+runs are shown to the judge with their origin (the agent's diff, or the
+project file marked unchanged since the last commit, with uncommitted
+changes, or not in git). Judge
 requests count as role "judge" in :CoagentUsage. /judge log lists every
 verdict with its outcome; the log is saved with the session.
 
 Options: >lua
   judge = {
     model = nil, timeout_ms = 15000, workspaces = {}, cache = true,
-    max_context_bytes = 8000,
+    max_context_bytes = 12000, pause_after = 3,
     allowed_paths = {},       -- absolute paths args may name (datasets)
     notify_on_allow = false,  -- bell when a command ran without asking
   }

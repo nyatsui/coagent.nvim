@@ -370,7 +370,7 @@ describe('judge mode: controller', function()
     assert.are.equal(2, #judge_requests(r2.backend))
   end)
 
-  it('pauses the judge after max_consecutive_denials asks in a row', function()
+  it('an approval of yours resets the run of asks: no pause while you approve', function()
     local r = build(root, {
       run_cmd('python3 train.py --a'),
       run_cmd('python3 train.py --b'),
@@ -385,12 +385,55 @@ describe('judge mode: controller', function()
     local d = wait_done(r)
     assert.are.equal('COMPLETED', d.state)
     assert.are.equal(4, #r.approvals)
-    assert.are.equal(3, #judge_requests(r.backend))
-    local items = tool_items(r.c)
-    assert.is_true(items[4].judge.paused)
-    assert.is_truthy(vim.iter(r.c.session.items):any(function(n)
-      return n.type == 'notice' and n.text:find('paused for the rest of this task', 1, true) ~= nil
+    assert.are.equal(4, #judge_requests(r.backend))
+    assert.is_falsy(vim.iter(tool_items(r.c)):any(function(i)
+      return i.judge and i.judge.paused
     end))
+  end)
+
+  it('pauses the judge after judge.pause_after asks without an approval; your approval lifts it', function()
+    local r = build(root, {
+      run_cmd('python3 train.py --a'),
+      run_cmd('python3 train.py --b'),
+      run_cmd('python3 train.py --c'),
+      run_cmd('python3 train.py --d'),
+      { content = 'ok' },
+    }, { ASK, ASK, ALLOW }, { judge = { pause_after = 2 }, limits = { max_consecutive_denials = 5 } })
+    local n = 0
+    r.on_approval = function(item)
+      n = n + 1
+      r.c:approve(item.id, { action = n <= 2 and 'deny' or 'approve' })
+    end
+    r.c:submit('train variants')
+    local d = wait_done(r)
+    assert.are.equal('COMPLETED', d.state)
+    local items = tool_items(r.c)
+    assert.is_true(items[3].judge.paused) -- asked you directly, no judge request
+    assert.are.equal('allow', items[4].judge.decision) -- back on after your approval
+    assert.are.equal(3, #judge_requests(r.backend))
+    assert.are.equal(3, #r.approvals)
+    local texts = vim.tbl_map(function(i)
+      return i.text or ''
+    end, vim.tbl_filter(function(i)
+      return i.type == 'notice'
+    end, r.c.session.items))
+    local all = table.concat(texts, '\n')
+    assert.is_truthy(all:find('it is paused: commands ask you until you approve one', 1, true))
+    assert.is_truthy(all:find('the judge is back on', 1, true))
+
+    -- pause_after = 0: never pauses
+    local r2 = build(root, {
+      run_cmd('python3 train.py --a'),
+      run_cmd('python3 train.py --b'),
+      run_cmd('python3 train.py --c'),
+      { content = 'ok' },
+    }, { ASK }, { judge = { pause_after = 0 }, limits = { max_consecutive_denials = 5 } })
+    r2.on_approval = function(item)
+      r2.c:approve(item.id, { action = 'deny' })
+    end
+    r2.c:submit('train variants')
+    wait_done(r2)
+    assert.are.equal(3, #judge_requests(r2.backend))
   end)
 
   it('an allow resets the consecutive-ask count', function()
@@ -562,7 +605,7 @@ describe('judge: scripts the agent wrote', function()
     r.c:submit('clean up')
     wait_done(r)
     local jr = judge_requests(r.backend)
-    -- cleanup.py (cached the second time), cleanup.py changed, train.py (not the agent's: no SCRIPTS)
+    -- cleanup.py (cached the second time), cleanup.py changed, train.py (the project's: its content)
     assert.are.equal(3, #jr)
     local first = jr[1].messages[1].content
     local id = first:match('<<<DATA command (%w+)>>>')
@@ -572,8 +615,40 @@ describe('judge: scripts the agent wrote', function()
     assert.is_truthy(scripts:find('(new file)', 1, true))
     assert.is_truthy(scripts:find('would remove data', 1, true))
     assert.is_truthy(jr[2].messages[1].content:find('print("safe")', 1, true))
-    assert.is_falsy(jr[3].messages[1].content:find('<<<DATA scripts', 1, true))
+    assert.is_truthy(jr[3].messages[1].content:find('### train.py (project file', 1, true))
+    assert.is_truthy(jr[3].messages[1].content:find('print(1)', 1, true))
     assert.is_truthy(Judge.PROMPT:find('not precedent', 1, true))
     assert.is_truthy(Judge.PROMPT:find('HOME, PATH', 1, true))
+  end)
+
+  it('shows the project\'s scripts with their git state; data files and binaries are not scripts', function()
+    local root = h.workspace({ ['train.py'] = 'print("train")\n', ['run.sh'] = '#!/bin/sh\necho old\n', ['data.csv'] = 'a,b\n1,2\n', ['tool'] = '#!/bin/sh\necho tool\n' }, { git = true })
+    local fd = assert(io.open(root .. '/run.sh', 'wb'))
+    fd:write('#!/bin/sh\necho changed\n')
+    fd:close()
+    fd = assert(io.open(root .. '/new.py', 'wb'))
+    fd:write('print("new")\n')
+    fd:close()
+    local r = build(root, {
+      run_cmd('python3 train.py data.csv'),
+      run_cmd('sh run.sh'),
+      run_cmd('python3 new.py'),
+      run_cmd('sh tool'),
+      { content = 'ok' },
+    }, { ALLOW })
+    r.c:submit('train')
+    wait_done(r)
+    local jr = judge_requests(r.backend)
+    assert.are.equal(4, #jr)
+    local function input(i)
+      return jr[i].messages[1].content
+    end
+    assert.is_truthy(input(1):find('### train.py (project file, unchanged since the last git commit)\nprint("train")', 1, true))
+    assert.is_falsy(input(1):find('### data.csv', 1, true))
+    assert.is_truthy(input(2):find('### run.sh (project file with uncommitted changes', 1, true))
+    assert.is_truthy(input(2):find('echo changed', 1, true))
+    assert.is_truthy(input(3):find('### new.py (project file not in git)', 1, true))
+    assert.is_truthy(input(4):find('### tool (project file, unchanged', 1, true)) -- a shebang, no extension
+    assert.is_truthy(Judge.PROMPT:find('unchanged since the last commit is the developer', 1, true))
   end)
 end)

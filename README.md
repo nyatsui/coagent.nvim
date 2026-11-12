@@ -1361,17 +1361,22 @@ For hands-off work where an allowlist is impractical (training entry points vary
    globs, chained parts, wrapper scripts) rather than the stated purpose; overriding `HOME` / `PATH` / `LD_*` and the like
    asks; truncated parts count as unknown, not harmless; earlier verdicts are context, not precedent; a broad goal does
    not authorize shortcuts (skipping tests, changing the evaluation or the split); getting a withheld action by another
-   route asks. **Scripts the agent wrote or changed** in this session that the command runs (`python cleanup.py`) are
-   shown to the judge as the agent's diff (a new file: its content), and a cached verdict is not reused once such a
-   script changes.
+   route asks. **The scripts the command runs** (`python train.py`, `sh run.sh`: workspace files with a script extension
+   or a `#!` line, at most 4) are shown to the judge with their origin: a script the agent wrote or changed in this
+   session as its diff (a new file: its content); a project script as its content, marked unchanged since the last git
+   commit, with uncommitted changes, or not in git. A project script unchanged since the last commit is your own code:
+   the judge does not ask only because a long one is shown truncated. A cached verdict is not reused once such a script
+   changes.
 
 - The verdict is shown on the tool item as a dim line (`judge: allowed — runs the project's training script`, or
   `judge: asks (risk medium) — …` above the usual approval). `/judge log` lists every verdict of the session with its
   outcome (ran without asking / you approved / you denied); the log is saved with the session
 - Verdicts are cached per (command, cwd) for the session (`judge.cache`; `/judge clear` forgets them). "Always allow" in the
   approval dialog still works as in the other modes
-- After `limits.max_consecutive_denials` "ask" verdicts in a row the judge is paused for the rest of the task: every command
-  then asks you directly (no more judge requests)
+- After `judge.pause_after` (3) "ask" verdicts in a row with no allow and no approval of yours in between, the judge
+  pauses: commands ask you directly (no judge requests) until you approve one, then it is back on. Approving a command
+  it asked about starts the count again, so the judge does not pause while you keep approving. `pause_after = 0` never
+  pauses
 - Judge requests are counted in `:CoagentUsage` as role `judge` (and in the task's request/token totals)
 - `judge.notify_on_allow = true` rings the bell (`notify.bell` / `notify.desktop`) when a command ran without asking
 - `judge.allowed_paths = { '/data', '/scratch' }` lets command arguments name those absolute paths (datasets, caches)
@@ -1456,7 +1461,8 @@ require('coagent').setup({
     timeout_ms = 15000,       -- no answer in time -> ask
     workspaces = {},          -- where judge mode may be enabled without the dialog (auto.workspaces count too)
     cache = true,             -- verdicts per (command, cwd) for the session
-    max_context_bytes = 8000, -- request, notes and recent actions sent to the judge
+    max_context_bytes = 12000, -- request, notes, recent actions and scripts sent to the judge
+    pause_after = 3,          -- asks in a row without an approval -> asks you directly until you approve one; 0 = never
     allowed_paths = {},       -- e.g. { '/data/imagenet', '/scratch' }
     notify_on_allow = false,  -- bell when a command ran without asking
   },
@@ -1715,8 +1721,13 @@ model does the legwork.
 
 - **The lead** runs the task: it reads what it needs, plans, and delegates meaningful chunks with the `worker` tool —
   implementing a change across a few files, running and fixing tests, preparing and starting an experiment, collecting
-  results. Each assignment is self-contained (goal, files, decisions, constraints, `done_when` checks). It does small
-  things itself and keeps the decisions (approach, evaluation protocol, what to try next)
+  results. Each assignment is self-contained (goal, files, decisions, constraints, `done_when` checks). It keeps the
+  decisions (approach, evaluation protocol, what to try next)
+- **The lead does not edit files or run commands itself** (`roles.lead_hands = false`, the default): it has no edit or
+  command tools, so every change and every command — a one-line fix too — goes to the worker on the cheaper model, and
+  the lead checks the diff and results coagent appends to the report. Each of the lead's own steps re-sends its whole
+  context at the lead model's rate, so this is where most of the saving comes from. `roles.lead_hands = true` lets the
+  lead do small steps itself again
 - **The worker** gets the normal tools (read, edit, commands, experiments). Every action goes through the same pipeline
   as the lead's: permission mode, approvals (including `d` with a reason, and `D` stopping the whole task), the judge,
   change tracking and `/rewind`, the read-before-edit rule, token budgets. In the timeline its actions show as

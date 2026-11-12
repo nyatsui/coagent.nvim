@@ -107,6 +107,50 @@ describe('lead / worker', function()
     assert.is_truthy(r.c.session.usage_totals.roles.worker, vim.inspect(r.c.session.usage_totals))
   end)
 
+  it('the lead edits and runs nothing itself by default; roles.lead_hands = true gives it the tools', function()
+    local denied
+    local r = build(function(n, messages)
+      if n == 1 then
+        return { tool_calls = { { name = 'edit_file', arguments = { path = 'a.txt', old_string = 'world', new_string = 'there' } } } }
+      end
+      denied = messages[#messages].content
+      return { content = 'ok' }
+    end, function()
+      return { content = 'unused' }
+    end)
+    r.c:submit('fix a.txt')
+    assert.are.equal('COMPLETED', wait_done(r).state)
+    assert.are.equal('hello\nworld\n', h.read(root .. '/a.txt'))
+    assert.is_nil(r.asked)
+    assert.is_truthy(denied:find('as the lead you do not edit files or run commands yourself', 1, true), denied)
+    local lead_req = r.backend.requests[1]
+    local tools = names(lead_req.tools)
+    for _, t in ipairs({ 'worker', 'read_file', 'delegate' }) do
+      assert.is_true(vim.tbl_contains(tools, t), t)
+    end
+    for _, t in ipairs({ 'edit_file', 'write_file', 'run_command', 'start_process' }) do
+      assert.is_false(vim.tbl_contains(tools, t), t)
+    end
+    assert.is_truthy(lead_req.system_prompt:find('You do not edit files or run commands yourself', 1, true))
+    assert.is_falsy(lead_req.system_prompt:find('Do small things yourself', 1, true))
+
+    local r2 = build(function(n)
+      if n == 1 then
+        return { tool_calls = { { name = 'edit_file', arguments = { path = 'a.txt', old_string = 'world', new_string = 'there' } } } }
+      end
+      return { content = 'ok' }
+    end, function()
+      return { content = 'unused' }
+    end, { roles = { lead_hands = true } })
+    r2.c:submit('fix a.txt')
+    assert.are.equal('COMPLETED', wait_done(r2).state)
+    assert.are.equal('hello\nthere\n', h.read(root .. '/a.txt'))
+    local tools2 = names(r2.backend.requests[1].tools)
+    assert.is_true(vim.tbl_contains(tools2, 'edit_file'))
+    assert.is_true(vim.tbl_contains(tools2, 'run_command'))
+    assert.is_truthy(r2.backend.requests[1].system_prompt:find('Do small things yourself', 1, true))
+  end)
+
   it('deny & stop inside the worker stops the whole task', function()
     local r = build(function(n)
       if n == 1 then

@@ -228,6 +228,7 @@ function M.resolve(config, session, builder_model)
     worker_model = r.worker_model or builder_model,
     worker_opts = vim.tbl_extend('force', { max_steps = 30, max_report_bytes = 6000, max_diff_bytes = 12000 }, r.worker or {}),
     lead_reads = vim.tbl_extend('force', { max_lines = 300, budget_bytes = 60 * 1024, verify_lines = 40 }, r.lead_reads or {}),
+    lead_hands = r.lead_hands == true,
     preset = name,
     explorer = p.explorer,
     advisor = p.advisor,

@@ -1134,6 +1134,20 @@ function Controller:_is_lead_call()
   return self:roles().lead and not self.worker_item and t ~= nil and not t.strong and not t.model_override
 end
 
+-- tools the lead keeps without hands: it bundles work for another chat, it changes nothing here
+local LEAD_KEEPS = { delegate = true }
+
+--- May this tool be used by the caller? false only for the lead's own edit
+--- and command tools when roles.lead_hands is off (the worker does those).
+---@param tool table
+---@return boolean
+function Controller:_lead_may_use(tool)
+  if tool.kind ~= 'write' and tool.kind ~= 'exec' or LEAD_KEEPS[tool.name] then
+    return true
+  end
+  return not self:_is_lead_call() or self:roles().lead_hands
+end
+
 --- Text read into a model's context, per role (:CoagentUsage).
 function Controller:_count_read(role, text)
   local n = #(text or '')
@@ -2573,6 +2587,7 @@ function Controller:_request(gen)
       skills = self.task.skills_section,
       monitor = require('coagent.agent.monitor').enabled(self.config) and require('coagent.agent.monitor').cfg(self.config) or nil,
       lead = self:roles().lead and not self.task.strong and not self.task.model_override,
+      lead_hands = self:roles().lead_hands,
     })
     self.task.system_mode = key
   end
@@ -2607,6 +2622,9 @@ function Controller:_request(gen)
       return false
     end
     local tool = self.registry:get(t.name)
+    if tool and not self:_lead_may_use(tool) then
+      return false
+    end
     return not (forced and tool and tool.kind ~= 'read' and not forced[t.name])
   end, self.registry:schemas(function(kind)
     return self.permissions:offers(kind)
@@ -2939,6 +2957,10 @@ function Controller:_execute(gen, tc)
   if not self.permissions:offers(tool.kind) then
     return fail('denied', 'DENIED: ' .. tc.name .. ' is not available in ' .. self.permissions:effective_mode() .. ' mode.')
   end
+  if not self:_lead_may_use(tool) then
+    return fail('denied', 'DENIED: as the lead you do not edit files or run commands yourself (roles.lead_hands = false). '
+      .. 'Give this step to the worker: an exact assignment (the file, the change, the command, the check), a one-line change too.')
+  end
   local narrow = self.task.skill_tools
   if narrow and tool.kind ~= 'read' and not narrow[tool.name] then
     local allowed = vim.tbl_keys(narrow)
@@ -3115,6 +3137,7 @@ function Controller:_execute(gen, tc)
       return out
     end
     self.task.denials = 0
+    self:_judge_approved(jlog ~= nil)
     if d.action == 'approve_always' and decision.can_always then
       if d.rule and decision.rule and self.permissions.rules then
         -- the rule computed by the policy, never one from the request
@@ -3291,8 +3314,9 @@ function Controller:_execute(gen, tc)
 end
 
 --- Judge mode: ask the judge model about a command the policy left at 'ask'.
---- After limits.max_consecutive_denials 'ask' verdicts in a row the judge is
---- paused for the rest of the task (everything asks the user directly).
+--- After judge.pause_after 'ask' verdicts in a row (no judge allow and no
+--- approval of the user in between) the judge pauses: commands ask the user
+--- directly until the user approves one (_judge_approved).
 ---@return Coagent.Decision? decision (nil: the task was stopped), table? log entry
 function Controller:_judge(gen, tool, args, prepared, decision, item)
   local t = self.task
@@ -3305,7 +3329,7 @@ function Controller:_judge(gen, tool, args, prepared, decision, item)
     cwd = prepared.cwd_rel,
   }
   if t.judge_paused then
-    item.judge = { decision = 'ask', paused = true, reason = string.format('it asked %d times in a row; asking you for the rest of this task', t.judge_asks or 0) }
+    item.judge = { decision = 'ask', paused = true, reason = string.format('it asked %d times in a row; asking you until you approve a command', t.judge_asks or 0) }
     return decision
   end
   item.judge = { pending = true }
@@ -3325,10 +3349,10 @@ function Controller:_judge(gen, tool, args, prepared, decision, item)
       t.judge_asks = 0
     else
       t.judge_asks = (t.judge_asks or 0) + 1
-      local limit = self.config.limits.max_consecutive_denials
-      if t.judge_asks >= limit then
+      local limit = tonumber((self.config.judge or {}).pause_after) or 3
+      if limit > 0 and t.judge_asks >= limit then
         t.judge_paused = true
-        self:notice('warn', string.format('The judge asked about %d commands in a row; it is paused for the rest of this task (every command asks you).', t.judge_asks))
+        self:notice('warn', string.format('The judge asked about %d commands in a row without an approval in between; it is paused: commands ask you until you approve one.', t.judge_asks))
       end
     end
   end
@@ -3338,6 +3362,22 @@ function Controller:_judge(gen, tool, args, prepared, decision, item)
     return vim.tbl_extend('force', decision, { action = 'allow', reason = 'judge: ' .. v.reason, sandbox = false, judge = false }), entry
   end
   return vim.tbl_extend('force', decision, { reason = 'judge: ' .. tostring(v.reason) }), entry
+end
+
+--- The user approved an action: a command the judge asked about (or that
+--- asked directly while the judge was paused) resets the run of asks and
+--- lifts the pause.
+---@param judged boolean the judge gave a verdict on this action
+function Controller:_judge_approved(judged)
+  local t = self.task
+  if not t or not (judged or t.judge_paused) then
+    return
+  end
+  t.judge_asks = 0
+  if t.judge_paused then
+    t.judge_paused = false
+    self:notice('info', 'You approved a command: the judge is back on for the next commands.')
+  end
 end
 
 --- A loaded skill's allowed-tools narrow the write/command tools for the

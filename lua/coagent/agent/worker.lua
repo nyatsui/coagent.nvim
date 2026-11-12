@@ -42,7 +42,7 @@ and verify; the worker implements and runs.
   Each assignment is self-contained: the worker sees only what you write, not this conversation.
 - Make each assignment DECISION COMPLETE: the worker chooses nothing - not the approach, names, interfaces,
   parameters or what to do on an edge case. Decide (or investigate) first; a worker left to guess costs a retry.
-- Do small things yourself (a one-line fix, reading a few lines): an assignment costs a report too.
+{{HANDS}}
 - Never trust a report blindly: check the diff and the results coagent appends to it before you go on. Send a
   corrective assignment, or fix it yourself, when it is wrong.
 - Read what you decide on or verify, not to search: let `explore` / `worker` find places and skim long files (their
@@ -50,6 +50,24 @@ and verify; the worker implements and runs.
   metric, data split, an interface), a quote that looks wrong. Your reads are limited per call and per task.
 - Decisions stay with you: the approach, evaluation protocol, metrics, what to try next.
 </lead_role>]]
+
+M.HANDS = {
+  -- roles.lead_hands = true
+  on = '- Do small things yourself (a one-line fix, reading a few lines): an assignment costs a report too.',
+  -- the default: no edit or command tools for the lead
+  off = '- You do not edit files or run commands yourself (you have no such tools): every change and every command goes\n'
+    .. '  to the worker, a one-line fix too (give the exact edit). Group related small steps into one assignment, and let\n'
+    .. '  the worker run the checks: coagent appends the diff and the results to its report.',
+}
+
+--- The lead's role text; `hands`: may it edit and run commands itself.
+---@param hands boolean?
+---@return string
+function M.lead_prompt(hands)
+  return (M.LEAD:gsub('{{HANDS}}', function()
+    return hands and M.HANDS.on or M.HANDS.off
+  end))
+end
 
 -- tools a worker does not get (no nesting, no lead-level orchestration)
 local EXCLUDE = { worker = true, explore = true, delegate = true, loop_control = true }
