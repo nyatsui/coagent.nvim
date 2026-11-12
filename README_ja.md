@@ -325,7 +325,7 @@ vim.keymap.set('x', '<leader>ai', ':CoagentInline<CR>', { desc = 'Coagent inline
 | `/config [get\|set\|unset\|edit\|path ...]` / `/update-config <依頼>` | 設定の表示と変更（`settings_file` に保存してすぐ反映）/ 普通の言葉で設定を変更（1 リクエスト。適用か取り消しを選ぶ。下記「Neovim の中から設定を変更」） |
 | `/delegate <種類> [指示]\|list\|open\|cancel\|detach` | 手で操作する別のチャット向けにサブタスクのバンドルを作る（「サブタスクを別のチャットに任せる」参照。ローカル、リクエストなし） |
 | `/receive [id] [paste\|clipboard\|files]` | 結果を取り込む: 貼り付けたテキストやダウンロードしたファイル。変更はすべてレビュー付き |
-| `/new [default]` / `/sessions` | 新規セッション: 今のセッションのモデル・役割分担・final check・supervision・effort・承認モードを引き継ぐ（会話は引き継がない）。`/new default` は設定値から始める / 保存済みセッション一覧 |
+| `/new [default] [指示]` / `/sessions` | 新規セッション: 今のセッションのモデル・役割分担・final check・supervision・effort・承認モードを引き継ぐ（会話は引き継がない）。`/new default` は設定値から始める。後ろに指示を書くと新しいセッションですぐ実行する（`/new パーサーを直して`）ので、別の場所で書いた指示の先頭に `/new` を付けておける / 保存済みセッション一覧 |
 | `/model [role]` | モデル選択（`builder` / `explorer` / `advisor`） |
 | `/mode [mode]` / `/roles [preset]` | 承認モード（`supervised` / `readonly` / `auto` / `judge`）/ 役割分担の切替 |
 | `/judge [log [n]\|clear]` | judge モード: このセッションの判定一覧（コマンド・判定・リスク・理由・結果）/ キャッシュした判定を忘れる（「judge モード」参照。ローカル処理、リクエストなし） |
@@ -1210,7 +1210,7 @@ terminal = {
 | `:CoagentFinalCheck [name] [task]` | タスクを終える前の確認: `off` / `gate` / `critic` / `default`（`/finalcheck` と同じ。範囲指定で選択範囲を添付） |
 | `:CoagentStrong <task>` | 強いモデルを作業担当にして 1 タスク実行（`/strong` と同じ。範囲指定で選択範囲を添付） |
 | `:CoagentEffort [level] [role]` | 推論の強さ: `minimal` / `low` / `medium` / `high` / `off` / `default`（`/effort` と同じ） |
-| `:CoagentNew [default]` / `:CoagentSessions` | 新規セッション（`/new` と同じ）/ 保存済みセッション一覧 |
+| `:CoagentNew [default] [指示]` / `:CoagentSessions` | 新規セッション（`/new` と同じ）/ 保存済みセッション一覧 |
 | `:CoagentLayout [vertical\|float]` | レイアウト切替 |
 | `:CoagentBudget [tokens\|credits\|session\|month] <n\|off\|default>` | トークン上限（`/budget` と同じ） |
 | `:CoagentWidth [N\|N%\|+N\|-N\|reset]` | パネルの幅: 列数・端末幅に対する % ・相対・`ui.width` に戻す。手で変えた幅も含めて記憶します |
@@ -1378,6 +1378,8 @@ require('coagent').setup({
     show_tokens = true, -- 実行中タスクのリクエスト数・トークン数・キャッシュヒット率を winbar に表示（`6req 48k c91%`）
     show_request_usage = true, -- 応答ごとの内訳（in / cached / out）をタイムラインに表示
     rates = nil,        -- クレジットの概算用（下記「利用量とクレジット」）
+  -- （cache = { keepalive = { enabled = true, interval_ms = 240000, max_ms = 1800000, min_input_tokens = 30000 } }:
+  --  タスクが待っているあいだプロンプトキャッシュを保つ。「利用量とクレジット」参照）
     month_start_day = 1, -- 月間台帳: この日のローカル時刻 0 時に月が切り替わる（「月間の上限」参照）
     dir = nil,          -- 月間台帳のフォルダ。nil = stdpath('state')/coagent/usage
   },
@@ -1522,6 +1524,14 @@ CopilotChat.nvim は認証・通信の提供元として裏で使うだけです
 - 応答ごとに、タイムラインへ `in 12k (cached 11k, 92%) · out 450 · reasoning 300` のような内訳を表示します
   （ツール呼び出しだけの応答は、そのツール項目の上に表示）。`cached` がキャッシュから読まれた入力で、ヒット率が低い応答は
   キャッシュが効かず履歴全体を読み直したことを示します。`usage.show_request_usage = false` で非表示
+- **待っているあいだもキャッシュを保つ**（`cache.keepalive`、既定でオン）: プロンプトキャッシュは何も送らない時間が数分続くと
+  切れるので、承認をあとで返したときや、作業役の長い作業・長いコマンドのあとは、次のリクエストが会話全体を満額で読み直します。
+  作業担当（lead）のリクエストが 4 分間ないと、coagent は直前のリクエストをもう一度送ります（同じシステムプロンプト・ツール・
+  会話に「OK とだけ返して」の 1 行を足したもの）。先頭がキャッシュから読まれて保たれます。返事は捨て、ツールも実行しません。
+  1 回あたり会話の約 1/10、キャッシュが切れると全体がかかるので、会話が `min_input_tokens`（3 万）以上でキャッシュが効いて
+  いたときだけ送り、作業担当の最後のリクエストから `max_ms`（30 分）で止め、キャッシュに当たらなかったときも止めます。
+  送った分は `:CoagentUsage` に役割 `keepalive` として計上します（lead・worker・explorer・judge・keepalive などすべての役割を
+  表示）。`cache = { keepalive = { enabled = false } }` でオフ
 - 内訳は API が応答に含める usage（`prompt_tokens` / `prompt_tokens_details.cached_tokens` / `completion_tokens` など）を
   読み取ったものです。リクエスト内容は変えません。API が内訳を返さない応答は合計だけになり、`cache not reported` と表示します
 - タスク完了の項目と `:CoagentUsage` に、直近タスクとセッション全体（モデル別）の合計と内訳を表示。セッション全体の値はセッションと一緒に保存されます。
@@ -1859,6 +1869,12 @@ opts = {
 - 認証トークンは保存しません（認証は CopilotChat が管理）
 - 実験ログも同じ場所の `stdpath('state')/coagent/experiments/<project>-<hash>.jsonl` に保存します（0600。「実験ログ」参照）
 - プロジェクト台帳も同じ場所の `stdpath('state')/coagent/ledger/<project>-<hash>/` です（0700 / 0600。「プロジェクト台帳」参照）
+- **新しいセッションにするタイミング**: リクエストのたびに会話全体を読み直す（キャッシュからなら約 1/10 の単価）ので、
+  セッションが長いほど 1 歩が高くなります。タスクが終わったとき、会話が `session.suggest_new_tokens`（10 万）入力トークン
+  以上になっていれば 1 行で知らせます: 次が別の作業なら `/new <指示>`（同じ設定の新しいセッション。決めたことや分かった
+  ことはプロジェクト台帳が引き継ぐ）、同じ作業を続けるなら `/compact summary` で会話を小さくできます。1 回だけ表示し、
+  1.5 倍になったらもう一度。ローカルでリクエストなし。`0` でオフ。指示を別の場所（ほかのチャット）で書くときは、新しい
+  セッションがよいところで先頭に `/new` を付けておけば、セッションの作成と指示の実行が 1 回で済みます
 
 ## 制限事項
 

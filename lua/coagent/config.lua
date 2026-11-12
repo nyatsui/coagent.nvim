@@ -164,6 +164,17 @@ local defaults = {
   root = nil,
 
   -- Long conversations: nothing the model saw is lost.
+  -- Prompt cache. keepalive: while a task waits (an approval, a worker
+  -- assignment, a long command), re-send the builder's (lead's) last request
+  -- every interval_ms with one short line asking for "OK", so its prefix stays
+  -- in the cache (a ping costs about a tenth of the conversation, a miss all
+  -- of it). Only when the request had min_input_tokens or more and the cache
+  -- was seen working; stops max_ms after the builder's last request, or when a
+  -- ping finds no cache hits. Pings count as role "keepalive".
+  cache = {
+    keepalive = { enabled = true, interval_ms = 4 * 60000, max_ms = 30 * 60000, min_input_tokens = 30000 },
+  },
+
   context = {
     -- Tool outputs cut at limits.max_tool_output_bytes, or shortened when the
     -- conversation nears the context budget, are saved in full (redacted) in
@@ -675,6 +686,10 @@ local defaults = {
     dir = nil, -- nil = stdpath('state')/coagent/sessions
     save_tool_output = true, -- tool outputs are stored truncated and redacted
     max_saved_sessions = 50, -- per project
+    -- after a task, when the conversation is this many input tokens or more:
+    -- a one-line hint that a separate next task is cheaper with `/new <task>`
+    -- (once, again at 1.5x; local, no request). 0 = never
+    suggest_new_tokens = 100000,
   },
 
   ui = {

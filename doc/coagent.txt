@@ -132,10 +132,16 @@ Check the setup with |:checkhealth| coagent.
                          Reasoning effort for this session: minimal | low |
                               medium | high | off | default, optionally for
                               one role. See |coagent-effort|.
-:CoagentNew [default]    New session. It keeps the model, roles, final
+:CoagentNew [default] [task]
+                         New session. It keeps the model, roles, final
                               check, supervision, effort and permission mode
                               of the current session (not the conversation);
-                              `default` starts from the config.
+                              `default` starts from the config. A task after
+                              them is sent in the new session right away.
+                              After a task, once the conversation reaches
+                              session.suggest_new_tokens (100k) input tokens,
+                              a line suggests `/new <task>` for a separate
+                              next task (local; 0 = never).
 :CoagentSessions         Restore a saved session of this project.
 :CoagentLayout [layout]  vertical | float
 :CoagentBudget [kind] {n}
@@ -167,7 +173,12 @@ response shows its breakdown in the timeline, e.g.
 responses: above their first tool item); a low cached share means the cache
 missed and the whole history was read again. The breakdown is read from the
 usage the API returns (the request is not changed); responses without it show
-"cache not reported". `usage.show_request_usage = false` hides the per-response
+"cache not reported". While a task waits (an approval, a worker assignment,
+a long command), `cache.keepalive` (on by default) re-sends the builder's last
+request every 4 minutes with one line asking for "OK", so the prompt cache is
+not lost (a ping costs about a tenth of the conversation, a miss all of it);
+only for 30k+ input tokens with cache hits seen, for at most 30 minutes after
+the last request, counted as role "keepalive". `usage.show_request_usage = false` hides the per-response
 lines. The task-completed item and :CoagentUsage show totals and breakdowns for
 the last task and the session (per model). Exact numbers are on
 https://github.com/settings/billing, which ":CoagentUsage billing" (or

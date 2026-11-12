@@ -532,6 +532,83 @@ describe('ui', function()
     end
   end)
 
+  it('/new <task> starts a new session and sends the task in it; /new default <task> from the config', function()
+    setup({ { content = 'first' }, { content = 'second' }, { content = 'third' } })
+    local c = agent.controller()
+    c:set_model('other-model')
+    c:submit('one')
+    h.wait(function()
+      return c:state() == 'COMPLETED'
+    end)
+    agent.open()
+    local view = agent.view()
+    view.input:set_text('/new fix the\nsecond thing')
+    view.input:submit()
+    local n = agent.controller()
+    assert.are_not.equal(c, n)
+    assert.is_true(h.wait(function()
+      return n:state() == 'COMPLETED'
+    end))
+    assert.are.equal('other-model', n:model())
+    assert.is_truthy(n.session.messages[1].content:find('^fix the\nsecond thing'))
+    assert.are.equal('other-model', backend.requests[#backend.requests].model)
+
+    view.input:set_text('/new default third task')
+    view.input:submit()
+    local d = agent.controller()
+    assert.is_true(h.wait(function()
+      return d:state() == 'COMPLETED'
+    end))
+    assert.are.equal('mock-model', d:model())
+    assert.is_truthy(d.session.messages[1].content:find('^third task'))
+    -- busy: nothing happens, the input keeps the text
+    local orig = d.busy
+    d.busy = function()
+      return true
+    end
+    view.input:set_text('/new another')
+    view.input:submit()
+    assert.are.equal(d, agent.controller())
+    assert.are.equal('/new another', view.input:text())
+    d.busy = orig
+  end)
+
+  it('suggests a new session after a task once the conversation is large', function()
+    setup({
+      { content = 'a', input_tokens = 150000 },
+      { content = 'b', input_tokens = 160000 },
+      { content = 'c', input_tokens = 240000 },
+    })
+    local c = agent.controller()
+    local function hints()
+      return #vim.tbl_filter(function(i)
+        return i.type == 'notice' and (i.text or ''):find('/new <task>', 1, true) ~= nil
+      end, c.session.items)
+    end
+    for i, want in ipairs({ 1, 1, 2 }) do
+      c:submit('task ' .. i)
+      assert.is_true(h.wait(function()
+        return c:state() == 'COMPLETED'
+      end))
+      assert.are.equal(want, hints(), 'after task ' .. i)
+    end
+    local text = vim.tbl_filter(function(i)
+      return i.type == 'notice' and (i.text or ''):find('/new <task>', 1, true) ~= nil
+    end, c.session.items)[1].text
+    assert.is_truthy(text:find('about 150k tokens', 1, true), text)
+    assert.is_truthy(text:find('/compact summary', 1, true))
+
+    setup({ { content = 'a', input_tokens = 150000 } }, { session = { suggest_new_tokens = 0 } })
+    local c2 = agent.controller()
+    c2:submit('task')
+    assert.is_true(h.wait(function()
+      return c2:state() == 'COMPLETED'
+    end))
+    for _, i in ipairs(c2.session.items) do
+      assert.is_falsy(i.type == 'notice' and (i.text or ''):find('/new <task>', 1, true))
+    end
+  end)
+
   it('/new keeps auto mode enabled by hand in the same workspace only', function()
     setup({})
     local c = agent.controller()

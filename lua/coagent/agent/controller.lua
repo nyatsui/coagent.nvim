@@ -102,6 +102,7 @@ function Controller.new(opts)
 end
 
 function Controller:dispose()
+  require('coagent.agent.keepalive').stop(self)
   if self.loop then
     self.loop:stop(nil, true)
   end
@@ -2733,6 +2734,15 @@ function Controller:_request(gen)
 
     if res and not res.cancelled then
       self:_record_role('builder', model, res)
+      -- keep this prefix in the prompt cache while the task waits
+      require('coagent.agent.keepalive').arm(self, {
+        messages = messages,
+        system_prompt = system_prompt,
+        tools = tools,
+        model = model,
+        temperature = self.config.temperature,
+        effort = effort,
+      }, res.usage)
       local text = res.content or ''
       if item then
         item.text = text
@@ -3449,6 +3459,7 @@ end
 
 function Controller:_finish_now(state, info)
   info = info or {}
+  require('coagent.agent.keepalive').stop(self)
   self.permissions:set_task_readonly(false)
   self.session:repair()
   self.pending_approval = nil
@@ -3495,6 +3506,9 @@ function Controller:_finish_now(state, info)
     end
   end
   self:_add(summary)
+  if state == S.COMPLETED and not summary.followup then
+    self:_suggest_new_session()
+  end
   if self.machine:can(state) then
     self.machine:to(state, info)
   else
@@ -3519,6 +3533,28 @@ function Controller:_finish_now(state, info)
       self:_drain_queue()
     end)
   end
+end
+
+--- After a task: when the conversation has grown past
+--- session.suggest_new_tokens, say once (again at 1.5x) that a separate next
+--- task is cheaper in a new session. Local, no request.
+function Controller:_suggest_new_session()
+  local limit = tonumber((self.config.session or {}).suggest_new_tokens) or 0
+  local u = self.session.usage or {}
+  local tokens = tonumber(u.input_tokens) or tonumber(u.total_tokens) or 0
+  if limit <= 0 or tokens < limit or (self.loop and self.loop:active()) then
+    return
+  end
+  local shown = self.session.new_hint_at
+  if shown and tokens < shown * 1.5 then
+    return
+  end
+  self.session.new_hint_at = tokens
+  local l = self.ledger
+  local keeps = l and l:enabled() and l:exists() and ' (the project ledger keeps the decisions and findings)' or ''
+  self:notice('info', string.format('This conversation is about %s tokens, and every request reads it again (from the cache at about a tenth). '
+    .. 'If the next task is a separate one, `/new <task>` starts it in a new session with the same settings%s; to go on with this '
+    .. 'work, `/compact summary` makes the conversation smaller.', require('coagent.agent.usage').k(tokens), keeps))
 end
 
 ------------------------------------------------------------------------------

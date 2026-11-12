@@ -336,7 +336,7 @@ input history (`<C-p>`/`<C-n>`) like normal prompts.
 | `/config [get\|set\|unset\|edit\|path ...]` / `/update-config <request>` | Show and change settings (saved in `settings_file`, applied at once) / change them in plain words (one request; you apply or cancel; see "Changing settings from inside Neovim") |
 | `/delegate <kind> [instruction]\|list\|open\|cancel\|detach` | Bundle a subtask for another chat you operate (see "Delegating subtasks"; local, no request) |
 | `/receive [id] [paste\|clipboard\|files]` | Import its result: pasted text and/or downloaded files, every change reviewed |
-| `/new [default]` / `/sessions` | New session: it keeps the model, roles, final check, supervision, effort and permission mode of the current one (not the conversation); `/new default` starts from the config / saved sessions |
+| `/new [default] [task]` / `/sessions` | New session: it keeps the model, roles, final check, supervision, effort and permission mode of the current one (not the conversation); `/new default` starts from the config. A task after them is sent in the new session right away (`/new fix the parser`), so an instruction written elsewhere can start with `/new` / saved sessions |
 | `/model [role]` | Pick a model (`builder` / `explorer` / `advisor`) |
 | `/mode [mode]` / `/roles [preset]` | Switch approval mode (`supervised` / `readonly` / `auto` / `judge`) / model roles |
 | `/judge [log [n]\|clear]` | Judge mode: list the judge's decisions in this session (command, verdict, risk, reason, outcome) / forget cached verdicts (see "Judge mode"; local, no request) |
@@ -1254,7 +1254,7 @@ terminal = {
 | `:CoagentFinalCheck [name] [task]` | How a result is checked before a task finishes: `off` / `gate` / `critic` / `default` (same as `/finalcheck`; a range attaches the selection) |
 | `:CoagentStrong <task>` | Run one task with the strong model as the builder (same as `/strong`; a range attaches the selection) |
 | `:CoagentEffort [level] [role]` | Reasoning effort: `minimal` / `low` / `medium` / `high` / `off` / `default` (same as `/effort`) |
-| `:CoagentNew [default]` / `:CoagentSessions` | New session (same as `/new`) / saved sessions |
+| `:CoagentNew [default] [task]` / `:CoagentSessions` | New session (same as `/new`) / saved sessions |
 | `:CoagentLayout [vertical\|float]` | Switch layout |
 | `:CoagentBudget [tokens\|credits\|session\|month] <n\|off\|default>` | Token budgets (same as `/budget`) |
 | `:CoagentWidth [N\|N%\|+N\|-N\|reset]` | Panel width: columns, percent of the terminal, relative, or back to `ui.width`. Remembered (also when you resize by hand) |
@@ -1430,6 +1430,8 @@ require('coagent').setup({
     show_tokens = true, -- requests, tokens and prompt-cache hits of the running task in the winbar (`6req 48k c91%`)
     show_request_usage = true, -- per-response breakdown (in / cached / out) in the timeline
     rates = nil,        -- for the credit estimate (see "Usage and credits")
+  -- (cache = { keepalive = { enabled = true, interval_ms = 240000, max_ms = 1800000, min_input_tokens = 30000 } }:
+  --  keep the prompt cache warm while a task waits; see "Usage and credits")
     month_start_day = 1, -- monthly ledger: the month starts on this day, local time (see "Monthly budget")
     dir = nil,          -- monthly ledger folder; nil = stdpath('state')/coagent/usage
   },
@@ -1578,6 +1580,15 @@ for input, cached input, cache writes and output; see
 - Each response shows a breakdown such as `in 12k (cached 11k, 92%) · out 450 · reasoning 300` in the timeline (for
   tool-call-only responses, above their first tool item). `cached` is input read from the prompt cache; a low ratio means the
   cache missed and the whole history was read again. Hide it with `usage.show_request_usage = false`
+- **Keeping the cache warm while a task waits** (`cache.keepalive`, on by default). The prompt cache expires after a few
+  idle minutes, so an approval you answer later, a long worker assignment or a long command would make the next request
+  read the whole conversation again at the full rate. Every 4 minutes without a request of the builder (the lead), coagent
+  sends its last request again — the same system prompt, tools and messages, plus one line asking for "OK" — so the
+  prefix is read from the cache and kept. The reply is dropped (no tool runs). A ping costs about a tenth of the
+  conversation, a miss all of it, so it runs only for a conversation of `min_input_tokens` (30k) or more whose cache was
+  seen working, stops `max_ms` (30 min) after the builder's last request and when a ping finds no cache hits. Pings
+  count as role `keepalive` in `:CoagentUsage` (which lists every role: lead, worker, explorer, judge, keepalive, ...).
+  `cache = { keepalive = { enabled = false } }` turns it off
 - The breakdown is read from the usage the API includes in the response (`prompt_tokens` /
   `prompt_tokens_details.cached_tokens` / `completion_tokens`, ...); the request is not changed. Responses without a breakdown
   show totals only, marked `cache not reported`
@@ -1939,6 +1950,13 @@ opts = {
 - The experiment log lives next to them: `stdpath('state')/coagent/experiments/<project>-<hash>.jsonl` (0600; see
   "Experiment log"), and so does the project ledger: `stdpath('state')/coagent/ledger/<project>-<hash>/` (0700 / 0600;
   see "Project ledger")
+- **When to start a new session.** Every request reads the whole conversation again (from the prompt cache at about a
+  tenth of the price), so a long session makes each step dearer. After a task, once the conversation reaches
+  `session.suggest_new_tokens` (100k) input tokens, a line says so: a separate next task is cheaper with `/new <task>`
+  (a new session with the same settings; the project ledger carries the decisions and findings over), and going on
+  with the same work, `/compact summary` makes the conversation smaller. Shown once, again at 1.5x; local, no request;
+  `0` turns it off. When instructions are written elsewhere (another chat), they can start with `/new` where a new
+  session fits: the session is created and the instruction sent in one step
 
 ## Limitations
 

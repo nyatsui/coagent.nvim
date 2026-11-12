@@ -2152,22 +2152,26 @@ function M._apply_carry(n, keep)
   return 'Kept from the previous session: ' .. table.concat(kept, ', ') .. ' (/new default starts from the config).'
 end
 
---- `/new [default]`: a new session. It keeps the model, roles, final check,
---- supervision, effort and permission mode of the current one; `default`
---- starts from the config.
+--- `/new [default] [task]`: a new session. It keeps the model, roles, final
+--- check, supervision, effort and permission mode of the current one;
+--- `default` starts from the config. A task after them is sent in the new
+--- session right away (as if typed there: #references, /plan, ... work).
 ---@param arg string?
+---@return boolean? ok false: nothing done (the input keeps the text)
 function M.new_session(arg)
   local c = state.controller
   if c and c:busy() then
     notify('stop the running task first', vim.log.levels.WARN)
-    return
+    return false
   end
   arg = vim.trim(arg or '')
-  if arg ~= '' and arg ~= 'default' then
-    notify('/new: unknown argument ' .. arg .. " (nothing, or 'default' to start from the config)", vim.log.levels.WARN)
-    return
+  local reset, task = false, arg
+  if arg == 'default' then
+    reset, task = true, ''
+  elseif arg:match('^default%s') then
+    reset, task = true, vim.trim(arg:sub(8))
   end
-  local keep = c and arg == '' and M._carry(c) or nil
+  local keep = c and not reset and M._carry(c) or nil
   local n = set_controller(build())
   local line = keep and M._apply_carry(n, keep)
   if line then
@@ -2177,6 +2181,11 @@ function M.new_session(arg)
     state.view:refresh_bar()
   end
   M.open()
+  if task ~= '' then
+    -- the session exists now: a refused task is reported, not retried with another /new
+    actions.submit(task)
+  end
+  return true
 end
 
 function M.load_session(id)
@@ -3094,7 +3103,19 @@ function M.usage(arg)
     if stats and next(stats) then
       table.insert(lines, '')
       table.insert(lines, '  Requests by role (this session)')
-      for _, role in ipairs({ 'builder', 'explorer', 'advisor', 'gate', 'critic', 'judge', 'ledger' }) do
+      -- known roles in this order, then any other (summary, skills, ...)
+      local order = { 'builder', 'worker', 'explorer', 'advisor', 'gate', 'critic', 'judge', 'keepalive', 'ledger' }
+      local listed = {}
+      for _, r in ipairs(order) do
+        listed[r] = true
+      end
+      local extra = vim.tbl_filter(function(r)
+        return not listed[r]
+      end, vim.tbl_keys(stats))
+      table.sort(extra)
+      vim.list_extend(order, extra)
+      local lead = state.controller:roles().lead
+      for _, role in ipairs(order) do
         local s = stats[role]
         if s then
           local models = {}
@@ -3102,7 +3123,7 @@ function M.usage(arg)
             table.insert(models, m .. ' x' .. n)
           end
           table.sort(models)
-          table.insert(lines, string.format('    %-9s %3d requests, %dk tokens  (%s%s)', role, s.requests, math.floor((s.tokens or 0) / 1000), table.concat(models, ', '), Usage.efforts_text(s.efforts, '; effort ')))
+          table.insert(lines, string.format('    %-9s %3d requests, %dk tokens  (%s%s)', (role == 'builder' and lead) and 'lead' or role, s.requests, math.floor((s.tokens or 0) / 1000), table.concat(models, ', '), Usage.efforts_text(s.efforts, '; effort ')))
         end
       end
     end

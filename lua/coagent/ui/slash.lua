@@ -169,11 +169,11 @@ M.COMMANDS = {
   },
   {
     name = 'new',
-    args = '[default]',
-    desc = 'Start a new session (keeps model, roles, final check, mode; default = from the config)',
+    args = '[default] [task]',
+    desc = 'Start a new session (keeps model, roles, final check, mode; default = from the config) and send the task in it',
     complete = { 'default' },
     run = function(arg)
-      app().new_session(arg)
+      return app().new_session(arg)
     end,
   },
   {

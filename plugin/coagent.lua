@@ -180,11 +180,11 @@ end, { desc = 'Review the pending edit hunk by hunk' })
 cmd('CoagentNew', function(a)
   agent().new_session(a.args)
 end, {
-  nargs = '?',
+  nargs = '*',
   complete = function()
     return { 'default' }
   end,
-  desc = 'New session (keeps model, roles, final check, mode; default = from the config)',
+  desc = 'New session [default] [task] (keeps model, roles, final check, mode; default = from the config)',
 })
 cmd('CoagentSessions', function()
   agent().sessions()
