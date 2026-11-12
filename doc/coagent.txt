@@ -132,7 +132,10 @@ Check the setup with |:checkhealth| coagent.
                          Reasoning effort for this session: minimal | low |
                               medium | high | off | default, optionally for
                               one role. See |coagent-effort|.
-:CoagentNew              New session.
+:CoagentNew [default]    New session. It keeps the model, roles, final
+                              check, supervision, effort and permission mode
+                              of the current session (not the conversation);
+                              `default` starts from the config.
 :CoagentSessions         Restore a saved session of this project.
 :CoagentLayout [layout]  vertical | float
 :CoagentBudget [kind] {n}

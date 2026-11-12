@@ -476,6 +476,84 @@ describe('ui', function()
     assert.is_truthy(text:find('remember me', 1, true))
     assert.is_truthy(text:find('first answer', 1, true))
   end)
+  it('/new keeps the model, roles, final check and mode; /new default starts from the config', function()
+    setup({ { content = 'x' } }, { roles = { strong_model = 'strong-model', supervision = 'light' } })
+    local c = agent.controller()
+    c:set_model('other-model')
+    assert.is_true(c:set_roles('advisor', { advisor_model = 'adv-model' }))
+    assert.is_true(c:set_supervision('strict'))
+    assert.is_true(c:set_final_check('gate'))
+    assert.is_true(c:set_effort('high'))
+    agent.set_mode('readonly')
+    c:submit('first task')
+    h.wait(function()
+      return c:state() == 'COMPLETED'
+    end)
+
+    agent.new_session()
+    local n = agent.controller()
+    assert.are_not.equal(c, n)
+    assert.are.equal(0, #n.session.messages)
+    assert.are.equal('IDLE', n:state())
+    assert.are.equal('other-model', n:model())
+    local r = n:roles()
+    assert.are.equal('advisor', r.preset)
+    assert.are.equal('adv-model', r.advisor_model)
+    assert.are.equal('strict', r.supervision)
+    assert.are.equal('gate', r.final_check)
+    assert.are.equal('high', n:roles().builder_effort)
+    assert.are.equal('readonly', n.permissions.mode)
+    assert.are.equal('readonly', n.session.mode)
+    -- the session's copy, not the old one's table
+    n.session.roles.final_check = 'off'
+    assert.are.equal('gate', c.session.roles.final_check)
+    local line
+    for _, it in ipairs(n.session.items) do
+      if it.type == 'notice' and (it.text or ''):find('Kept from the previous session', 1, true) then
+        line = it.text
+      end
+    end
+    assert.is_truthy(line)
+    for _, want in ipairs({ 'model other-model', 'roles advisor', 'final check gate', 'supervision strict', 'effort high', 'advisor model adv-model', 'mode readonly' }) do
+      assert.is_truthy(line:find(want, 1, true), want .. ' in: ' .. line)
+    end
+
+    agent.new_session('default')
+    local d = agent.controller()
+    assert.are.equal('mock-model', d:model())
+    assert.are.equal('single', d:roles().preset)
+    assert.are.equal('off', d:roles().final_check)
+    assert.are.equal('supervised', d.permissions.mode)
+
+    -- nothing changed from the config: no line
+    agent.new_session()
+    for _, it in ipairs(agent.controller().session.items) do
+      assert.is_falsy(it.type == 'notice' and (it.text or ''):find('Kept from', 1, true))
+    end
+  end)
+
+  it('/new keeps auto mode enabled by hand in the same workspace only', function()
+    setup({})
+    local c = agent.controller()
+    local orig = vim.fn.confirm
+    vim.fn.confirm = function()
+      return 1
+    end
+    agent.set_mode('auto')
+    vim.fn.confirm = orig
+    assert.are.equal('auto', c.permissions.mode)
+    agent.new_session()
+    assert.are.equal('auto', agent.controller().permissions.mode)
+    -- another workspace: auto is not carried there
+    local Init = require('coagent')
+    local keep = Init._carry(agent.controller())
+    keep.root = '/somewhere/else'
+    agent.new_session('default')
+    local n = agent.controller()
+    assert.is_nil(Init._apply_carry(n, keep))
+    assert.are.equal('supervised', n.permissions.mode)
+  end)
+
   it(':Coagent with a range attaches the selection; g? shows help', function()
     setup({ { content = 'explained' } })
     vim.cmd('edit ' .. root .. '/src/m.lua')

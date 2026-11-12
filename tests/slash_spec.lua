@@ -79,7 +79,7 @@ describe('slash completion', function()
     assert.are.equal(4, #modes) -- supervised readonly auto judge
     assert.is_nil((slash.complete('hello /c')))
     assert.is_nil((slash.complete('//c')))
-    assert.is_nil((slash.complete('/new x')))
+    assert.is_nil((slash.complete('/sessions x')))
   end)
 
   it('works as the omnifunc of the input buffer', function()

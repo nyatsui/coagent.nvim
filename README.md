@@ -336,7 +336,7 @@ input history (`<C-p>`/`<C-n>`) like normal prompts.
 | `/config [get\|set\|unset\|edit\|path ...]` / `/update-config <request>` | Show and change settings (saved in `settings_file`, applied at once) / change them in plain words (one request; you apply or cancel; see "Changing settings from inside Neovim") |
 | `/delegate <kind> [instruction]\|list\|open\|cancel\|detach` | Bundle a subtask for another chat you operate (see "Delegating subtasks"; local, no request) |
 | `/receive [id] [paste\|clipboard\|files]` | Import its result: pasted text and/or downloaded files, every change reviewed |
-| `/new` / `/sessions` | New session / saved sessions |
+| `/new [default]` / `/sessions` | New session: it keeps the model, roles, final check, supervision, effort and permission mode of the current one (not the conversation); `/new default` starts from the config / saved sessions |
 | `/model [role]` | Pick a model (`builder` / `explorer` / `advisor`) |
 | `/mode [mode]` / `/roles [preset]` | Switch approval mode (`supervised` / `readonly` / `auto` / `judge`) / model roles |
 | `/judge [log [n]\|clear]` | Judge mode: list the judge's decisions in this session (command, verdict, risk, reason, outcome) / forget cached verdicts (see "Judge mode"; local, no request) |
@@ -1254,7 +1254,7 @@ terminal = {
 | `:CoagentFinalCheck [name] [task]` | How a result is checked before a task finishes: `off` / `gate` / `critic` / `default` (same as `/finalcheck`; a range attaches the selection) |
 | `:CoagentStrong <task>` | Run one task with the strong model as the builder (same as `/strong`; a range attaches the selection) |
 | `:CoagentEffort [level] [role]` | Reasoning effort: `minimal` / `low` / `medium` / `high` / `off` / `default` (same as `/effort`) |
-| `:CoagentNew` / `:CoagentSessions` | New session / saved sessions |
+| `:CoagentNew [default]` / `:CoagentSessions` | New session (same as `/new`) / saved sessions |
 | `:CoagentLayout [vertical\|float]` | Switch layout |
 | `:CoagentBudget [tokens\|credits\|session\|month] <n\|off\|default>` | Token budgets (same as `/budget`) |
 | `:CoagentWidth [N\|N%\|+N\|-N\|reset]` | Panel width: columns, percent of the terminal, relative, or back to `ui.width`. Remembered (also when you resize by hand) |

@@ -2079,13 +2079,103 @@ function M.receive(arg, opts)
   return true
 end
 
-function M.new_session()
+--- What a new session takes over from the current one: the model, the roles
+--- the session changed (preset, role models, supervision, final check,
+--- reasoning effort) and the permission mode. Never the conversation, plan,
+--- usage or task state.
+---@param c Coagent.Controller
+---@return {model:string?, roles:table?, mode:string?, root:string, auto_enabled:boolean, judge_enabled:boolean}
+function M._carry(c)
+  local roles = c.session.roles
+  return {
+    model = c.session.model,
+    roles = roles and next(roles) and vim.deepcopy(roles) or nil,
+    mode = c.permissions.mode,
+    root = c.ws.root,
+    auto_enabled = c.permissions.auto_enabled,
+    judge_enabled = c.permissions.judge_enabled,
+  }
+end
+
+local ROLE_LABELS = { preset = 'roles', final_check = 'final check', supervision = 'supervision', reasoning_effort = 'effort' }
+
+--- Apply what M._carry kept to a fresh controller; one line naming what
+--- differs from the config (nil when nothing does).
+---@param n Coagent.Controller
+---@param keep table
+---@return string? line
+function M._apply_carry(n, keep)
+  local kept = {}
+  local cfg = n.config
+  if keep.model and keep.model ~= cfg.model then
+    n:set_model(keep.model)
+    table.insert(kept, 'model ' .. keep.model)
+  end
+  if keep.roles then
+    n.session.roles = keep.roles
+    local croles = cfg.roles or {}
+    local keys = vim.tbl_keys(keep.roles)
+    table.sort(keys, function(a, b)
+      local order = { preset = 1, final_check = 2, supervision = 3, reasoning_effort = 4 }
+      local oa, ob = order[a] or 9, order[b] or 9
+      if oa ~= ob then
+        return oa < ob
+      end
+      return a < b
+    end)
+    for _, k in ipairs(keys) do
+      local v = keep.roles[k]
+      if type(v) ~= 'table' and v ~= croles[k] and not (k == 'preset' and v == 'single' and croles.preset == nil) then
+        table.insert(kept, (ROLE_LABELS[k] or k:gsub('_', ' ')) .. ' ' .. tostring(v))
+      end
+    end
+    n.events:emit('roles', n:roles())
+  end
+  local perms = n.permissions
+  if keep.mode and keep.mode ~= perms.mode then
+    -- auto / judge enabled by hand count for the same workspace only
+    if keep.root == n.ws.root then
+      perms.auto_enabled = perms.auto_enabled or keep.auto_enabled
+      perms.judge_enabled = perms.judge_enabled or keep.judge_enabled
+    end
+    local ok = perms:set_mode(keep.mode)
+    if ok then
+      table.insert(kept, 'mode ' .. perms.mode)
+    else
+      n:notice('warn', string.format('Permission mode %s is not enabled for %s; this session uses %s (:CoagentMode).', keep.mode, n.ws.root, perms.mode))
+    end
+    n.session.mode = perms.mode
+  end
+  if #kept == 0 then
+    return nil
+  end
+  return 'Kept from the previous session: ' .. table.concat(kept, ', ') .. ' (/new default starts from the config).'
+end
+
+--- `/new [default]`: a new session. It keeps the model, roles, final check,
+--- supervision, effort and permission mode of the current one; `default`
+--- starts from the config.
+---@param arg string?
+function M.new_session(arg)
   local c = state.controller
   if c and c:busy() then
     notify('stop the running task first', vim.log.levels.WARN)
     return
   end
-  set_controller(build())
+  arg = vim.trim(arg or '')
+  if arg ~= '' and arg ~= 'default' then
+    notify('/new: unknown argument ' .. arg .. " (nothing, or 'default' to start from the config)", vim.log.levels.WARN)
+    return
+  end
+  local keep = c and arg == '' and M._carry(c) or nil
+  local n = set_controller(build())
+  local line = keep and M._apply_carry(n, keep)
+  if line then
+    n:notice('info', line)
+  end
+  if state.view then
+    state.view:refresh_bar()
+  end
   M.open()
 end
 

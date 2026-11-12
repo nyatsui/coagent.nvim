@@ -325,7 +325,7 @@ vim.keymap.set('x', '<leader>ai', ':CoagentInline<CR>', { desc = 'Coagent inline
 | `/config [get\|set\|unset\|edit\|path ...]` / `/update-config <依頼>` | 設定の表示と変更（`settings_file` に保存してすぐ反映）/ 普通の言葉で設定を変更（1 リクエスト。適用か取り消しを選ぶ。下記「Neovim の中から設定を変更」） |
 | `/delegate <種類> [指示]\|list\|open\|cancel\|detach` | 手で操作する別のチャット向けにサブタスクのバンドルを作る（「サブタスクを別のチャットに任せる」参照。ローカル、リクエストなし） |
 | `/receive [id] [paste\|clipboard\|files]` | 結果を取り込む: 貼り付けたテキストやダウンロードしたファイル。変更はすべてレビュー付き |
-| `/new` / `/sessions` | 新規セッション / 保存済みセッション一覧 |
+| `/new [default]` / `/sessions` | 新規セッション: 今のセッションのモデル・役割分担・final check・supervision・effort・承認モードを引き継ぐ（会話は引き継がない）。`/new default` は設定値から始める / 保存済みセッション一覧 |
 | `/model [role]` | モデル選択（`builder` / `explorer` / `advisor`） |
 | `/mode [mode]` / `/roles [preset]` | 承認モード（`supervised` / `readonly` / `auto` / `judge`）/ 役割分担の切替 |
 | `/judge [log [n]\|clear]` | judge モード: このセッションの判定一覧（コマンド・判定・リスク・理由・結果）/ キャッシュした判定を忘れる（「judge モード」参照。ローカル処理、リクエストなし） |
@@ -1210,7 +1210,7 @@ terminal = {
 | `:CoagentFinalCheck [name] [task]` | タスクを終える前の確認: `off` / `gate` / `critic` / `default`（`/finalcheck` と同じ。範囲指定で選択範囲を添付） |
 | `:CoagentStrong <task>` | 強いモデルを作業担当にして 1 タスク実行（`/strong` と同じ。範囲指定で選択範囲を添付） |
 | `:CoagentEffort [level] [role]` | 推論の強さ: `minimal` / `low` / `medium` / `high` / `off` / `default`（`/effort` と同じ） |
-| `:CoagentNew` / `:CoagentSessions` | 新規セッション / 保存済みセッション一覧 |
+| `:CoagentNew [default]` / `:CoagentSessions` | 新規セッション（`/new` と同じ）/ 保存済みセッション一覧 |
 | `:CoagentLayout [vertical\|float]` | レイアウト切替 |
 | `:CoagentBudget [tokens\|credits\|session\|month] <n\|off\|default>` | トークン上限（`/budget` と同じ） |
 | `:CoagentWidth [N\|N%\|+N\|-N\|reset]` | パネルの幅: 列数・端末幅に対する % ・相対・`ui.width` に戻す。手で変えた幅も含めて記憶します |
