@@ -932,7 +932,9 @@ function M._finalcheck_text(c)
     local fix = (r.lead or not r.strong_model) and (author .. ' repairs the draft itself') or (r.strong_model .. ' takes over')
     return string.format('Final check: gate. %s checks the draft of %s (1 request, about 3-8k input tokens); when it fails, %s.', r.gate_model, author, fix) .. adv
   elseif r.final_check == 'critic' then
-    return string.format('Final check: critic. %s reviews the draft of %s (read-only, 1-5 requests of about 3-8k input tokens); the author revises once.', FinalCheck.critic_for(r, author), author) .. adv
+    local critic = FinalCheck.critic_for(r, author)
+    local own = critic == author and ' (its own model, in a fresh context without its history)' or ''
+    return string.format('Final check: critic. %s reviews the draft of %s%s (read-only, 1-5 requests of about 3-8k input tokens); the author revises once.', critic, author, own) .. adv
   end
   return 'Final check: off. ' .. require('coagent.agent.roles').FINAL_CHECK_DESCRIPTION.off .. '.'
 end

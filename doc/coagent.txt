@@ -1452,10 +1452,14 @@ any final check. `/finalcheck <name>` changes it for the session,
           pattern Cascade.)
   critic  A critic with its own history and read-only tools reviews the draft:
           LGTM or numbered points. The author revises once. There is no second
-          review. (Fusion's Critique.) The critic is the first of
-          `roles.critic_model`, the strong model, the lead's and the selected
-          model that did not write the draft. Same-family models tend to share
-          blind spots (a one-time note says so).
+          review. (Fusion's Critique.) The critic is `roles.critic_model` when
+          set, even the author's own model; else the strong model or the
+          lead's that did not write the draft; else the author's own model.
+          It always starts from a fresh context without the author's
+          history, and never falls to a model below the author (the worker's
+          under a lead): a weaker critic misses real faults and raises false
+          ones. Same-family models tend to share blind spots (a one-time note
+          says so).
 
 Combinations:
 

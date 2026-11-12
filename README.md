@@ -1783,7 +1783,7 @@ roles = {
   final_check = 'gate',            -- or 'critic'
   strong_model = 'a strong model', -- gate: who takes over
   gate_model = nil,                -- nil = strong_model, else the lead's
-  critic_model = nil,              -- nil = strong_model, else another model of this session
+  critic_model = nil,              -- nil = strong_model, else the lead's, else the author's own model
 }
 ```
 
@@ -1791,12 +1791,15 @@ roles = {
 |---|---|---|
 | `single`, `explorers` | The strong model takes over | Another model reviews |
 | `advisor`, `full` | The advisor during the task, then the gate instead of its final review | The advisor during the task, then the critic instead of its final review |
-| `lead` | The lead repairs the draft itself | The selected model reviews by default (`roles.critic_model` picks another) |
+| `lead` | The lead repairs the draft itself | `roles.critic_model` reviews; without it, the lead's own model in a fresh context (never the worker's) |
 
 - A task on `/strong` behaves like the `lead` row.
 - The final check runs at most once per task. Short answers without file changes (below `answer_min_chars`, 400) and plans are not
   checked. The gate and the critic cannot `BLOCK`: keep `off` when the advisor may have to stop a step at the very end.
 - Only a missing model stops one from running: `gate` needs a strong model or a lead, `critic` a second model.
+- The critic always starts from a fresh context, without the author's history. `critic_model` is used even when it is the author's own model,
+  and the critic never falls to a model below the author (the worker's under a lead): a weaker critic misses real faults and raises false ones.
+  Best is a critic as strong as the author and of another family.
 - Same-family models tend to share blind spots, so a one-time note appears when the critic and the author are of the same family.
 - Neither changes permissions: the strong model works under the same rules, and the critic's tool calls never ask. Protected files are
   left out of what they read. Models come from your config or session only (`/model strong`, `/model gate`, `/model critic`).

@@ -65,18 +65,30 @@ function M.family(model)
   return m:match('^(%a+)') or m
 end
 
---- The critic for work written by `author`: the first of critic_model, the
---- strong model, the lead's and the selected model that is not the author.
+--- The critic for work written by `author`: `critic_model` when set (even
+--- the author's own model: the critic always starts from a fresh context,
+--- without the author's history); else the strong model or the lead's that
+--- did not write the draft; else the author's own model. Never a model below
+--- the author (the selected one under a lead or a strong model): a weaker
+--- critic misses real faults and raises false ones the author then "fixes".
+--- nil when none of critic_model, strong_model and the lead's is set.
 ---@param roles CopilotAgent.Roles
 ---@param author string
 ---@return string?
 function M.critic_for(roles, author)
-  for _, m in ipairs({ roles.critic_model or false, roles.strong_model or false, roles.lead_model or false, roles.builder_model }) do
-    if m and m ~= author then
-      return m
+  if roles.critic_model then
+    return roles.critic_model
+  end
+  local own
+  for _, m in ipairs({ roles.strong_model or false, roles.lead_model or false }) do
+    if m then
+      if m ~= author then
+        return m
+      end
+      own = m
     end
   end
-  return nil
+  return own
 end
 
 --- What is missing for `name` (nil: it can run). Only models can be missing:
@@ -88,7 +100,7 @@ function M.problem(roles, name)
   if name == 'gate' and not (roles.strong_model or roles.lead_model) then
     return string.format('no stronger model to take over: set roles.strong_model to a model other than the selected one (%s)', roles.builder_model)
   elseif name == 'critic' and not M.critic_for(roles, roles.lead_model or roles.builder_model) then
-    return string.format('no second model: set roles.critic_model or roles.strong_model to a model other than the selected one (%s)', roles.builder_model)
+    return string.format('no critic model: set roles.critic_model or roles.strong_model (best a model other than the selected one, %s)', roles.builder_model)
   end
   return nil
 end
@@ -252,7 +264,11 @@ local function critic(ctrl, gen, answer, roles)
   end
   if M.family(model) == M.family(author) and not ctrl.critic_family_noted then
     ctrl.critic_family_noted = true
-    ctrl:notice('info', string.format('The critic %s and the author %s are of the same model family, so they tend to share blind spots. roles.critic_model picks another one.', model, author))
+    if model == author then
+      ctrl:notice('info', string.format('The critic is the author\'s own model %s, reviewing in a fresh context without the author\'s history. Another model (best another family) also catches its blind spots: roles.critic_model picks one.', model))
+    else
+      ctrl:notice('info', string.format('The critic %s and the author %s are of the same model family, so they tend to share blind spots. roles.critic_model picks another one.', model, author))
+    end
   end
   local reviewer = Advisor.new(ctrl, {
     who = 'Critic', role = 'critic', model = model, prompt = M.CRITIC_PROMPT, step_limit = M.CRITIC_STEP_LIMIT, opts = opts,

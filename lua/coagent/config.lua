@@ -60,7 +60,7 @@ local defaults = {
     -- Either one replaces the advisor's final review (BEFORE_DONE / ANSWER).
     final_check = 'off',
     gate_model = nil, -- nil = strong_model, else the lead's
-    critic_model = nil, -- nil = strong_model, else another model of this session; best another family
+    critic_model = nil, -- nil = strong_model, else the lead's, else the author's own (fresh context); best another family
     gate = { max_brief_bytes = 24000, answer_min_chars = 400 }, -- shorter answers without changes are not checked
     critic = { max_brief_bytes = 24000, answer_min_chars = 400, tools = 'read', max_tool_steps = 4, max_tool_result_bytes = 4000 },
     -- Per-role reasoning effort (nil = use `reasoning_effort`; 'off' = never send).
