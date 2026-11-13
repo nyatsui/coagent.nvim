@@ -533,7 +533,10 @@ function Controller:submit(text, opts)
       user_item.ledger = rev
       self:_update(user_item)
     end
-    table.insert(self.session.messages, { role = 'user', content = content, from_user = true, user_text = text })
+    -- what the user typed (not a text the agent generated, like a plan
+    -- approval): summaries keep it word for word
+    local own = not opts.generated
+    table.insert(self.session.messages, { role = 'user', content = content, from_user = own or nil, user_text = own and text or nil })
     self:_loop(gen)
   end, {
     planning = planning ~= nil,
@@ -635,6 +638,7 @@ function Controller:plan_approve(opts)
     input = (opts and opts.input) or '/plan approve',
     plan_approved = { reviewed = plan.reviewed, start = plan.start },
     extra = extra,
+    generated = true, -- not typed by the user: summaries do not keep it as theirs
   })
   if not ok then
     return false, err

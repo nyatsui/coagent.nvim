@@ -43,6 +43,13 @@ describe('summary helpers', function()
     local some = context.pick_user_messages(msgs, #msgs, 1000)
     assert.are.same({ { i = 22 } }, some)
     assert.are.same({}, context.pick_user_messages(msgs, #msgs, 0))
+    -- a repeated text (a /loop's prompt each round) is kept once: the newest
+    local loop = { { role = 'user', content = 'task', from_user = true } }
+    for _ = 1, 3 do
+      table.insert(loop, { role = 'user', content = 'run it', from_user = true, user_text = 'run it' })
+      table.insert(loop, { role = 'assistant', content = 'ok' })
+    end
+    assert.are.same({ { i = 6 } }, context.pick_user_messages(loop, #loop, 20000))
   end)
 
   it('sends the kept messages verbatim with the summary, without their attachments', function()

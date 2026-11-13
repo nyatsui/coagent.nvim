@@ -621,7 +621,8 @@ end
 --- after the first user message up to `upto`, newest first while they fit
 --- whole in `max_tokens`. The walk stops at the first one that does not fit:
 --- that one and every older one go into the summary instead (never a cut
---- message that would look complete). Chronological order.
+--- message that would look complete). A text repeated (a /loop's prompt)
+--- is kept once, its newest copy. Chronological order.
 ---@param messages table[]
 ---@param upto integer
 ---@param max_tokens integer
@@ -632,12 +633,15 @@ function M.pick_user_messages(messages, upto, max_tokens)
   if not fu or left <= 0 then
     return kept
   end
+  local seen = {}
   for i = math.min(upto, #messages), fu + 1, -1 do
     local text = M.user_text(messages[i])
-    if text then
+    -- the same text again (a /loop's prompt each round): the newest is enough
+    if text and not seen[text] then
       if #text > left then
         break
       end
+      seen[text] = true
       table.insert(kept, 1, { i = i })
       left = left - #text
     end
