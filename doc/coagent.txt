@@ -326,9 +326,9 @@ Commands go into the input history like prompts.
 
   /compact            Elide every long tool output before the last 8
                       messages now. Local only: no request.
-  /compact summary    Ask the current model ONCE to summarize the older
-                      turns into one message (one model call, billed by
-                      tokens; <C-c>
+  /compact summary    Ask the model ONCE to summarize the older turns
+                      into one message; your own messages stay word for
+                      word (one model call, billed by tokens; <C-c>
                       cancels it).
   /plan [task]        Plan first (|coagent-plan|). "/plan approve" and
                       "/plan discard" act on the plan waiting for
@@ -412,12 +412,31 @@ shortening is not enough, the older turns are summarized with ONE request
 during the task (at most 10 per task) instead of being dropped; only if
 that fails are the oldest turns dropped, with a note naming their saved
 outputs.
+
+A summary (auto or /compact summary) keeps, like Codex's compaction:
+- the first message (the task) and the last 8 messages as they are
+- your own later messages word for word beside it (what you typed, not the
+  attached files): newest first, whole, up to `context.keep_user_tokens`
+  and a quarter of the context budget. None is cut: from the first that
+  does not fit whole, it and the older ones go into the summary in full
+- a handoff in sections: goal and constraints, progress, decisions and dead
+  ends, files, commands and results (with recall_output ids), current work,
+  next steps. About 15% of what it covers, at least 800 tokens, at most
+  `context.summary_max_tokens`: it is re-sent with every later request.
+The model that wrote the conversation writes it (the lead's under a lead).
+`context.auto_compact_tokens` also summarizes at a task's first request when
+the session is over that many tokens, to save tokens long before the budget
+forces it (one summary request and one cache miss; worth it when the same
+work goes on; for a separate task `/new` is cheaper).
 >lua
   context = {
     archive_outputs = true,
     archive_days = 30,     -- delete outputs of sessions untouched this long
     archive_dir = nil,     -- nil = stdpath('state')/coagent/outputs
     auto_summary = true,   -- false: drop the oldest turns instead
+    auto_compact_tokens = nil,  -- summarize past this at a task's start
+    summary_max_tokens = 4000,  -- the summary's length cap
+    keep_user_tokens = 20000,   -- your messages kept word for word
   }
 <
 

@@ -605,11 +605,52 @@ local function first_user(messages)
   end
 end
 
---- Messages actually sent: the session history with the turns covered by a
---- `/compact summary` replaced by one summary message right after the first
---- user message (the task). Returns `messages` itself when there is none.
+--- The text the user typed for a message they sent (a task or a follow-up),
+--- without the attachments resolved from it; nil for messages the agent
+--- added (notes, reviews, results). Messages saved before this was recorded
+--- carry no flag and count as the agent's.
+---@param m table
+---@return string?
+function M.user_text(m)
+  if m.role == 'user' and m.from_user then
+    return m.user_text or m.content or ''
+  end
+end
+
+--- The user's own messages a summary keeps verbatim (like Codex): those
+--- after the first user message up to `upto`, newest first while they fit
+--- whole in `max_tokens`. The walk stops at the first one that does not fit:
+--- that one and every older one go into the summary instead (never a cut
+--- message that would look complete). Chronological order.
 ---@param messages table[]
----@param summary {upto:integer, content:string}?
+---@param upto integer
+---@param max_tokens integer
+---@return {i:integer}[]
+function M.pick_user_messages(messages, upto, max_tokens)
+  local fu = first_user(messages)
+  local kept, left = {}, math.max(0, max_tokens or 0) * 3.5
+  if not fu or left <= 0 then
+    return kept
+  end
+  for i = math.min(upto, #messages), fu + 1, -1 do
+    local text = M.user_text(messages[i])
+    if text then
+      if #text > left then
+        break
+      end
+      table.insert(kept, 1, { i = i })
+      left = left - #text
+    end
+  end
+  return kept
+end
+
+--- Messages actually sent: the session history with the turns covered by a
+--- summary replaced by one message right after the first user message (the
+--- task): the user's messages from those turns verbatim (`summary.kept`),
+--- then the summary. Returns `messages` itself when there is none.
+---@param messages table[]
+---@param summary {upto:integer, content:string, kept:{i:integer}[]?}?
 ---@return table[]
 function M.with_summary(messages, summary)
   local fu = first_user(messages)
@@ -620,7 +661,19 @@ function M.with_summary(messages, summary)
   for i = 1, fu do
     table.insert(out, messages[i])
   end
-  table.insert(out, { role = 'user', content = M.SUMMARY_PREFIX .. summary.content .. '\nRe-read files if you need their current content.]' })
+  local own = {}
+  for _, k in ipairs(summary.kept or {}) do
+    local text = messages[k.i] and M.user_text(messages[k.i])
+    if text and k.i > fu and k.i <= summary.upto then
+      table.insert(own, '--- user message ---\n' .. text)
+    end
+  end
+  local head = M.SUMMARY_PREFIX
+  if #own > 0 then
+    head = '[Context note: the earlier conversation was summarized to save context. '
+      .. 'The user\'s messages from it, verbatim (oldest first):\n\n' .. table.concat(own, '\n\n') .. '\n\nSummary:\n'
+  end
+  table.insert(out, { role = 'user', content = head .. summary.content .. '\nRe-read files if you need their current content.]' })
   for i = summary.upto + 1, #messages do
     table.insert(out, messages[i])
   end
@@ -661,13 +714,21 @@ end
 
 --- Plain-text transcript of messages (from, upto] for the summarizer. Tool
 --- calls are flattened into text so the request needs no tool definitions.
+--- The user's messages in `kept` stay verbatim beside the summary, so the
+--- transcript shows only their start, marked as kept; their other messages
+--- appear whole (what they typed), for the summary to carry.
 ---@param messages table[]
 ---@param from integer
 ---@param upto integer
 ---@param prev_summary string?
----@return string
 ---@param archive (fun(text:string):string?)? saves tool outputs (their ids appear in the transcript)
-function M.transcript(messages, from, upto, prev_summary, archive)
+---@param kept {i:integer}[]?
+---@return string
+function M.transcript(messages, from, upto, prev_summary, archive, kept)
+  local is_kept = {}
+  for _, k in ipairs(kept or {}) do
+    is_kept[k.i] = true
+  end
   local parts = {}
   if prev_summary then
     table.insert(parts, '## Earlier summary\n' .. prev_summary)
@@ -676,6 +737,11 @@ function M.transcript(messages, from, upto, prev_summary, archive)
     local m = messages[i]
     if m.role == 'tool' then
       table.insert(parts, '## tool result\n' .. M.elide(m.content or '', archive))
+    elseif is_kept[i] then
+      table.insert(parts, '## user (kept verbatim beside the summary: do not restate it)\n' .. util.clip(M.user_text(m) or '', 300))
+    elseif M.user_text(m) then
+      -- not kept verbatim: whole, so the summary can carry every instruction
+      table.insert(parts, '## user (NOT kept: carry its instructions into the summary)\n' .. M.user_text(m))
     else
       local text = '## ' .. m.role .. '\n' .. util.clip(m.content or '', 4000)
       for _, tc in ipairs(m.tool_calls or {}) do

@@ -322,7 +322,7 @@ input history (`<C-p>`/`<C-n>`) like normal prompts.
 | Command | Description |
 |---|---|
 | `/compact` | Compact now: elide all long tool outputs older than the last 8 messages (local, no request) |
-| `/compact summary` | Have the current model summarize older turns once and replace them with one message (calls the model once, so **its tokens are billed**) |
+| `/compact summary` | Have the model summarize older turns once and replace them with one message; your own messages stay word for word (calls the model once, so **its tokens are billed**) |
 | `/plan [task\|approve\|discard]` | Plan first: investigate read-only and write a plan to approve / revise / discard (see "Plan first") |
 | `/go <task>` | Run a task without the plan phase (with `plan.default = true`) |
 | `/strong <task>` | Run one task with the strong model (`roles.strong_model`, else the advisor model) as the builder; the next task is back on the selected model (see "Supervision") |
@@ -1932,15 +1932,29 @@ opts = {
   and kept until the limit is exceeded again, so the beginning of what is sent stays the same and provider prompt caches keep
   hitting (Copilot bills by tokens). After compaction the winbar shows `compacted` (`*` when narrow)
 - If shortening old outputs is not enough, the older turns are **summarized with one request** (like `/compact summary`,
-  automatically, during the task) instead of being cut: the summary keeps the user's instructions, decisions, files,
-  commands with results and metrics, and the `recall_output` ids of outputs that matter. Each summary needs enough new
-  turns to summarize (at most 10 per task). Only when the summary fails are the oldest turns dropped, leaving a note with
+  automatically, during the task) instead of being cut. Each summary needs enough new turns to summarize (at most 10
+  per task). Only when the summary fails are the oldest turns dropped, leaving a note with
   their saved outputs. `context.auto_summary = false` goes back to dropping; `context.archive_outputs = false` saves nothing;
   saved outputs of sessions untouched for `context.archive_days` (30) are deleted
 - `/compact` compacts by hand without waiting for the limit (moves the boundary to just before the last 8 messages and saves
   it; no request). `/compact summary` summarizes older turns with one request and sends that single summary from then on.
   Both change the beginning of what is sent, so **the next request misses the prompt cache once**. The session history
   itself is unchanged (elision / replacement happens only when sending). Not available while the agent works
+- **What a summary keeps** (auto or `/compact summary`, like Codex's compaction):
+  - Sent as they are: your first message (the task) and the last 8 messages.
+  - Your own later messages, **word for word** beside the summary (what you typed, without the attached file contents):
+    newest first, whole, up to `context.keep_user_tokens` (20k) and a quarter of the context budget. A message is never
+    cut: from the first one that does not fit whole, it and the older ones go into the summary in full, and the summary
+    carries their instructions. Instructions written elsewhere and sent in several parts are not paraphrased away.
+  - The summary is a handoff for the next request, in sections: goal and constraints, progress, decisions and dead ends,
+    files, commands and results (with `recall_output` ids), current work, next steps.
+  - Its length: about 15% of what it covers, at least 800 tokens, at most `context.summary_max_tokens` (4000). It is
+    re-sent with every later request, so the cap is a cost; your messages carry the instructions, so it need not. A reply
+    longer than 1.5x the cap keeps its beginning and end.
+  - It is written by the model that wrote the conversation (the lead's under a lead).
+- **Summarize to save tokens.** `context.auto_compact_tokens` (off) also summarizes at a task's first request when the
+  session is over that many tokens, long before the budget forces it. It costs one summary request and one cache miss;
+  every later request is then shorter, so it pays when the same work goes on. For a separate task `/new` is cheaper
 
 ## Saved sessions
 

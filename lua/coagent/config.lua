@@ -188,6 +188,23 @@ local defaults = {
     -- with ONE request (like /compact summary) instead of truncating or
     -- dropping them. false: drop the oldest turns (a short note remains).
     auto_summary = true,
+    -- Also summarize at a task's first request when the session's context is
+    -- over this many tokens (to save tokens, long before the budget forces
+    -- it). One summary request and one cache miss, then every later request
+    -- is shorter: worth it when the same work goes on. nil = off.
+    auto_compact_tokens = nil,
+    -- A summary (auto or /compact summary) is a handoff: goal and
+    -- constraints, progress, decisions and dead ends, files, commands and
+    -- results, current work, next steps. About 15% of what it covers, at
+    -- least 800 tokens, at most summary_max_tokens: it is re-sent with every
+    -- later request.
+    summary_max_tokens = 4000,
+    -- Your own messages in the summarized turns stay word for word beside the
+    -- summary (newest first, at most this many tokens and a quarter of the
+    -- context budget, whole: from the first that does not fit, it and the
+    -- older ones go into the summary; the first message always stays).
+    -- 0 = summary only.
+    keep_user_tokens = 20000,
   },
 
   -- Settings changed from inside Neovim (/config set, /update-config,
