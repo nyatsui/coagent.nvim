@@ -652,3 +652,88 @@ describe('judge: scripts the agent wrote', function()
     assert.is_truthy(Judge.PROMPT:find('unchanged since the last commit is the developer', 1, true))
   end)
 end)
+
+describe('judge: what it is shown', function()
+  local function user_block(input)
+    local id = input:match('<<<USER (%w+)>>>')
+    return input:match('<<<USER ' .. id .. '>>>\n(.-)\n<<<END USER ' .. id .. '>>>'), id
+  end
+
+  it('sends a long request and a long script whole (budgets of their own)', function()
+    local root = h.workspace({})
+    local body = {}
+    for i = 1, 400 do
+      table.insert(body, string.format('x%d = %d  # line %d of the training script', i, i, i))
+    end
+    body[200] = 'MIDDLE_OF_SCRIPT = True'
+    local script_text = table.concat(body, '\n') .. '\n' -- ~16 KB
+    local request = 'Train the model as follows.\n' .. string.rep('Keep the data split fixed. ', 120) .. 'MIDDLE_OF_REQUEST\n' .. string.rep('Report the metrics. ', 120)
+    local r = build(root, {
+      { tool_calls = { { name = 'write_file', arguments = { path = 'train.py', content = script_text } } } },
+      run_cmd('python3 train.py'),
+      { content = 'ok' },
+    }, { ALLOW })
+    r.c:submit(request)
+    wait_done(r)
+    local input = judge_requests(r.backend)[1].messages[1].content
+    assert.is_truthy((user_block(input)):find('MIDDLE_OF_REQUEST', 1, true))
+    assert.is_truthy(input:find('MIDDLE_OF_SCRIPT = True', 1, true))
+    assert.is_nil(input:find('bytes omitted', 1, true))
+  end)
+
+  it('shares the script budget: small scripts whole, the large one shortened', function()
+    local root = h.workspace({ ['a.sh'] = '#!/bin/sh\necho small\n', ['big.py'] = string.rep('print("big")\n', 4000) })
+    local r = build(root, { run_cmd('sh a.sh && python3 big.py'), { content = 'ok' } }, { ALLOW }, { judge = { max_script_bytes = 6000 } })
+    r.c:submit('run both')
+    wait_done(r)
+    local input = judge_requests(r.backend)[1].messages[1].content
+    assert.is_truthy(input:find('echo small', 1, true))
+    assert.is_truthy(input:find('bytes omitted', 1, true))
+    assert.is_true(#input < 6000 + 12000 + 8000 + 4000)
+  end)
+
+  it('judge.instructions reach the judge as the developer\'s policy, outside DATA; changing them judges again', function()
+    local root = h.workspace({})
+    local r = build(root, { run_cmd('python3 train.py'), run_cmd('python3 train.py'), { content = 'ok' } }, { ALLOW }, {
+      judge = { instructions = { 'Running python scripts for training is fine.', 'Writing under outputs/ is fine.' } },
+      limits = { max_identical_calls = 10 },
+    })
+    r.c:submit('train')
+    h.wait(function()
+      return #judge_requests(r.backend) >= 1
+    end)
+    -- the second identical command after a rule change is judged again
+    r.c.config.judge.instructions = 'Only training scripts are fine.'
+    wait_done(r)
+    local jr = judge_requests(r.backend)
+    assert.are.equal(2, #jr)
+    local input = jr[1].messages[1].content
+    local id = input:match('<<<POLICY (%w+)>>>')
+    assert.is_truthy(id)
+    local policy = input:match('<<<POLICY ' .. id .. '>>>\n(.-)\n<<<END POLICY ' .. id .. '>>>')
+    assert.are.equal('- Running python scripts for training is fine.\n- Writing under outputs/ is fine.', policy)
+    assert.is_truthy(Judge.PROMPT:find('DEVELOPER POLICY', 1, true))
+    assert.is_nil(Judge.instructions({ ' ', '' }))
+    assert.is_nil(Judge.instructions(''))
+    -- none set: no policy block
+    local r2 = build(root, { run_cmd('python3 train.py'), { content = 'ok' } }, { ALLOW })
+    r2.c:submit('train')
+    wait_done(r2)
+    assert.is_nil(judge_requests(r2.backend)[1].messages[1].content:find('<<<POLICY', 1, true))
+  end)
+
+  it('after /plan approve, the request is the original one plus the approved plan', function()
+    local root = h.workspace({})
+    local plan = '## Steps\n1. run train.py with seed 3\n## Verification\nread the log'
+    local r = build(root, { { content = plan }, run_cmd('python3 train.py --seed 3'), { content = 'ok' } }, { ALLOW })
+    assert(r.c:plan('train the model with seed 3'))
+    wait_done(r)
+    r.done = nil
+    assert(r.c:plan_approve())
+    wait_done(r)
+    local request = user_block(judge_requests(r.backend)[1].messages[1].content)
+    assert.is_truthy(request:find('train the model with seed 3', 1, true), request)
+    assert.is_truthy(request:find('run train.py with seed 3', 1, true), request)
+    assert.is_nil(request:find('Plan approved', 1, true), request)
+  end)
+end)

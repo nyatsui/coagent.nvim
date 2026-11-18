@@ -411,7 +411,18 @@ local defaults = {
     timeout_ms = 15000, -- no answer in time -> ask
     workspaces = {}, -- absolute paths where judge mode may be enabled (auto.workspaces count too)
     cache = true, -- remember verdicts per (command, cwd) for the session
-    max_context_bytes = 12000, -- request, notes, recent actions and scripts sent to the judge
+    max_context_bytes = 12000, -- the action, command, notes and recent actions sent to the judge
+    -- Budgets of their own: a request cut in the middle, or a script the judge
+    -- cannot see whole, makes it ask. Scripts are sent only for commands that
+    -- run them, each whole while they fit (about +7k tokens at most).
+    max_request_bytes = 8000, -- your request (with an approved /plan: the plan too)
+    max_script_bytes = 24000, -- the workspace scripts the command runs
+    -- Your standing rules for the judge (a string or a list of lines), e.g.
+    --   { 'Running python scripts in src/ and scripts/ for training or evaluation is fine.',
+    --     'Writing under outputs/ and runs/ is fine.' }
+    -- Only from your config: repository files never set them. They cannot
+    -- widen anything past the hard rules (those never reach the judge).
+    instructions = nil,
     -- After this many 'ask' verdicts in a row (no judge allow and no approval
     -- of yours in between) the judge pauses: commands ask you directly until
     -- you approve one. 0 = never pause.
@@ -825,6 +836,9 @@ function M.setup(opts)
   end
   if opts and opts.judge and opts.judge.allowed_paths then
     M.options.judge.allowed_paths = opts.judge.allowed_paths
+  end
+  if opts and opts.judge and opts.judge.instructions then
+    M.options.judge.instructions = opts.judge.instructions
   end
   if opts and opts.roles and opts.roles.advisor and opts.roles.advisor.critical_globs then
     M.options.roles.advisor.critical_globs = opts.roles.advisor.critical_globs

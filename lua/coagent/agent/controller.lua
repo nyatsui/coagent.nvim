@@ -543,6 +543,8 @@ function Controller:submit(text, opts)
     brief_from = brief_from,
     -- the advisor already reviewed the approved plan: no second PLAN checkpoint
     plan_reviewed = approved and approved.reviewed or nil,
+    -- the plan the user approved: the judge reads it with the request
+    approved_plan = approved and approved.text or nil,
     -- a forced skill's allowed-tools also shrink the tool list (fixed for the task)
     skill_tools = skill and skill.tools and vim.deepcopy(skill.tools) or nil,
     skill_names = skill and skill.tools and { skill.name } or nil,
@@ -636,7 +638,7 @@ function Controller:plan_approve(opts)
   end
   local ok, err = self:submit(Controller.PLAN_APPROVED, {
     input = (opts and opts.input) or '/plan approve',
-    plan_approved = { reviewed = plan.reviewed, start = plan.start },
+    plan_approved = { reviewed = plan.reviewed, start = plan.start, text = item and item.text or nil },
     extra = extra,
     generated = true, -- not typed by the user: summaries do not keep it as theirs
   })

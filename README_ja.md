@@ -1324,7 +1324,7 @@ OS サンドボックスが邪魔になる（`bwrap` は GPU を隠す）場面�
   ログはセッションと一緒に保存されます
 - 判定はセッション中 (コマンド, cwd) ごとにキャッシュします（`judge.cache`。`/judge clear` で消去）。承認ダイアログの
   「常に許可」も他のモードと同じく使えます
-- judge が「承認」と判定したコマンドが、許可もあなたの承認も挟まずに `judge.pause_after`（3）回続くと judge は一時停止し、
+- judge が「ask」と判定したコマンドが、許可もあなたの承認も挟まずに `judge.pause_after`（3）回続くと judge は一時停止し、
   あなたがどれかのコマンドを承認するまで、コマンドは直接あなたに確認します（judge へのリクエストもしない）。承認すると
   judge は再開します。judge が聞いてきたコマンドをあなたが承認すると数え直しになるので、承認している限り止まりません。
   `pause_after = 0` で一時停止しません
@@ -1332,6 +1332,17 @@ OS サンドボックスが邪魔になる（`bwrap` は GPU を隠す）場面�
 - `judge.notify_on_allow = true` にすると、確認なしで実行したときにベル（`notify.bell` / `notify.desktop`）を鳴らします
 - `judge.allowed_paths = { '/data', '/scratch' }` で、コマンド引数がそれらの絶対パス（データセットやキャッシュ）を指しても
   固定ルールでは止めず judge の判定に回します。読込・書込ツールには影響しません
+- **judge には丸ごと見せます。** 依頼文が途中で切れていたり、スクリプトの中身が見えなかったりすると judge は ask するので、
+  それぞれに専用の枠を設けています。依頼文は `judge.max_request_bytes`（8 KB）まで、コマンドが実行するワークスペースの
+  スクリプトは `judge.max_script_bytes`（24 KB）までです（入りきる限り丸ごと。入りきらなければ小さいものは丸ごと、残りを短縮）。
+  スクリプトはそれを実行するコマンドのときだけ送ります（judge 1 回あたり最大で約 +7k tokens）。`/plan approve` のあとは、
+  承認の定型文ではなく、元の依頼と承認したプランを依頼文として渡します
+- **常設のルール: `judge.instructions`**（文字列か、行のリスト）。例:
+  `{ 'Running python scripts in src/ and scripts/ for training or evaluation is fine.', 'Writing under outputs/ is fine.' }`。
+  judge はあなた自身の方針として従います。設定できるのはあなたの config だけで、リポジトリのファイル（AGENTS.md など）は
+  使いません。固定ルール（judge には届かない）を広げることはできません
+- judge は、名前を挙げられる具体的な危険があるときに ask します。長時間の実行、GPU、作業ディレクトリ内に多くのファイルを
+  書くこと、知らないツールであることは、実行内容が見えていて依頼に合っていれば、それだけでは理由になりません
 
 **トレードオフ**: judge モードには **OS サンドボックスがありません**（`commands.sandbox` / `sandbox_all` は適用しない）。
 そのため CUDA・GPU・普段の環境がそのまま使えますが、judge が許可したコマンドはユーザー権限のすべてで動きます。judge は
@@ -1411,7 +1422,10 @@ require('coagent').setup({
     timeout_ms = 15000,       -- 時間内に応答がなければ承認に回す
     workspaces = {},          -- ダイアログなしで judge モードにできる場所（auto.workspaces も有効）
     cache = true,             -- セッション中 (コマンド, cwd) ごとに判定を再利用
-    max_context_bytes = 12000, -- judge に送る依頼文・メモ・直近の操作・スクリプトの上限
+    max_context_bytes = 12000, -- judge に送る操作・コマンド・メモ・直近の操作の上限
+    max_request_bytes = 8000, -- 依頼文（/plan approve のあとは承認したプランも）
+    max_script_bytes = 24000, -- コマンドが実行するワークスペースのスクリプト
+    instructions = nil,       -- judge への常設のルール（文字列か、行のリスト）
     pause_after = 3,          -- 承認なしで続いた「承認」判定の回数で一時停止（承認すると再開）。0 = しない
     allowed_paths = {},       -- 例: { '/data/imagenet', '/scratch' }
     notify_on_allow = false,  -- 確認なしで実行したらベル
