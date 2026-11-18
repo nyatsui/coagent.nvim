@@ -7,6 +7,7 @@ local Judge = require('coagent.agent.judge')
 
 local ALLOW = '{"decision": "allow", "risk": "low", "reason": "runs the project\'s training script"}'
 local ASK = '{"decision": "ask", "risk": "medium", "reason": "not clearly part of the task"}'
+local REVIEW = '{"does": "trains the model", "reads": ["data/"], "writes": ["outputs/model.pt"], "deletes": [], "network": [], "runs": [], "secrets": [], "concerns": [], "risk": "low"}'
 
 --- Mock script: builder steps in order; judge requests (role 'judge') get
 --- `judge` answers in order (the last one repeats). An answer is a string
@@ -14,6 +15,9 @@ local ASK = '{"decision": "ask", "risk": "medium", "reason": "not clearly part o
 local function script(builder, judge)
   local bi, ji = 0, 0
   return function(_, _, req)
+    if req.role == 'judge_review' then
+      return { content = REVIEW }
+    end
     if req.role == 'judge' then
       ji = ji + 1
       local a = judge[ji] or judge[#judge]
@@ -611,8 +615,7 @@ describe('judge: scripts the agent wrote', function()
     local id = first:match('<<<DATA command (%w+)>>>')
     local scripts = first:match('<<<DATA scripts ' .. id .. '>>>\n(.-)\n<<<END scripts ' .. id .. '>>>')
     assert.is_truthy(scripts, first)
-    assert.is_truthy(scripts:find('### cleanup.py', 1, true))
-    assert.is_truthy(scripts:find('(new file)', 1, true))
+    assert.is_truthy(scripts:find('### cleanup.py (a new file written by the agent in this session; 2 lines)', 1, true))
     assert.is_truthy(scripts:find('would remove data', 1, true))
     assert.is_truthy(jr[2].messages[1].content:find('print("safe")', 1, true))
     assert.is_truthy(jr[3].messages[1].content:find('### train.py (project file', 1, true))
@@ -643,11 +646,11 @@ describe('judge: scripts the agent wrote', function()
     local function input(i)
       return jr[i].messages[1].content
     end
-    assert.is_truthy(input(1):find('### train.py (project file, unchanged since the last git commit)\nprint("train")', 1, true))
+    assert.is_truthy(input(1):find('### train.py (project file, unchanged since the last git commit; 1 line)\nprint("train")', 1, true))
     assert.is_falsy(input(1):find('### data.csv', 1, true))
     assert.is_truthy(input(2):find('### run.sh (project file with uncommitted changes', 1, true))
     assert.is_truthy(input(2):find('echo changed', 1, true))
-    assert.is_truthy(input(3):find('### new.py (project file not in git)', 1, true))
+    assert.is_truthy(input(3):find('### new.py (project file not in git; 1 line)', 1, true))
     assert.is_truthy(input(4):find('### tool (project file, unchanged', 1, true)) -- a shebang, no extension
     assert.is_truthy(Judge.PROMPT:find('unchanged since the last commit is the developer', 1, true))
   end)
@@ -681,14 +684,18 @@ describe('judge: what it is shown', function()
     assert.is_nil(input:find('bytes omitted', 1, true))
   end)
 
-  it('shares the script budget: small scripts whole, the large one shortened', function()
+  it('shares the script budget: small scripts whole, the large one reviewed in full', function()
     local root = h.workspace({ ['a.sh'] = '#!/bin/sh\necho small\n', ['big.py'] = string.rep('print("big")\n', 4000) })
     local r = build(root, { run_cmd('sh a.sh && python3 big.py'), { content = 'ok' } }, { ALLOW }, { judge = { max_script_bytes = 6000 } })
     r.c:submit('run both')
     wait_done(r)
     local input = judge_requests(r.backend)[1].messages[1].content
     assert.is_truthy(input:find('echo small', 1, true))
-    assert.is_truthy(input:find('bytes omitted', 1, true))
+    -- too long to show: reviewed in full instead of shortened
+    assert.is_nil(input:find('bytes omitted', 1, true))
+    assert.is_truthy(input:find('### big.py', 1, true))
+    assert.is_truthy(input:find('Reviewed IN FULL', 1, true))
+    assert.is_truthy(input:find('- does: trains the model', 1, true))
     assert.is_true(#input < 6000 + 12000 + 8000 + 4000)
   end)
 
@@ -735,5 +742,140 @@ describe('judge: what it is shown', function()
     assert.is_truthy(request:find('train the model with seed 3', 1, true), request)
     assert.is_truthy(request:find('run train.py with seed 3', 1, true), request)
     assert.is_nil(request:find('Plan approved', 1, true), request)
+  end)
+end)
+
+describe('judge: scripts given whole', function()
+  local function lines(n, mark_at, mark)
+    local out = {}
+    for i = 1, n do
+      out[i] = i == mark_at and mark or string.format('value_%d = %d  # setting %d of the experiment', i, i, i)
+    end
+    return table.concat(out, '\n') .. '\n'
+  end
+
+  local function reviews(backend)
+    return vim.tbl_filter(function(q)
+      return q.role == 'judge_review'
+    end, backend.requests)
+  end
+
+  it('a project file the agent changed reaches the judge in full, not only its diff', function()
+    local root = h.workspace({ ['train.py'] = lines(150, 10, 'FAR_FROM_THE_EDIT = 1') }, { git = true })
+    local r = build(root, {
+      { tool_calls = { { name = 'read_file', arguments = { path = 'train.py' } } } },
+      { tool_calls = { { name = 'edit_file', arguments = { path = 'train.py', old_string = 'value_140 = 140', new_string = 'value_140 = 7' } } } },
+      run_cmd('python3 train.py'),
+      { content = 'ok' },
+    }, { ALLOW })
+    r.c:submit('change setting 140 and train')
+    wait_done(r)
+    local input = judge_requests(r.backend)[1].messages[1].content
+    assert.is_truthy(input:find('### train.py (changed by the agent in this session; 150 lines)', 1, true), input)
+    assert.is_truthy(input:find('FAR_FROM_THE_EDIT = 1', 1, true))
+    assert.is_truthy(input:find('value_140 = 7', 1, true))
+    assert.are.equal(0, #reviews(r.backend))
+  end)
+
+  it('a script too long to show is reviewed in full once per content; the judge and the record get the review', function()
+    local root = h.workspace({ ['train.py'] = lines(600, 300, 'MIDDLE = 1') }, { git = true })
+    local r = build(root, {
+      { tool_calls = { { name = 'read_file', arguments = { path = 'train.py' } } } },
+      { tool_calls = { { name = 'edit_file', arguments = { path = 'train.py', old_string = 'value_590 = 590', new_string = 'value_590 = 9' } } } },
+      run_cmd('python3 train.py --seed 1'),
+      run_cmd('python3 train.py --seed 2'),
+      { content = 'ok' },
+    }, { ALLOW }, { judge = { max_script_bytes = 6000 } })
+    r.c:submit('train twice')
+    wait_done(r)
+    -- one review for both commands (same content), two verdicts (other arguments)
+    local rv = reviews(r.backend)
+    assert.are.equal(1, #rv)
+    assert.is_truthy(rv[1].messages[1].content:find('MIDDLE = 1', 1, true), 'the review reads the whole file')
+    assert.is_truthy(rv[1].system_prompt:find('injection attempt', 1, true))
+    local jr = judge_requests(r.backend)
+    assert.are.equal(2, #jr)
+    local input = jr[1].messages[1].content
+    assert.is_truthy(input:find('Reviewed IN FULL', 1, true))
+    assert.is_truthy(input:find('- writes: outputs/model.pt', 1, true))
+    -- its diff too: every change the agent made
+    assert.is_truthy(input:find('+value_590 = 9', 1, true))
+    assert.is_nil(input:find('MIDDLE = 1', 1, true))
+    local items = tool_items(r.c)
+    local cmd = items[#items]
+    assert.are.equal('reviewed in full', cmd.judge.scripts[1].how)
+    assert.are.equal('trains the model', cmd.judge.scripts[1].review.does)
+    assert.is_truthy(Judge.log_text(r.c.session.judge_log):find('scripts: train.py (reviewed in full)', 1, true))
+    assert.is_truthy(r.c.session.role_stats.judge_review)
+  end)
+
+  it('reviews a long script in parts, carrying its notes over', function()
+    local root = h.workspace({})
+    local backend_reviews = {}
+    local r = build(root, {
+      { tool_calls = { { name = 'write_file', arguments = { path = 'gen.py', content = lines(400, 390, 'END_PART = 1') } } } },
+      run_cmd('python3 gen.py'),
+      { content = 'ok' },
+    }, { ALLOW }, { judge = { max_script_bytes = 2000, review_chunk_bytes = 8000 } })
+    r.c:submit('generate')
+    wait_done(r)
+    backend_reviews = reviews(r.backend)
+    assert.is_true(#backend_reviews >= 2, tostring(#backend_reviews))
+    assert.is_truthy(backend_reviews[1].messages[1].content:find('part 1 of', 1, true))
+    assert.is_truthy(backend_reviews[2].messages[1].content:find('notes on the earlier parts', 1, true))
+    assert.is_truthy(backend_reviews[#backend_reviews].messages[1].content:find('END_PART = 1', 1, true))
+    local cmd = tool_items(r.c)[2]
+    assert.is_truthy(cmd.judge.scripts[1].how:find('reviewed in full in %d+ parts'))
+  end)
+
+  it('includes the modules a script imports and the scripts a wrapper calls (not unchanged committed ones)', function()
+    local root = h.workspace({ ['utils.py'] = 'def helper():\n    return 1\n', ['pkg/__init__.py'] = '' }, { git = true })
+    local r = build(root, {
+      { tool_calls = { { name = 'write_file', arguments = { path = 'model.py', content = 'MODEL_CODE = 1\n' } } } },
+      { tool_calls = { { name = 'write_file', arguments = { path = 'pkg/sub.py', content = 'SUB_CODE = 1\n' } } } },
+      { tool_calls = { { name = 'write_file', arguments = { path = 'train.py', content = 'import os, model\nimport utils\nfrom pkg import sub\nprint("train")\n' } } } },
+      { tool_calls = { { name = 'write_file', arguments = { path = 'run.sh', content = '#!/bin/sh\npython3 train.py --epochs 1\n' } } } },
+      { tool_calls = { { name = 'write_file', arguments = { path = 'pkg/run.py', content = 'RUN_MODULE = 1\n' } } } },
+      run_cmd('sh run.sh'),
+      run_cmd('python3 -m pkg.run'),
+      { content = 'ok' },
+    }, { ALLOW })
+    r.c:submit('train')
+    wait_done(r)
+    local jr = judge_requests(r.backend)
+    local first = jr[1].messages[1].content
+    assert.is_truthy(first:find('### run.sh (a new file', 1, true))
+    assert.is_truthy(first:find('### train.py (a new file written by the agent in this session, used by run.sh', 1, true), first)
+    assert.is_truthy(first:find('### model.py (a new file written by the agent in this session, used by train.py', 1, true))
+    assert.is_truthy(first:find('### pkg/sub.py (', 1, true))
+    assert.is_truthy(first:find('SUB_CODE = 1', 1, true))
+    -- the developer's committed module is not needed
+    assert.is_nil(first:find('### utils.py', 1, true))
+    assert.is_truthy(jr[2].messages[1].content:find('### pkg/run.py (a new file', 1, true))
+    assert.is_truthy(jr[2].messages[1].content:find('RUN_MODULE = 1', 1, true))
+  end)
+
+  it('names a script it could not show, and tells the agent what the judge saw when you deny', function()
+    local root = h.workspace({ ['huge.py'] = string.rep('# filler line for a very large generated file\n', 6000) })
+    local r = build(root, { run_cmd('python3 huge.py'), { content = 'ok' } }, { ASK })
+    r.on_approval = function(item)
+      r.c:approve(item.id, { action = 'deny' })
+    end
+    r.c:submit('run it')
+    wait_done(r)
+    local input = judge_requests(r.backend)[1].messages[1].content
+    assert.is_truthy(input:find('### huge.py\nNOT SHOWN (', 1, true), input)
+    local cmd = tool_items(r.c)[1]
+    assert.is_truthy(cmd.judge.scripts[1].how:find('NOT SHOWN', 1, true))
+    assert.is_truthy(Judge.script_lines(cmd.judge.scripts)[1]:find('huge.py: NOT SHOWN', 1, true))
+    -- the agent gets the facts with the denial
+    local tool_msg
+    for _, m in ipairs(r.c.session.messages) do
+      if m.role == 'tool' then
+        tool_msg = m.content
+      end
+    end
+    assert.is_truthy(tool_msg:find('The judge had asked the user about it: not clearly part of the task', 1, true), tool_msg)
+    assert.is_truthy(tool_msg:find('What the judge was shown of the scripts: huge.py (NOT SHOWN', 1, true), tool_msg)
   end)
 end)

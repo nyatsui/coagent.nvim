@@ -1332,11 +1332,21 @@ OS サンドボックスが邪魔になる（`bwrap` は GPU を隠す）場面�
 - `judge.notify_on_allow = true` にすると、確認なしで実行したときにベル（`notify.bell` / `notify.desktop`）を鳴らします
 - `judge.allowed_paths = { '/data', '/scratch' }` で、コマンド引数がそれらの絶対パス（データセットやキャッシュ）を指しても
   固定ルールでは止めず judge の判定に回します。読込・書込ツールには影響しません
-- **judge には丸ごと見せます。** 依頼文が途中で切れていたり、スクリプトの中身が見えなかったりすると judge は ask するので、
-  それぞれに専用の枠を設けています。依頼文は `judge.max_request_bytes`（8 KB）まで、コマンドが実行するワークスペースの
-  スクリプトは `judge.max_script_bytes`（24 KB）までです（入りきる限り丸ごと。入りきらなければ小さいものは丸ごと、残りを短縮）。
-  スクリプトはそれを実行するコマンドのときだけ送ります（judge 1 回あたり最大で約 +7k tokens）。`/plan approve` のあとは、
-  承認の定型文ではなく、元の依頼と承認したプランを依頼文として渡します
+- **judge には丸ごと見せます。** 依頼文が途中で切れていたり、スクリプトの中身が見えなかったりすると judge は ask します:
+  - 依頼文は `judge.max_request_bytes`（8 KB）まで渡します。`/plan approve` のあとは、承認の定型文ではなく、元の依頼と
+    承認したプランを渡します。
+  - スクリプトは、コマンドが実行するファイル、`python -m module`、それらが import するワークスペース内のモジュール、
+    ラッパーが呼ぶスクリプトまで（2 段まで）対象にします。コミット済みで変わっていないモジュールは開発者のコードなので
+    外します。エージェントが書いた・変えたスクリプトは、差分だけでなく全文を渡し、既存ファイルを変えた場合は差分も添えます。
+  - 全文は `judge.max_script_bytes`（24 KB）まで渡します。入りきらないエージェントの（または未コミット・未追跡の）
+    スクリプトは、先に別のリクエストで**全文をレビュー**します（長いものは `judge.review_chunk_bytes` ごとに分割）。
+    何をするか、何を読み・書き・削除し、どこと通信し、何を実行し、どの秘密情報に触れるかをまとめ、judge には短縮した
+    本文の代わりにそのレビューを渡します。レビューは中身ごとにセッション中 1 回で、引数を変えて実行し直しても読み直しません。
+    役割 `judge_review` として計上します。
+  - 256 KB を超えるファイルは読みません。judge にはそのこと（NOT SHOWN）を伝え、judge は ask します。
+  - judge が ask したときは、ツール項目に各スクリプトを judge がどう見たか（全文 / 全文をレビュー / NOT SHOWN）と、
+    レビューした内容を表示します。コードを読まなくても判断できるようにするためです。`/judge log` にも残し、あなたが
+    拒否したときは、judge の理由と見せた内容をエージェントにも伝えます（推測で説明しないため）
 - **常設のルール: `judge.instructions`**（文字列か、行のリスト）。例:
   `{ 'Running python scripts in src/ and scripts/ for training or evaluation is fine.', 'Writing under outputs/ is fine.' }`。
   judge はあなた自身の方針として従います。設定できるのはあなたの config だけで、リポジトリのファイル（AGENTS.md など）は
@@ -1424,7 +1434,9 @@ require('coagent').setup({
     cache = true,             -- セッション中 (コマンド, cwd) ごとに判定を再利用
     max_context_bytes = 12000, -- judge に送る操作・コマンド・メモ・直近の操作の上限
     max_request_bytes = 8000, -- 依頼文（/plan approve のあとは承認したプランも）
-    max_script_bytes = 24000, -- コマンドが実行するワークスペースのスクリプト
+    max_script_bytes = 24000, -- 実行するスクリプトの全文の上限。超えるものは先に全文をレビュー
+    review_chunk_bytes = 60000, -- 長いスクリプトはこの大きさに分けてレビュー
+    review_timeout_ms = 60000,
     instructions = nil,       -- judge への常設のルール（文字列か、行のリスト）
     pause_after = 3,          -- 承認なしで続いた「承認」判定の回数で一時停止（承認すると再開）。0 = しない
     allowed_paths = {},       -- 例: { '/data/imagenet', '/scratch' }

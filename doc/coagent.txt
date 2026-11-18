@@ -1449,7 +1449,15 @@ verdict with its outcome; the log is saved with the session.
 A request cut in the middle, or a script it cannot see whole, makes the
 judge ask, so both have budgets of their own: the request up to
 `judge.max_request_bytes`, the scripts a command runs up to
-`judge.max_script_bytes` (each whole while they fit). After /plan approve
+`judge.max_script_bytes`. Scripts include `python -m module`, the workspace
+modules they import and the scripts a wrapper calls (unchanged committed
+modules are left out); a script the agent changed is given in full with
+its diff. One that does not fit is first reviewed IN FULL by a separate
+request (in parts of `judge.review_chunk_bytes`; once per content; role
+"judge_review"), and the judge gets that review. Files over 256 KB are
+NOT SHOWN, and the judge asks. When it asks, the tool item lists how each
+script was seen and what its review found; when you deny, the agent is
+told the judge's reason and what it was shown. After /plan approve
 the request is the original one plus the approved plan. `judge.instructions`
 (a string or a list of lines) are your standing rules for the judge; only
 your config sets them, never repository files, and they cannot widen
@@ -1462,7 +1470,8 @@ Options: >lua
     model = nil, timeout_ms = 15000, workspaces = {}, cache = true,
     max_context_bytes = 12000, pause_after = 3,
     max_request_bytes = 8000, -- your request (with an approved plan)
-    max_script_bytes = 24000, -- the scripts the command runs
+    max_script_bytes = 24000, -- the scripts the command runs, as text
+    review_chunk_bytes = 60000, review_timeout_ms = 60000,
     instructions = nil,       -- your standing rules (string or lines)
     allowed_paths = {},       -- absolute paths args may name (datasets)
     notify_on_allow = false,  -- bell when a command ran without asking

@@ -1381,11 +1381,21 @@ For hands-off work where an allowlist is impractical (training entry points vary
 - `judge.notify_on_allow = true` rings the bell (`notify.bell` / `notify.desktop`) when a command ran without asking
 - `judge.allowed_paths = { '/data', '/scratch' }` lets command arguments name those absolute paths (datasets, caches)
   without forcing a question; the judge still decides. Read/write tools are not affected
-- **What the judge sees, whole.** A request cut in the middle, or a script it cannot see whole, makes the judge ask, so
-  both have budgets of their own: your request up to `judge.max_request_bytes` (8 KB) and the workspace scripts the
-  command runs up to `judge.max_script_bytes` (24 KB; each whole while they fit, else the small ones whole and the rest
-  shortened). Scripts are sent only for commands that run them (about +7k tokens per judge request at most). After
-  `/plan approve` the request is your original request and the plan you approved (not the approval line)
+- **What the judge sees, whole.** A request cut in the middle, or a script it cannot see whole, makes the judge ask:
+  - Your request goes up to `judge.max_request_bytes` (8 KB). After `/plan approve` it is your original request and the
+    plan you approved (not the approval line).
+  - The scripts: the files the command runs, `python -m module`, the workspace modules they import and the scripts a
+    wrapper calls (two levels; unchanged committed modules are the developer's own code and are left out). A script the
+    agent wrote or changed is given in full (not only its diff), with its diff when it changed an existing file.
+  - Their full texts go up to `judge.max_script_bytes` (24 KB). A script of the agent (or uncommitted / untracked) that
+    does not fit is first **reviewed in full** by a separate request, in parts of `judge.review_chunk_bytes` when long:
+    what it does, reads, writes, deletes, contacts, runs and which secrets it touches. The judge gets that review instead
+    of a shortened text. One review per content for the session: running it again with other arguments does not read
+    it again. Reviews count as role `judge_review`.
+  - A file over 256 KB is not read: the judge is told so (NOT SHOWN) and asks.
+  - When the judge asks you, the tool item lists each script with how the judge saw it (full text / reviewed in full /
+    NOT SHOWN) and, for reviewed ones, what the review found, so you can decide without reading the code. `/judge log`
+    records it, and when you deny, the agent is told the judge's reason and what it was shown (so it does not guess)
 - **Your standing rules: `judge.instructions`** (a string or a list of lines), e.g.
   `{ 'Running python scripts in src/ and scripts/ for training or evaluation is fine.', 'Writing under outputs/ is fine.' }`.
   The judge follows them as your own policy. Only your config sets them (repository files such as AGENTS.md never do),
@@ -1476,7 +1486,9 @@ require('coagent').setup({
     cache = true,             -- verdicts per (command, cwd) for the session
     max_context_bytes = 12000, -- the action, command, notes and recent actions sent to the judge
     max_request_bytes = 8000, -- your request (after /plan approve: with the plan)
-    max_script_bytes = 24000, -- the workspace scripts the command runs
+    max_script_bytes = 24000, -- the scripts the command runs, as text; longer ones are reviewed in full first
+    review_chunk_bytes = 60000, -- a review reads a long script in parts of this size
+    review_timeout_ms = 60000,
     instructions = nil,       -- your standing rules for the judge (string or list of lines)
     pause_after = 3,          -- asks in a row without an approval -> asks you directly until you approve one; 0 = never
     allowed_paths = {},       -- e.g. { '/data/imagenet', '/scratch' }

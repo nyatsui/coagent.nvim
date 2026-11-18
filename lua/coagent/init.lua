@@ -3106,7 +3106,7 @@ function M.usage(arg)
       table.insert(lines, '')
       table.insert(lines, '  Requests by role (this session)')
       -- known roles in this order, then any other (summary, skills, ...)
-      local order = { 'builder', 'worker', 'explorer', 'advisor', 'gate', 'critic', 'judge', 'keepalive', 'ledger' }
+      local order = { 'builder', 'worker', 'explorer', 'advisor', 'gate', 'critic', 'judge', 'judge_review', 'keepalive', 'ledger' }
       local listed = {}
       for _, r in ipairs(order) do
         listed[r] = true

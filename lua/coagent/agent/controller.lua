@@ -3210,6 +3210,15 @@ function Controller:_execute(gen, tc)
       self.task.denials = self.task.denials + 1
       local msg = 'DENIED by the user.' .. (d.reason and d.reason ~= '' and (' Reason: ' .. d.reason) or '')
         .. ' Do not retry this exact action. Choose another approach or explain what you need from the user.'
+      local j = item.judge
+      if j and j.decision == 'ask' and not j.paused then
+        -- facts, so an explanation of why it stopped is not a guess
+        msg = msg .. '\nThe judge had asked the user about it: ' .. tostring(j.reason)
+        local sh = Judge.shown_text(j.scripts)
+        if sh then
+          msg = msg .. '\nWhat the judge was shown of the scripts: ' .. sh
+        end
+      end
       local out = fail('denied', msg)
       if d.action == 'deny_stop' then
         out.stop = 'The user denied an action and stopped the task.'
@@ -3418,8 +3427,8 @@ function Controller:_judge(gen, tool, args, prepared, decision, item)
   if self.gen ~= gen then
     return nil
   end
-  item.judge = { decision = v.decision, risk = v.risk, reason = v.reason, cached = v.cached, error = v.error, model = v.model }
-  entry = vim.tbl_extend('force', entry, { decision = v.decision, risk = v.risk, reason = v.reason, model = v.model, cached = v.cached, error = v.error, ms = v.ms })
+  item.judge = { decision = v.decision, risk = v.risk, reason = v.reason, cached = v.cached, error = v.error, model = v.model, scripts = v.scripts }
+  entry = vim.tbl_extend('force', entry, { decision = v.decision, risk = v.risk, reason = v.reason, model = v.model, cached = v.cached, error = v.error, ms = v.ms, scripts = v.scripts })
   table.insert(self.session.judge_log, entry)
   while #self.session.judge_log > 500 do
     table.remove(self.session.judge_log, 1)

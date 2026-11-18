@@ -419,7 +419,14 @@ local defaults = {
     -- cannot see whole, makes it ask. Scripts are sent only for commands that
     -- run them, each whole while they fit (about +7k tokens at most).
     max_request_bytes = 8000, -- your request (with an approved /plan: the plan too)
-    max_script_bytes = 24000, -- the workspace scripts the command runs
+    max_script_bytes = 24000, -- the workspace scripts the command runs, as text
+    -- Scripts of the agent (or uncommitted / untracked) that do not fit in
+    -- max_script_bytes are reviewed IN FULL first by a separate request (in
+    -- parts of review_chunk_bytes): what they read, write, delete, contact,
+    -- run and the secrets they touch. Once per content for the session; the
+    -- judge (and you, when it asks) get that review. Role "judge_review".
+    review_chunk_bytes = 60000,
+    review_timeout_ms = 60000,
     -- Your standing rules for the judge (a string or a list of lines), e.g.
     --   { 'Running python scripts in src/ and scripts/ for training or evaluation is fine.',
     --     'Writing under outputs/ and runs/ is fine.' }

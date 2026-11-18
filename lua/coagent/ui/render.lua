@@ -180,6 +180,14 @@ local function tool(b, item, o)
   if item.judge then
     local r = b.line('  ' .. require('coagent.agent.judge').label(item.judge))
     b.hl(r, 2, -1, (item.judge.decision == 'ask' and not item.judge.pending) and 'CoagentWarn' or 'CoagentDim')
+    -- when it asks you: what the scripts do (from the whole-file review),
+    -- so the decision does not need the code itself
+    if item.judge.decision == 'ask' and not item.judge.pending then
+      for _, line in ipairs(require('coagent.agent.judge').script_lines(item.judge.scripts)) do
+        local sr = b.line('    ' .. line)
+        b.hl(sr, 4, -1, 'CoagentDim')
+      end
+    end
   end
 
   -- explorer subagent lookups (nested, compact)
