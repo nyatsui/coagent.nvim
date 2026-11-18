@@ -287,6 +287,11 @@ local function critic(ctrl, gen, answer, roles)
   end
   t.final_check_result = 'critic: revised after points from ' .. model
   local head = string.format('Advisor review by an independent critic (%s, it read your work but changed nothing):\n%s\n', model, text)
+  local tokens = require('coagent.agent.worker').continuable(ctrl)
+  if tokens then
+    -- the worker that wrote the changes still has them in context
+    head = head .. string.format('The last worker can go on with its context for the fixes: worker with continue_previous: true (context ~%d tokens).\n', tokens)
+  end
   if t.edit_seq then
     return head .. 'Address these points (or say briefly why one does not apply), re-run the relevant checks, then finish. There is no second review.'
   end

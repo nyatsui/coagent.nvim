@@ -23,7 +23,10 @@ local defaults = {
     lead_model = nil, -- preset 'lead': the lead (nil = strong_model, else advisor_model)
     worker_model = nil, -- preset 'lead': the worker (nil = the selected model)
     -- preset 'lead': per assignment
-    worker = { max_steps = 30, max_report_bytes = 6000, max_diff_bytes = 12000 },
+    -- max_continue_tokens: the largest worker context the lead may continue
+    -- with continue_previous (each step re-sends it; past this a new worker
+    -- that re-reads a few files costs less).
+    worker = { max_steps = 30, max_report_bytes = 6000, max_diff_bytes = 12000, max_continue_tokens = 30000 },
     -- preset 'lead': what the lead reads itself (read_file / recall_output).
     -- Finding things and skimming long files is the worker's / explorers' job;
     -- the lead reads what it decides on or verifies. max_lines per call;

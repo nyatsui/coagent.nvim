@@ -45,6 +45,10 @@ and verify; the worker implements and runs.
 {{HANDS}}
 - Never trust a report blindly: check the diff and the results coagent appends to it before you go on. Send a
   corrective assignment, or fix it yourself, when it is wrong.
+- A new assignment starts a new worker with an empty context, which re-reads what it needs. `continue_previous: true`
+  lets the previous worker go on instead: choose it when the next assignment is a follow-up or a correction on the
+  same files or results and its context (shown in the report) is small next to what a new worker would re-read. Do
+  not choose it for unrelated work, or when the previous worker went wrong in a way its context would repeat.
 - Read what you decide on or verify, not to search: let `explore` / `worker` find places and skim long files (their
   reports quote the lines as path:line), then read a narrow range yourself when it matters - the critical lines (loss,
   metric, data split, an interface), a quote that looks wrong. Your reads are limited per call and per task.
@@ -101,6 +105,44 @@ end
 
 local STATUS = { done = '✓', failed = '✗', denied = '⊘', deferred = '↺', blocked = '⊘' }
 
+--- roles.worker.max_continue_tokens (default 30000): the largest worker
+--- context a next assignment may continue. Each step of a continued worker
+--- re-sends all of it, so past this a new worker that re-reads a few files
+--- costs less.
+---@return integer
+function M.max_continue(opts)
+  return math.max(0, tonumber(opts.max_continue_tokens) or 30000)
+end
+
+--- May the next assignment continue the last worker of this task?
+---@return boolean ok, string? why not
+function M.can_continue(last, model, system, opts)
+  if not last then
+    return false, 'there was no previous worker in this task that ended with a report'
+  elseif last.model ~= model then
+    return false, 'the worker model changed'
+  elseif last.system ~= system then
+    return false, 'the permission mode or instructions changed'
+  elseif (last.tokens or 0) > M.max_continue(opts) then
+    return false, string.format('the previous worker\'s context (~%d tokens) is over roles.worker.max_continue_tokens (%d)', last.tokens or 0, M.max_continue(opts))
+  end
+  return true
+end
+
+--- The context size of this task's last worker when the lead may continue
+--- it (model unchanged, within max_continue_tokens); nil otherwise. The
+--- mode / instructions check happens when the assignment starts.
+---@param ctrl Coagent.Controller
+---@return integer?
+function M.continuable(ctrl)
+  local roles = ctrl:roles()
+  local last = roles.lead and ctrl.task and ctrl.task.last_worker
+  if not last or last.model ~= roles.worker_model or (last.tokens or 0) > M.max_continue(roles.worker_opts) then
+    return nil
+  end
+  return last.tokens or 0
+end
+
 --- Run one assignment. Must be called inside the task's coroutine.
 ---@param ctrl Coagent.Controller
 ---@param gen integer
@@ -120,13 +162,36 @@ function M.run(ctrl, gen, args, item)
     instructions_override = (ctrl.config.instructions or {}).override,
     monitor = require('coagent.agent.monitor').enabled(ctrl.config) and require('coagent.agent.monitor').cfg(ctrl.config) or nil,
   }) .. '\n\n' .. M.ROLE
-  local messages = { { role = 'user', content = brief(args) } }
+  local t = ctrl.task
+  local messages, notes, continued, fresh_why = nil, nil, false, nil
+  local last_worker = t and t.last_worker
+  if args.continue_previous == true then
+    local ok, why = M.can_continue(last_worker, model, system, opts)
+    if ok then
+      -- the same worker goes on: what it read and did stays in its context
+      messages = last_worker.messages
+      notes = last_worker.notes
+      continued = true
+      table.insert(messages, { role = 'user', content = 'Next assignment from the lead (you keep the context above: re-read a file only if it may '
+        .. 'have changed since, or for lines you have not seen):\n\n' .. brief(args) })
+    else
+      fresh_why = why
+    end
+  end
+  if not messages then
+    messages = { { role = 'user', content = brief(args) } }
+    notes = {}
+  end
+  if t then
+    t.last_worker = nil -- set again when this assignment ends cleanly
+  end
   local tools = tools_for(ctrl)
   local before = ctrl:_snapshot_files()
   local actions, report, steps, stopped, ended = {}, nil, 0, nil, nil
+  local last_input
   local prev, prev_notes = ctrl.worker_item, ctrl.worker_notes
   ctrl.worker_item = item.id
-  ctrl.worker_notes = {} -- folder AGENTS.md delivered into this assignment's history
+  ctrl.worker_notes = notes -- folder AGENTS.md delivered into this worker's history
   local function done()
     ctrl.worker_item, ctrl.worker_notes = prev, prev_notes
   end
@@ -157,6 +222,9 @@ function M.run(ctrl, gen, args, item)
       return nil
     end
     ctrl:_record_role('worker', model, res)
+    if res and res.usage then
+      last_input = tonumber(res.usage.input_tokens) or tonumber(res.usage.total_tokens) or last_input
+    end
     if not res or res.cancelled then
       ended = 'the worker request failed: ' .. tostring(err or 'cancelled')
       break
@@ -195,6 +263,11 @@ function M.run(ctrl, gen, args, item)
     end
   end
   done()
+  local size = last_input or require('coagent.agent.context').estimate(messages, system)
+  if t and report ~= nil and not stopped and not ended then
+    -- the lead may hand this worker the next assignment (continue_previous)
+    t.last_worker = { messages = messages, notes = notes, model = model, system = system, tokens = size }
+  end
 
   -- coagent's own record, so the lead need not trust the report alone
   local diff = ctrl:_diff_since_run(before)
@@ -205,8 +278,9 @@ function M.run(ctrl, gen, args, item)
       table.insert(files, f)
     end
   end
+  local how = continued and 'continued the previous worker' or (fresh_why and ('a new worker: ' .. fresh_why) or nil)
   local out = {
-    string.format('Worker report (%s, %d step%s%s):', model, steps, steps == 1 and '' or 's', ended and ('; ' .. ended) or ''),
+    string.format('Worker report (%s, %d step%s%s%s):', model, steps, steps == 1 and '' or 's', how and ('; ' .. how) or '', ended and ('; ' .. ended) or ''),
     report and vim.trim(report) ~= '' and util.clip(vim.trim(report), opts.max_report_bytes) or '(no report)',
     '',
     'Actions (recorded by coagent):',
@@ -216,6 +290,10 @@ function M.run(ctrl, gen, args, item)
   }
   if diff ~= '' then
     table.insert(out, 'Diff of the worker\'s changes:\n' .. util.truncate_middle(diff, opts.max_diff_bytes))
+  end
+  if t and t.last_worker then
+    table.insert(out, string.format('\nWorker context: ~%d tokens (the files it read, its runs). continue_previous: true on the next '
+      .. 'assignment keeps it (up to %d tokens); a new worker starts empty and re-reads what it needs.', size, M.max_continue(opts)))
   end
   table.insert(out, '\nVerify before going on (the diff above, read_file / git_diff, test output).')
   local summary = string.format('%d action%s, %d file%s', #actions, #actions == 1 and '' or 's', #files, #files == 1 and '' or 's')
@@ -237,6 +315,12 @@ M.tool = {
       task = { type = 'string', description = 'The assignment: goal, context, decisions, constraints.' },
       files = { type = 'array', items = { type = 'string' }, description = 'Files the work involves.' },
       done_when = { type = 'string', description = 'The checks that define done (commands, expected results).' },
+      continue_previous = {
+        type = 'boolean',
+        description = 'true: the worker of the previous assignment goes on with what it already read and ran (see "Worker '
+          .. 'context" in its report). For a follow-up or correction on the same files right after it, when its context is '
+          .. 'small. Leave it out for unrelated work or a large context (every step re-sends all of it).',
+      },
     },
   },
   title = function(args)

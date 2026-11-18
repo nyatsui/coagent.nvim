@@ -453,6 +453,11 @@ refused if called. The winbar shows "plan". The model investigates and ends
 with a DECISION-COMPLETE plan (goal, decisions, steps, files to change,
 verification, risks, questions): whoever executes it (the model, or the
 worker with roles.preset = 'lead') has nothing left to decide or guess.
+Under the lead preset each assignment starts a new worker with an empty
+context; the lead may pass `continue_previous = true` to let the previous
+worker go on with what it read and ran (a follow-up on the same files),
+up to `roles.worker.max_continue_tokens` (30000) of its context. After a
+critic's points the lead is told when the last worker can go on.
 Facts are looked up in the code; only what you alone can decide goes under
 Questions, with the recommended answer (answer by typing feedback). The plan
 is shown as a plan item; the winbar shows "plan ready" and an "approval" notification is sent
@@ -1501,8 +1506,8 @@ Combinations:
   explorers   same as single                    same as single
   advisor     advisor during the task, then     advisor during the task, then
   full        gate instead of its final review  critic instead of its final review
-  lead        the lead repairs it itself        the selected model reviews by
-                                                default
+  lead        the lead repairs it itself        critic_model; else the lead's
+                                                own model (never the worker's)
 
 A task on /strong behaves like the lead preset. The final check runs at most
 once per task. An answer without file changes below `answer_min_chars` (400) is

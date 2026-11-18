@@ -1757,6 +1757,14 @@ model does the legwork.
   as the lead's: permission mode, approvals (including `d` with a reason, and `D` stopping the whole task), the judge,
   change tracking and `/rewind`, the read-before-edit rule, token budgets. In the timeline its actions show as
   `worker · Edit a.txt`. It cannot nest workers, delegate to other chats or control loops
+- **A new worker per assignment, unless continuing pays.** Each assignment starts a worker with an empty context, which
+  re-reads what it needs. For a follow-up or correction on the same files right after, the lead may pass
+  `continue_previous = true`: the previous worker goes on with what it already read and ran. The report shows the
+  worker's context size so the lead can weigh it: every step of a continued worker re-sends all of it, so above
+  `roles.worker.max_continue_tokens` (30000) a new worker starts instead and the report says why. It also starts new
+  when the worker model, the permission mode or the instructions changed, or the previous worker did not end with a
+  report. After a critic's points (final check `critic`), the lead is told when the last worker can go on with its
+  context for the fixes
 - **The lead verifies**: the worker's reply comes with coagent's own record — each action with its result, the files
   changed and the diff of the worker's changes — and the lead is told to check it (diff, `read_file`, test output)
   before going on, and to send a corrective assignment when it is wrong

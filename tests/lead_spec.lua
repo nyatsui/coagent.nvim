@@ -237,4 +237,126 @@ describe('lead / worker', function()
     end
     assert.is_true(warned)
   end)
+  it('continue_previous: the previous worker goes on with its context, when the lead chooses it', function()
+    local reports = {}
+    local r = build(function(n, messages)
+      if n > 1 then
+        table.insert(reports, messages[#messages].content)
+      end
+      if n == 1 then
+        return { tool_calls = { { name = 'worker', arguments = { task = 'Read a.txt and replace "world" with "there".' } } } }
+      elseif n == 2 then
+        return { tool_calls = { { name = 'worker', arguments = { task = 'Also replace "hello" with "hi".', continue_previous = true } } } }
+      elseif n == 3 then
+        return { tool_calls = { { name = 'worker', arguments = { task = 'Unrelated: list the files.' } } } }
+      end
+      return { content = 'done' }
+    end, function(n)
+      if n == 1 then
+        return { tool_calls = { { name = 'read_file', arguments = { path = 'a.txt' } } } }
+      elseif n == 2 then
+        return { tool_calls = { { name = 'edit_file', arguments = { path = 'a.txt', old_string = 'world', new_string = 'there' } } } }
+      elseif n == 3 then
+        return { content = 'replaced world', input_tokens = 2000 }
+      elseif n == 4 then
+        -- continued: no re-read needed, the edit goes straight on
+        return { tool_calls = { { name = 'edit_file', arguments = { path = 'a.txt', old_string = 'hello', new_string = 'hi' } } } }
+      elseif n == 5 then
+        return { content = 'replaced hello', input_tokens = 2600 }
+      end
+      return { content = 'a.txt' }
+    end)
+    r.c:submit('fix a.txt')
+    assert.are.equal('COMPLETED', wait_done(r).state)
+    assert.are.equal('hi\nthere\n', h.read(root .. '/a.txt'))
+    local worker_reqs = vim.tbl_filter(function(q)
+      return q.model ~= 'strong'
+    end, r.backend.requests)
+    -- the second assignment's first request carries the first one's history
+    local second = worker_reqs[4].messages
+    assert.is_truthy(second[1].content:find('replace "world"', 1, true))
+    assert.is_truthy(second[#second].content:find('Next assignment from the lead', 1, true))
+    assert.is_truthy(second[#second].content:find('Also replace "hello"', 1, true))
+    -- the third (no continue_previous) starts empty
+    local third = worker_reqs[6].messages
+    assert.are.equal(1, #third)
+    assert.is_truthy(reports[1]:find('Worker context: ~2000 tokens', 1, true))
+    assert.is_truthy(reports[2]:find('continued the previous worker', 1, true))
+    local lead_req = r.backend.requests[1]
+    assert.is_truthy(lead_req.system_prompt:find('continue_previous', 1, true))
+  end)
+
+  it('continue_previous starts a new worker when the context is too large, saying why', function()
+    local report
+    local r = build(function(n, messages)
+      if n == 1 then
+        return { tool_calls = { { name = 'worker', arguments = { task = 'Read a.txt.' } } } }
+      elseif n == 2 then
+        return { tool_calls = { { name = 'worker', arguments = { task = 'Now edit it.', continue_previous = true } } } }
+      end
+      report = messages[#messages].content
+      return { content = 'done' }
+    end, function(n)
+      if n == 1 then
+        return { content = 'read it', input_tokens = 50000 }
+      end
+      return { content = 'ok' }
+    end)
+    r.c:submit('go')
+    assert.are.equal('COMPLETED', wait_done(r).state)
+    local worker_reqs = vim.tbl_filter(function(q)
+      return q.model ~= 'strong'
+    end, r.backend.requests)
+    assert.are.equal(1, #worker_reqs[2].messages)
+    assert.is_truthy(report:find('a new worker: the previous worker\'s context (~50000 tokens) is over roles.worker.max_continue_tokens (30000)', 1, true), report)
+  end)
+  it('after critic points, the lead is told the last worker can go on with its context', function()
+    local note
+    local wn = 0
+    local backend = Mock.new(function(messages, _, req)
+      if req.role == 'critic' then
+        return { content = '1. a.txt line 1 should also change.' }
+      end
+      if req.model == 'strong' then
+        local last = messages[#messages]
+        if last.role == 'user' and last.content:find('independent critic', 1, true) then
+          note = last.content
+          return { tool_calls = { { name = 'worker', arguments = { task = 'Fix line 1 as the critic said.', continue_previous = true } } } }
+        end
+        if #vim.tbl_filter(function(m)
+          return m.role == 'tool'
+        end, messages) == 0 then
+          return { tool_calls = { { name = 'worker', arguments = { task = 'Replace "world" with "there" in a.txt.' } } } }
+        end
+        return { content = 'Done: a.txt updated.' }
+      end
+      wn = wn + 1
+      if wn == 1 then
+        return { tool_calls = { { name = 'read_file', arguments = { path = 'a.txt' } } } }
+      elseif wn == 2 then
+        return { tool_calls = { { name = 'edit_file', arguments = { path = 'a.txt', old_string = 'world', new_string = 'there' } } } }
+      elseif wn == 3 then
+        return { content = 'replaced', input_tokens = 3000 }
+      elseif wn == 4 then
+        return { tool_calls = { { name = 'edit_file', arguments = { path = 'a.txt', old_string = 'hello', new_string = 'hi' } } } }
+      end
+      return { content = 'fixed line 1' }
+    end)
+    local c = agent.build({
+      config = h.config(root, { mode = 'auto', auto = { workspaces = { root } }, roles = { preset = 'lead', lead_model = 'strong', final_check = 'critic', critic_model = 'opus' } }),
+      backend = backend,
+    })
+    local done
+    c.events:on('done', function(s)
+      done = s
+    end)
+    c:submit('fix a.txt')
+    h.wait(function()
+      return done ~= nil
+    end, 15000)
+    assert.are.equal('COMPLETED', done and done.state)
+    assert.is_truthy(note, 'the critic\'s points reached the lead')
+    assert.is_truthy(note:find('continue_previous: true (context ~3000 tokens)', 1, true), note)
+    assert.are.equal('hi\nthere\n', h.read(root .. '/a.txt'))
+  end)
 end)
