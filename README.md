@@ -386,8 +386,18 @@ repeating the same investigation or fix can burn a lot of tokens (money / quota)
 | `max_consecutive_denials` | 3 | Denials in a row. **Ends** the task (you are saying "stop") |
 | `max_identical_calls` / `max_identical_failures` | 4 / 3 | The same call with the same arguments **and the same result**, with no edit in between (one warning goes to the model first; a file or log whose content changed does not count, and counts restart when old outputs were elided from the context) / the same failure. **Ends** the task (it is looping) |
 
-- At a count or time limit the task becomes **PAUSED**, not failed. The panel shows which limit, the current usage and how to
-  continue; the winbar shows `paused (limit)`
+- **First, a progress check** (`limits.on_limit = 'review'`, the default): at the step, tool call or time limit, one
+  request (role `progress`, a few thousand tokens; `limits.review_model`, else `judge.model`, else the selected model)
+  reads coagent's record of the round (each action with its result, edits, failures, the most repeated actions), the
+  request and the agent's notes. **Making progress** (new information, edits that move the work forward, failures fixed
+  one after another, a run it monitors as planned): the task goes on with fresh counters, with the check's advice, and
+  nobody has to resume it. **Going in circles** (the same actions or failing fix again, retrying what was blocked,
+  drifting away) or **needing you** (a decision, a credential): it pauses as below, with the reason. A round where
+  every action failed or repeated an earlier one always pauses. At most `limits.max_extensions` (3) extensions per task
+  (4x the limits), then it pauses anyway. Token and monthly budgets are spending caps you set: they always pause.
+  `on_limit = 'pause'`: always pause, as before
+- When it pauses at a count or time limit the task becomes **PAUSED**, not failed. The panel shows which limit, the
+  current usage and how to continue; the winbar shows `paused (limit)`
 - `:CoagentResume` / `/resume` / `R` **continues the same task with the same history and fresh counters** (requests, tool
   calls, elapsed time). Interrupted calls are never re-run (it stops between steps, so no tool is running). Use `/stop` to end
   it; sending a new message starts a new task
@@ -1478,6 +1488,8 @@ require('coagent').setup({
   plan = { default = false }, -- true: every new task starts in the plan phase (/go skips it; see "Plan first")
   review = { model = nil, context_lines = 8, max_diff_bytes = 160 * 1024 }, -- /review (see "Code review of a diff")
   limits = { -- brakes for runaway loops (see "Per-task limits")
+    on_limit = 'review',          -- at the limits below: a progress check decides go on / pause ('pause': always pause)
+    max_extensions = 3,           -- go-ons per task after a progress check
     max_steps = 40,               -- model requests per task (pauses when reached; /resume continues)
     max_tool_calls = 120,         -- same, for tool calls
     max_duration_ms = 30 * 60 * 1000, -- same, for active time (excluding approval waits and wait_process)

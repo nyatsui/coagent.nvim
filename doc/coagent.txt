@@ -1314,6 +1314,8 @@ advisor BLOCKs a step and the task waits for you (|coagent-supervision|).
 Per-task limits are brakes against runaway loops: every request resends
 the whole history, and Copilot bills by tokens. >lua
     limits = {
+      on_limit = 'review',               -- progress check first
+      max_extensions = 3,                -- go-ons per task
       max_steps = 40,                    -- model requests  } pause the
       max_tool_calls = 120,              -- tool executions } task
       max_duration_ms = 30 * 60 * 1000,  -- active time     } (resumable)
@@ -1322,6 +1324,12 @@ the whole history, and Copilot bills by tokens. >lua
       max_identical_failures = 3,        -- end the task
     }
 <
+At the step, tool call or time limit a progress check (one request, role
+"progress") first reads what the agent did in that round: making progress
+-> it goes on with fresh counters (at most `limits.max_extensions` times);
+going in circles or needing you -> it pauses, with the reason. A round where
+every action failed or repeated always pauses; token budgets always pause.
+`limits.on_limit = 'pause'` skips the check.
 Reaching the step, tool call or time limit PAUSES the task (state PAUSED,
 reason "limit") at a step boundary, when every tool call already has its
 result. The panel says which limit, the usage so far and how to continue;

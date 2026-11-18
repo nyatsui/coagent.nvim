@@ -7,6 +7,8 @@ local notify = require('coagent.ui.notify')
 local function build(root, script, cfg, opts)
   opts = opts or {}
   local backend = Mock.new(script)
+  -- the plain pause unless a test asks for the progress check
+  cfg = vim.tbl_deep_extend('keep', cfg or {}, { limits = { on_limit = 'pause' } })
   local c = agent.build({ config = h.config(root, cfg), backend = backend, store = opts.store, session = opts.session })
   local r = { c = c, backend = backend, states = {}, infos = {} }
   c.events:on('state', function(e)
@@ -272,5 +274,128 @@ describe('per-task limits', function()
   it('is on by default and /resume exists', function()
     assert.is_true(vim.tbl_contains(require('coagent.config').defaults().notify.on, 'limit'))
     assert.is_not_nil(require('coagent.ui.slash').get('resume'))
+  end)
+end)
+
+describe('progress check at the run limit', function()
+  local root
+  before_each(function()
+    root = h.workspace({ ['a.txt'] = 'hello\n', ['b.txt'] = 'x\n' })
+  end)
+
+  --- builder steps from `steps(n)`, progress checks answered by `verdicts` in order
+  local function run(steps, verdicts, cfg)
+    local vi, bi = 0, 0
+    local backend = Mock.new(function(_, _, req)
+      if req.role == 'progress' then
+        vi = vi + 1
+        return { content = verdicts[vi] or verdicts[#verdicts] }
+      end
+      bi = bi + 1
+      return steps(bi)
+    end)
+    local c = agent.build({ config = h.config(root, vim.tbl_deep_extend('force', { limits = { max_steps = 3, on_limit = 'review' } }, cfg or {})), backend = backend })
+    local r = { c = c, backend = backend }
+    c.events:on('done', function(st)
+      r.done = st
+    end)
+    return r
+  end
+  local function progress_requests(r)
+    return vim.tbl_filter(function(q)
+      return q.role == 'progress'
+    end, r.backend.requests)
+  end
+  local CONTINUE = '{"verdict": "continue", "reason": "it reads new files and edits toward the request", "note": "finish the edit, then run the check"}'
+  local PAUSE = '{"verdict": "pause", "reason": "it keeps listing the same directory", "note": ""}'
+
+  it('goes on with fresh counters when the agent makes progress, with the advice', function()
+    local r = run(function(n)
+      if n == 1 then
+        return { tool_calls = { { name = 'read_file', arguments = { path = 'a.txt' } } } }
+      elseif n == 2 then
+        return { tool_calls = { { name = 'edit_file', arguments = { path = 'a.txt', old_string = 'hello', new_string = 'hi' } } } }
+      elseif n == 3 then
+        return { tool_calls = { { name = 'read_file', arguments = { path = 'b.txt' } } } }
+      elseif n == 4 then
+        return { tool_calls = { { name = 'edit_file', arguments = { path = 'b.txt', old_string = 'x', new_string = 'y' } } } }
+      end
+      return { content = 'done' }
+    end, { CONTINUE }, { mode = 'auto', auto = { workspaces = { root } } })
+    r.c:submit('change both files')
+    h.wait(function()
+      return r.done ~= nil
+    end, 10000)
+    assert.are.equal('COMPLETED', r.done.state)
+    assert.are.equal('hi\n', h.read(root .. '/a.txt'))
+    assert.are.equal('y\n', h.read(root .. '/b.txt'))
+    local pr = progress_requests(r)
+    assert.are.equal(1, #pr)
+    local input = pr[1].messages[1].content
+    assert.is_truthy(input:find('Reached the step limit (3 model requests)', 1, true))
+    assert.is_truthy(input:find('change both files', 1, true))
+    assert.is_truthy(input:find('Edit a.txt', 1, true), input)
+    local advice
+    for _, m in ipairs(r.c.session.messages) do
+      if m.role == 'user' and m.content:find('Progress check at the run limit', 1, true) then
+        advice = m.content
+      end
+    end
+    assert.is_truthy(advice and advice:find('finish the edit', 1, true))
+    local notes = {}
+    for _, it in ipairs(r.c.session.items) do
+      if it.type == 'notice' then
+        table.insert(notes, it.text)
+      end
+    end
+    assert.is_truthy(table.concat(notes, '\n'):find('Progress check: going on (extension 1 of 3)', 1, true))
+    assert.is_truthy(r.c.session.role_stats.progress)
+  end)
+
+  it('pauses as before when it goes in circles, with the reason', function()
+    local r = run(function(n)
+      return { tool_calls = { { name = 'list_dir', arguments = { depth = n } } } }
+    end, { PAUSE })
+    r.c:submit('loop')
+    h.wait(function()
+      return r.c:state() == 'PAUSED'
+    end)
+    assert.are.equal('PAUSED', r.c:state())
+    local text = {}
+    for _, it in ipairs(r.c.session.items) do
+      if it.type == 'notice' then
+        table.insert(text, it.text)
+      end
+    end
+    assert.is_truthy(table.concat(text, '\n'):find('Progress check: it keeps listing the same directory', 1, true))
+    r.c:stop()
+  end)
+
+  it('a round that only failed or repeated pauses even when the check says continue', function()
+    local r = run(function()
+      return { tool_calls = { { name = 'read_file', arguments = { path = 'missing.txt' } }, { name = 'read_file', arguments = { path = 'missing2.txt' } } } }
+    end, { CONTINUE }, { limits = { max_identical_failures = 100, max_identical_calls = 100 } })
+    r.c:submit('read it')
+    h.wait(function()
+      return r.c:state() == 'PAUSED'
+    end)
+    assert.are.equal('PAUSED', r.c:state())
+    r.c:stop()
+  end)
+
+  it('stops extending after max_extensions; token budgets always pause', function()
+    local r = run(function(n)
+      return { tool_calls = { { name = 'list_dir', arguments = { depth = n } } } }
+    end, { CONTINUE }, { limits = { max_extensions = 2, max_identical_calls = 100 } })
+    r.c:submit('go')
+    h.wait(function()
+      return r.c:state() == 'PAUSED'
+    end, 10000)
+    assert.are.equal('PAUSED', r.c:state())
+    assert.are.equal(2, #progress_requests(r))
+    assert.are.equal(9, #vim.tbl_filter(function(q)
+      return q.role ~= 'progress'
+    end, r.backend.requests))
+    r.c:stop()
   end)
 end)

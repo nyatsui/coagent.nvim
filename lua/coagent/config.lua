@@ -218,8 +218,17 @@ local defaults = {
 
   limits = {
     -- Brakes against runaway loops (every request resends the history and
-    -- costs tokens). Reaching one of these three PAUSES the task;
+    -- costs tokens). Reaching one of these three PAUSES the task (after the
+    -- progress check below);
     -- :CoagentResume / /resume continues it with fresh counters.
+    -- At max_steps / max_tool_calls / max_duration_ms, one progress check
+    -- (role "progress", a few thousand tokens) first looks at what the agent
+    -- did: making progress -> it goes on with fresh counters (at most
+    -- max_extensions times); going in circles or needing you -> it pauses.
+    -- on_limit = 'pause': always pause. Token and monthly budgets always pause.
+    on_limit = 'review',
+    max_extensions = 3,
+    review_model = nil, -- nil = judge.model, else the selected model
     max_steps = 40, -- LLM requests per task
     max_tool_calls = 120, -- tool executions per task
     max_duration_ms = 30 * 60 * 1000, -- active wall clock per task (approval waits and wait_process excluded)
