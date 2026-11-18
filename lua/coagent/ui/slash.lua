@@ -200,9 +200,9 @@ M.COMMANDS = {
   },
   {
     name = 'judge',
-    args = '[log [n]|clear]',
-    desc = 'Judge mode: list the judge\'s decisions (log) or forget cached verdicts (clear)',
-    complete = { 'log', 'clear' },
+    args = '[log [n]|clear|blocked|allow [n]|resume]',
+    desc = 'Judge mode: decisions (log), forget verdicts (clear), commands sent back to the agent (blocked, allow n), resume sending back',
+    complete = { 'log', 'clear', 'blocked', 'allow', 'resume' },
     run = function(arg)
       return app().judge(arg)
     end,

@@ -1332,13 +1332,19 @@ commands, `judge` ≈ auto mode (a classifier model decides), `/plan` ≈ plan m
 For hands-off work where an allowlist is impractical (training entry points vary: `train.py`, `scripts/run_ablation.sh`,
 `torchrun ...`) and the OS sandbox gets in the way (`bwrap` hides GPUs). For each tool call:
 
-1. **Hard rules first** — deterministic and unchanged. Always **ask** (the judge is never consulted and can never turn
-   them into "allow"): dangerous patterns (`rm`, `git reset/clean/checkout --/restore/push/rebase`, `sudo`, `| sh`, `chown`,
-   `chmod -R`, publishing, ...), network transfer (`curl`, `wget`, `scp`, `ssh`, `nc`, `rsync` to a remote), package installs
-   (`pip install`, `conda install`, `npm install`, ...), `unlink` / `rmdir` / `find -delete`, crontab / services, arguments
-   outside the workspace (`/etc/...`, `~/...`, `../..`, `$HOME/...`), protected files (`.env`, keys, `.git/`), scripts from
-   skill folders, file deletes (see below), writes outside `writable_globs`, reads outside the workspace or of protected
-   files, the `delegate` tool and MCP tools. Whatever `supervised` denies is denied.
+1. **Hard rules first** — deterministic. Always **ask** (the judge is never consulted and can never turn them into
+   "allow"): dangerous patterns (`rm`, `git reset/clean/checkout --/restore/push/rebase`, `sudo`, `| sh`, `chown`,
+   `chmod -R`, writes to an absolute path, publishing, ...), remote shells and transfers (`scp`, `ssh`, `nc`, `rsync` to a
+   remote), uploads, `unlink` / `rmdir` / `find -delete`, crontab / services, **writes** outside the workspace (a redirect,
+   `cp`/`rsync`/`ln` destinations, `mv`, `tee`, `touch`, `sed -i`, `dd of=` ...), protected files (`.env`, keys, `.git/`),
+   scripts from skill folders, file deletes (see below), writes outside `writable_globs`, reads outside the workspace or of
+   protected files with the read tools, the `delegate` tool and MCP tools. Whatever `supervised` denies is denied.
+   **Flagged, decided by the judge** (`judge.hard_rules = 'judge'`, the default, like Claude Code's auto mode, whose
+   classifier decides these): downloads (`curl`, `wget`), package installs (`pip install`, `npm install`, ...) and paths
+   outside the workspace a command names without a program that writes them (`cat ../x`, `cp /data/x runs/`, a script's
+   `--data ~/datasets`). The judge is told they are flagged and holds them to a higher bar: outside paths only read and
+   needed, downloads that send nothing, installs the project declares or the request names. `hard_rules = 'ask'`: they
+   always ask, as before. The slashes in a sed script, an awk program or a grep pattern are not paths
    **Deletes without approval** (auto and judge), decided by facts, never by a model: `delete_file` of a file the agent
    created in this session that nobody changed since, or of a path matching `auto.deletable_globs` (caches:
    `__pycache__/`, `*.pyc`, `.pytest_cache/`, `.mypy_cache/`, `.ruff_cache/`, `.ipynb_checkpoints/`; add your
@@ -1402,9 +1408,12 @@ For hands-off work where an allowlist is impractical (training entry points vary
     records it, and when you deny, the agent is told the judge's reason and what it was shown (so it does not guess)
 - **Send the judge's "ask" back to the agent: `judge.on_ask = 'agent'`** (like Claude Code's auto mode; the default
   `'user'` asks you). The command is blocked, and the agent gets the judge's reason and what it was shown, with the
-  rule not to get the same effect another way; it takes a safer approach or stops and tells you what it needs. After
-  `judge.max_sent_back` (3) in a row (an allow resets the count) the task stops for you. Hard rules (deletes, outside
-  paths, network, installs) and failures of the judge itself (timeout, unusable answer) still ask you
+  rule not to get the same effect another way; it takes a safer approach or stops and tells you what it needs. A notice
+  tells you; `/judge blocked` lists what was sent back and `/judge allow [n]` approves one (that exact command then runs
+  without asking in this session, and the agent is told it may run it again), like Claude Code's "Recently blocked".
+  After `judge.max_sent_back` (3) in a row its asks come to you until you approve a command; after
+  `judge.max_sent_back_total` (20) in the session, until `/judge resume` (Claude Code pauses auto mode the same way).
+  Hard rules and failures of the judge itself (timeout, unusable answer) still ask you
 - **Your standing rules: `judge.instructions`** (a string or a list of lines), e.g.
   `{ 'Running python scripts in src/ and scripts/ for training or evaluation is fine.', 'Writing under outputs/ is fine.' }`.
   The judge follows them as your own policy. Only your config sets them (repository files such as AGENTS.md never do),
@@ -1501,7 +1510,9 @@ require('coagent').setup({
     tools = 'read',           -- the judge reads files itself ('none': only what coagent sends)
     max_tool_steps = 4, max_tool_result_bytes = 6000,
     on_ask = 'user',          -- 'agent': an ask goes back to the agent instead of you
-    max_sent_back = 3,        -- that many in a row stop the task
+    max_sent_back = 3,        -- that many in a row: asks come to you until you approve one
+    max_sent_back_total = 20, -- that many in the session: until /judge resume
+    hard_rules = 'judge',     -- downloads, installs, outside reads go to the judge ('ask': always ask)
     instructions = nil,       -- your standing rules for the judge (string or list of lines)
     pause_after = 3,          -- asks in a row without an approval -> asks you directly until you approve one; 0 = never
     allowed_paths = {},       -- e.g. { '/data/imagenet', '/scratch' }

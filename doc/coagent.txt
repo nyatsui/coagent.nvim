@@ -1456,8 +1456,14 @@ script a wrapper calls), at most `judge.max_tool_steps` requests; its reads
 never ask and do not count as the agent's.
 `judge.on_ask = 'agent'` sends an "ask" back to the agent with the reason
 instead of asking you (like Claude Code's auto mode); after
-`judge.max_sent_back` in a row the task stops. Hard rules and judge
-failures still ask you. One that does not fit is first reviewed IN FULL by a separate
+`judge.max_sent_back` in a row its asks come to you until you approve a
+command (after `judge.max_sent_back_total` in the session: until /judge
+resume). /judge blocked lists what was sent back; /judge allow [n] approves
+one for a retry. Hard rules and judge failures still ask you.
+`judge.hard_rules = 'judge'` (default) sends downloads, package installs and
+paths outside the workspace a command only reads to the judge, flagged and
+held to a higher bar; writes outside, deletes, remote shells and uploads
+always ask. 'ask': all of them always ask. One that does not fit is first reviewed IN FULL by a separate
 request (in parts of `judge.review_chunk_bytes`; once per content; role
 "judge_review"), and the judge gets that review. Files over 256 KB are
 NOT SHOWN, and the judge asks. When it asks, the tool item lists how each
@@ -1479,7 +1485,8 @@ Options: >lua
     review_chunk_bytes = 60000, review_timeout_ms = 60000,
     tools = 'read', max_tool_steps = 4, max_tool_result_bytes = 6000,
     on_ask = 'user',          -- 'agent': an ask goes back to the agent
-    max_sent_back = 3,
+    max_sent_back = 3, max_sent_back_total = 20,
+    hard_rules = 'judge',     -- 'ask': downloads, installs, outside reads ask
     instructions = nil,       -- your standing rules (string or lines)
     allowed_paths = {},       -- absolute paths args may name (datasets)
     notify_on_allow = false,  -- bell when a command ran without asking

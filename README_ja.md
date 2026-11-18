@@ -1286,12 +1286,19 @@ Claude Code の権限モードとの対応: `supervised` ≈ default（毎回確
 許可リストが現実的でない（学習の入口が `train.py`・`scripts/run_ablation.sh`・`torchrun ...` などまちまち）、かつ
 OS サンドボックスが邪魔になる（`bwrap` は GPU を隠す）場面で、確認なしに進めるためのモードです。ツール呼び出しごとに:
 
-1. **固定ルールが先**（決定的で従来どおり）。次は**必ず承認**で、judge には送らず、judge が「許可」に変えることもできません:
-   危険パターン（`rm`、`git reset/clean/checkout --/restore/push/rebase`、`sudo`、`| sh`、`chown`、`chmod -R`、パッケージ公開など）、
-   ネットワーク転送（`curl`・`wget`・`scp`・`ssh`・`nc`・リモートへの `rsync`）、パッケージのインストール（`pip install`・
-   `conda install`・`npm install` など）、`unlink` / `rmdir` / `find -delete`、crontab・サービス操作、ワークスペース外の引数
-   （`/etc/...`・`~/...`・`../..`・`$HOME/...`）、保護ファイル（`.env`・鍵・`.git/`）、スキルフォルダのスクリプト、ファイル削除、
-   `writable_globs` 外への書込み、ワークスペース外や保護ファイルの読込、`delegate` ツール、MCP ツール。`supervised` で拒否されるものは拒否。
+1. **固定ルールが先**（決定的）。次は**必ず承認**で、judge には送らず、judge が「許可」に変えることもできません:
+   危険パターン（`rm`、`git reset/clean/checkout --/restore/push/rebase`、`sudo`、`| sh`、`chown`、`chmod -R`、絶対パスへの書き込み、
+   パッケージ公開など）、リモートのシェルと転送（`scp`・`ssh`・`nc`・リモートへの `rsync`）、アップロード、`unlink` / `rmdir` /
+   `find -delete`、crontab・サービス操作、ワークスペース外への**書き込み**（リダイレクト、`cp`・`rsync`・`ln` のコピー先、`mv`・
+   `tee`・`touch`・`sed -i`・`dd of=` など）、保護ファイル（`.env`・鍵・`.git/`）、スキルフォルダのスクリプト、ファイル削除、
+   `writable_globs` 外への書込み、読み取りツールでのワークスペース外や保護ファイルの読込、`delegate` ツール、MCP ツール。
+   `supervised` で拒否されるものは拒否。
+   **印を付けて judge が判断するもの**（`judge.hard_rules = 'judge'`、既定。Claude Code の auto モードでも分類器が判断する範囲）:
+   ダウンロード（`curl`・`wget`）、パッケージのインストール（`pip install`・`npm install` など）、書き込むプログラムを通さずに
+   名前が出てくるワークスペース外のパス（`cat ../x`、`cp /data/x runs/`、スクリプトの `--data ~/datasets`）。judge には印付きで
+   渡し、高めの基準で判断させます（外のパスは読むだけで依頼に必要なもの、ダウンロードは何も送らないもの、インストールは
+   プロジェクトが宣言しているか依頼が名指ししたもの）。`hard_rules = 'ask'` にすると従来どおり必ず承認です。sed の式・awk の
+   プログラム・grep のパターンの中のスラッシュはパスとして扱いません。
    **承認なしで削除するもの**（auto と judge）は、モデルの判断ではなく事実で決めます: このセッションでエージェント自身が
    作り、その後だれも変えていないファイル、または `auto.deletable_globs` に一致するパス（キャッシュ: `__pycache__/`・`*.pyc`・
    `.pytest_cache/`・`.mypy_cache/`・`.ruff_cache/`・`.ipynb_checkpoints/`。一時フォルダを追加できます）への `delete_file`。
@@ -1354,8 +1361,11 @@ OS サンドボックスが邪魔になる（`bwrap` は GPU を隠す）場面�
 - **judge の ask をエージェントに戻す: `judge.on_ask = 'agent'`**（Claude Code の auto モードと同じ考え方。既定の
   `'user'` はあなたに聞きます）。コマンドは止め、judge の理由と見せた内容、「同じ結果を別の方法で得ないこと」を
   エージェントに返します。エージェントは安全なやり方に変えるか、止まって必要なことをあなたに説明します。
-  `judge.max_sent_back`（3）回続けて戻すと（許可が出れば数え直し）、タスクを止めてあなたに判断を委ねます。
-  固定ルール（削除・作業ディレクトリ外・ネットワーク・インストール）と、judge 自体の失敗（時間切れ・読めない答え）は
+  戻したことはお知らせで伝え、`/judge blocked` で一覧、`/judge allow [n]` で承認できます（そのコマンドはこのセッション中
+  確認なしで動き、エージェントにはやり直してよいと伝えます。Claude Code の「Recently blocked」に相当）。
+  `judge.max_sent_back`（3）回続けて戻すと、あなたがどれかのコマンドを承認するまで、judge の ask はあなたに来ます。
+  セッション中に `judge.max_sent_back_total`（20）回戻すと、`/judge resume` までそうなります（Claude Code の auto も同じように一時停止します）。
+  固定ルールと、judge 自体の失敗（時間切れ・読めない答え）は
   これまでどおりあなたに聞きます
 - **常設のルール: `judge.instructions`**（文字列か、行のリスト）。例:
   `{ 'Running python scripts in src/ and scripts/ for training or evaluation is fine.', 'Writing under outputs/ is fine.' }`。
@@ -1450,7 +1460,9 @@ require('coagent').setup({
     tools = 'read',           -- judge が自分でファイルを読む（'none': coagent が渡すものだけ）
     max_tool_steps = 4, max_tool_result_bytes = 6000,
     on_ask = 'user',          -- 'agent': ask をあなたではなくエージェントに戻す
-    max_sent_back = 3,        -- この回数続けて戻すとタスクを止める
+    max_sent_back = 3,        -- この回数続けて戻すと、承認するまで ask があなたに来る
+    max_sent_back_total = 20, -- セッションでこの回数戻すと、/judge resume まで同上
+    hard_rules = 'judge',     -- ダウンロード・インストール・外のパスの読み取りを judge に回す（'ask': 必ず承認）
     instructions = nil,       -- judge への常設のルール（文字列か、行のリスト）
     pause_after = 3,          -- 承認なしで続いた「承認」判定の回数で一時停止（承認すると再開）。0 = しない
     allowed_paths = {},       -- 例: { '/data/imagenet', '/scratch' }

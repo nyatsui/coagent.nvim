@@ -403,11 +403,12 @@ local defaults = {
   -- Reads and workspace edits behave as in auto mode. Commands run WITHOUT the
   -- OS sandbox (GPUs, CUDA and your normal environment work) and without an
   -- allowlist: deterministic hard rules always ask first (dangerous patterns,
-  -- deletes, outside / protected paths, curl/wget/scp/ssh/rsync, package
-  -- installs, delegate); every other command is shown to a separate judge
-  -- model that answers allow (run now) or ask (you decide). The judge can
-  -- never override a hard rule, and any failure, timeout or malformed answer
-  -- means ask. Trade-off: a command the judge allows runs with your full user
+  -- deletes, writes outside the workspace, protected paths, remote shells
+  -- and transfers, uploads, delegate); every other command is shown to a
+  -- separate judge model that answers allow (run now) or ask. Downloads,
+  -- package installs and outside reads go to the judge flagged (see
+  -- hard_rules). The judge can never override a hard rule, and any failure,
+  -- timeout or malformed answer means ask. Trade-off: a command the judge allows runs with your full user
   -- permissions; the judge is a model and can be wrong.
   judge = {
     model = nil, -- nil = the builder model; a cheap fast model is recommended
@@ -436,11 +437,20 @@ local defaults = {
     max_tool_result_bytes = 6000,
     -- Who gets the judge's 'ask': 'user' (you approve or deny) or 'agent'
     -- (like Claude Code's auto mode: the command is blocked and the agent gets
-    -- the reason, then takes a safer way or stops and tells you). After
-    -- max_sent_back in a row the task stops for you. Hard rules (deletes,
-    -- outside paths, network, installs) and judge failures still ask you.
+    -- the reason, then takes a safer way or stops and tells you; /judge
+    -- blocked lists them, /judge allow <n> approves one for a retry). After
+    -- max_sent_back in a row its asks come to you until you approve one;
+    -- after max_sent_back_total in a session, until /judge resume. Hard rules
+    -- and judge failures still ask you.
     on_ask = 'user',
     max_sent_back = 3,
+    max_sent_back_total = 20,
+    -- 'judge' (like Claude Code's auto mode): downloads (curl / wget),
+    -- package installs and paths outside the workspace a command only reads
+    -- go to the judge, flagged and held to a higher bar. Writes outside the
+    -- workspace, deletes, remote shells and transfers, uploads, protected
+    -- files and skill scripts always ask. 'ask': all of them always ask.
+    hard_rules = 'judge',
     -- Your standing rules for the judge (a string or a list of lines), e.g.
     --   { 'Running python scripts in src/ and scripts/ for training or evaluation is fine.',
     --     'Writing under outputs/ and runs/ is fine.' }

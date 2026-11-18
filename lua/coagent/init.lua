@@ -2284,8 +2284,9 @@ function M.set_mode(mode)
   end)
 end
 
---- `/judge [log [n]|clear]`: the judge's decisions in this session, or forget
---- the cached verdicts.
+--- `/judge [log [n]|clear|blocked|allow [n]|resume]`: the judge's decisions
+--- in this session, forget the cached verdicts, the commands it sent back to
+--- the agent and approving one of them, or turn sending back on again.
 ---@param arg string?
 ---@return boolean? ok
 function M.judge(arg)
@@ -2309,8 +2310,44 @@ function M.judge(arg)
     end
     c:notice('info', text)
     return true
+  elseif verb == 'blocked' then
+    local list = c:judge_blocked()
+    if #list == 0 then
+      c:notice('info', 'Judge: nothing was sent back to the agent in this session.')
+      return true
+    end
+    local lines = { 'Commands the judge sent back to the agent (/judge allow <n> approves one for a retry):' }
+    for _, b in ipairs(list) do
+      local e = b.entry
+      table.insert(lines, string.format('  %d. %s%s  $ %s', b.n, e.approved and '[approved] ' or '', e.cwd and e.cwd ~= '.' and ('[' .. e.cwd .. '] ') or '', tostring(e.command)))
+      table.insert(lines, '     ' .. tostring(e.reason or ''))
+    end
+    c:notice('info', table.concat(lines, '\n'))
+    return true
+  elseif verb == 'allow' then
+    local n = rest ~= '' and tonumber(rest) or nil
+    if rest ~= '' and not n then
+      c:notice('error', '/judge allow: expected a number from /judge blocked, got "' .. rest .. '"')
+      return false
+    end
+    local ok, err = c:judge_allow(n)
+    if not ok then
+      c:notice('warn', '/judge allow: ' .. tostring(err))
+      return false
+    end
+    c:notice('info', 'Judge: approved; the agent may run it again (that exact command runs without asking in this session).')
+    return true
+  elseif verb == 'resume' then
+    c.session.judge_agent_paused = nil
+    c.session.judge_sent_back_total = 0
+    if c.task then
+      c.task.judge_agent_paused = nil
+      c.task.judge_sent_back = 0
+    end
+    c:notice('info', 'Judge: its asks go back to the agent again (judge.on_ask = "agent").')
+    return true
   end
-  c:notice('error', '/judge: unknown argument "' .. arg .. '" (log [n] | clear)')
+  c:notice('error', '/judge: unknown argument "' .. arg .. '" (log [n] | clear | blocked | allow [n] | resume)')
   return false
 end
 

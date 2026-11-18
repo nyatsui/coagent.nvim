@@ -91,6 +91,40 @@ describe('command analysis', function()
     a = cmdparse.analyze('find . -exec touch x', root, ws)
     assert.are.same({ '-exec' }, a.denied_flags)
   end)
+  it('sed scripts, awk programs and grep patterns are code, not paths; files they name still count', function()
+    local Workspace = require('coagent.tools.workspace')
+    local root = h.workspace({ ['a.txt'] = 'x\n', ['b.txt'] = 'y\n' })
+    local ws = Workspace.new(root)
+    local function outside(c)
+      return cmdparse.inspect(c, root, ws).outside_paths
+    end
+    -- false alarms before: slashes in code
+    for _, c in ipairs({
+      "sed -i '/^#/d' a.txt",
+      "sed -n '/start/,/end/p' a.txt",
+      "sed -i 's|/usr/local/bin|/opt/bin|g' a.txt",
+      "sed -e '/x/d' -e 's/\\/old\\//\\/new\\//' a.txt",
+      "sed --expression='/^$/d' a.txt",
+      "awk '/^[0-9]+/ { print $1 }' a.txt",
+      "awk -F/ -v dir=/data '{ print $2 }' a.txt",
+      "grep -E '/api/v[0-9]+/' a.txt b.txt",
+      "rg -e '/home/[a-z]+' -g '*.txt' .",
+      "grep -rn '/etc/hosts' . | sed 's/\\/etc//' > b.txt",
+    }) do
+      assert.are.same({}, outside(c), c)
+      assert.are.same({}, cmdparse.analyze(c, root, ws).outside_paths, c)
+    end
+    -- real paths still count: the file operand, sed -f, files the code writes
+    assert.are.same({ '/etc/hosts' }, outside("sed -n '/x/p' /etc/hosts"))
+    assert.are.same({ '/tmp/script.sed' }, outside('sed -f /tmp/script.sed a.txt'))
+    assert.are.same({ '/etc/out' }, outside("sed -n '/x/w /etc/out' a.txt"))
+    assert.are.same({ '/tmp/o.txt' }, outside('awk \'{ print > "/tmp/o.txt" }\' a.txt'))
+    assert.are.same({ '/etc/passwd' }, outside("grep -e root /etc/passwd"))
+    assert.are.same({ '/etc/passwd' }, outside("grep -f a.txt /etc/passwd"))
+    assert.are.same({ '/etc/x' }, outside("cat a.txt > /etc/x"))
+    -- other programs are unchanged
+    assert.are.same({ '/etc/x' }, outside("python3 train.py /etc/x"))
+  end)
 end)
 
 describe('permissions', function()

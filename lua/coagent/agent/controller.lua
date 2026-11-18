@@ -3183,9 +3183,7 @@ function Controller:_execute(gen, tc)
 
   if decision.action == 'deny' then
     if decision.sent_back then
-      local out = fail('denied', decision.sent_back)
-      out.stop = decision.stop
-      return out
+      return fail('denied', decision.sent_back)
     end
     return fail('denied', 'DENIED by policy: ' .. tostring(decision.reason))
   end
@@ -3436,7 +3434,9 @@ function Controller:_judge(gen, tool, args, prepared, decision, item)
   -- judge.on_ask = 'agent' (like Claude Code's auto mode): an 'ask' verdict
   -- goes back to the agent with the reason instead of to you. Failures of
   -- the judge itself (timeout, malformed answer) still ask you.
+  -- after too many in a row (or in the session) it is paused: asks go to you
   local send_back = jcfg.on_ask == 'agent' and v.decision == 'ask' and not v.error and not v.cancelled
+    and not t.judge_agent_paused and not self.session.judge_agent_paused
   item.judge = { decision = v.decision, risk = v.risk, reason = v.reason, cached = v.cached, error = v.error, model = v.model, scripts = v.scripts, looked = v.looked, sent_back = send_back or nil }
   entry = vim.tbl_extend('force', entry, { decision = v.decision, risk = v.risk, reason = v.reason, model = v.model, cached = v.cached, error = v.error, ms = v.ms, scripts = v.scripts, looked = v.looked })
   table.insert(self.session.judge_log, entry)
@@ -3445,8 +3445,11 @@ function Controller:_judge(gen, tool, args, prepared, decision, item)
   end
   if send_back then
     t.judge_sent_back = (t.judge_sent_back or 0) + 1
+    self.session.judge_sent_back_total = (self.session.judge_sent_back_total or 0) + 1
     entry.outcome = 'sent back to the agent'
-    local limit = math.max(1, tonumber(jcfg.max_sent_back) or 3)
+    -- /judge blocked lists it; /judge allow <n> approves it for a retry
+    entry.grant_key = decision.grant_key
+    entry.blocked = true
     local lines = {
       'BLOCKED by the judge (judge.on_ask = "agent": the user was not asked): ' .. tostring(v.reason),
     }
@@ -3455,13 +3458,19 @@ function Controller:_judge(gen, tool, args, prepared, decision, item)
       table.insert(lines, 'What the judge was shown of the scripts: ' .. sh)
     end
     table.insert(lines, 'Do not get the same effect another way (the judge checks for that). Choose a safer approach that stays within '
-      .. 'the request, or stop and tell the user what you need and why.')
-    local stop
-    if t.judge_sent_back >= limit then
-      stop = string.format('The judge sent %d commands in a row back to the agent; the task stopped so you can decide. Last: %s', t.judge_sent_back, tostring(v.reason))
-      self:notice('warn', stop)
+      .. 'the request, or stop and tell the user what you need and why (the user can approve this exact command with /judge allow).')
+    local streak = math.max(1, tonumber(jcfg.max_sent_back) or 3)
+    local total = math.max(1, tonumber(jcfg.max_sent_back_total) or 20)
+    if self.session.judge_sent_back_total >= total then
+      self.session.judge_agent_paused = true
+      self:notice('warn', string.format('The judge has sent %d commands back to the agent in this session: from now on its asks come to you (like Claude Code\'s auto mode pausing). /judge resume turns sending back on again.', self.session.judge_sent_back_total))
+    elseif t.judge_sent_back >= streak then
+      t.judge_agent_paused = true
+      self:notice('warn', string.format('The judge sent %d commands in a row back to the agent: its asks come to you until you approve one. /judge blocked lists what was blocked.', t.judge_sent_back))
+    else
+      self:notice('info', string.format('Judge: blocked `%s` and sent it back to the agent: %s. /judge blocked to review, /judge allow to approve it.', util.clip(prepared.command or '', 80), tostring(v.reason)))
     end
-    return vim.tbl_extend('force', decision, { action = 'deny', reason = 'judge: ' .. tostring(v.reason), judge = false, sent_back = table.concat(lines, '\n'), stop = stop }), entry
+    return vim.tbl_extend('force', decision, { action = 'deny', reason = 'judge: ' .. tostring(v.reason), judge = false, sent_back = table.concat(lines, '\n') }), entry
   end
   if not v.error and not v.cancelled then
     if v.decision == 'allow' then
@@ -3484,19 +3493,70 @@ function Controller:_judge(gen, tool, args, prepared, decision, item)
   return vim.tbl_extend('force', decision, { reason = 'judge: ' .. tostring(v.reason) }), entry
 end
 
+--- Commands the judge sent back to the agent in this session (newest last),
+--- each with its number for /judge allow.
+---@return {n:integer, entry:table}[]
+function Controller:judge_blocked()
+  local out = {}
+  for _, e in ipairs(self.session.judge_log or {}) do
+    if e.blocked then
+      table.insert(out, { n = #out + 1, entry = e })
+    end
+  end
+  return out
+end
+
+--- `/judge allow [n]`: approve a command the judge sent back (the last one by
+--- default). That exact command (and cwd) then runs without asking in this
+--- session, and the agent is told it may run it again.
+---@param n integer?
+---@return boolean ok, string? err
+function Controller:judge_allow(n)
+  local list = self:judge_blocked()
+  if #list == 0 then
+    return false, 'nothing was blocked by the judge in this session'
+  end
+  local b = list[n or #list]
+  if not b then
+    return false, string.format('no blocked command #%s (1-%d)', tostring(n), #list)
+  end
+  local e = b.entry
+  if e.approved then
+    return false, 'already approved: ' .. tostring(e.command)
+  end
+  if not e.grant_key then
+    return false, 'this command cannot be approved for a retry'
+  end
+  self.permissions:grant(e.grant_key)
+  e.approved = true
+  e.outcome = 'sent back to the agent, then approved by the user'
+  self:_judge_approved(true)
+  local cwd = e.cwd and e.cwd ~= '.' and (' (in ' .. e.cwd .. ')') or ''
+  local ok, err = self:submit(string.format('I approved the command the judge blocked: `%s`%s. Run it again if it is still needed.', tostring(e.command), cwd))
+  if not ok then
+    return false, err
+  end
+  return true
+end
+
 --- The user approved an action: a command the judge asked about (or that
 --- asked directly while the judge was paused) resets the run of asks and
 --- lifts the pause.
 ---@param judged boolean the judge gave a verdict on this action
 function Controller:_judge_approved(judged)
   local t = self.task
-  if not t or not (judged or t.judge_paused) then
+  if not t or not (judged or t.judge_paused or t.judge_agent_paused) then
     return
   end
   t.judge_asks = 0
+  t.judge_sent_back = 0
   if t.judge_paused then
     t.judge_paused = false
     self:notice('info', 'You approved a command: the judge is back on for the next commands.')
+  end
+  if t.judge_agent_paused then
+    t.judge_agent_paused = false
+    self:notice('info', 'You approved a command: the judge sends its asks back to the agent again.')
   end
 end
 

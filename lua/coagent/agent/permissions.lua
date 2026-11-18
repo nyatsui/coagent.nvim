@@ -333,21 +333,47 @@ end
 
 --- Judge mode, a command that is not dangerous and not previously approved:
 --- the judge-mode hard rules ask; anything else is left to the judge model.
+--- With judge.hard_rules = 'judge' (the default, like Claude Code's auto
+--- mode) downloads (curl / wget), package installs and paths outside the
+--- workspace the command only reads go to the judge too, flagged, to be held
+--- to a higher bar. Writes outside the workspace, deletes, remote shells,
+--- uploads, protected files and skill scripts always ask.
 ---@return Coagent.Decision
 function Permissions:_judge_exec(prepared, args, a, key)
   local command = prepared.command or args.command or ''
   local jcfg = self.config.judge or {}
+  local route = (jcfg.hard_rules or 'judge') == 'judge'
   local insp = cmdparse.inspect(command, prepared.cwd or self.ws.root, self.ws, { allowed_paths = jcfg.allowed_paths })
-  local hard, warnings = {}, {}
+  local hard, flagged, warnings = {}, {}, {}
   for _, h in ipairs(insp.hard) do
-    table.insert(hard, h)
-    table.insert(warnings, 'judge mode always asks: ' .. h)
+    if route and insp.hard_judge[h] then
+      table.insert(flagged, h)
+      table.insert(warnings, 'sent to the judge: ' .. h)
+    else
+      table.insert(hard, h)
+      table.insert(warnings, 'judge mode always asks: ' .. h)
+    end
   end
+  local writes = {}
+  for _, p in ipairs(insp.outside_writes or {}) do
+    writes[p] = true
+  end
+  local reads = {}
   for _, p in ipairs(insp.outside_paths) do
-    table.insert(warnings, 'path outside workspace: ' .. p)
+    table.insert(warnings, (writes[p] and 'writes a path outside workspace: ' or 'path outside workspace: ') .. p)
+    if not writes[p] then
+      table.insert(reads, p)
+    end
   end
-  if #insp.outside_paths > 0 then
-    table.insert(hard, 'touches a path outside the workspace')
+  if #(insp.outside_writes or {}) > 0 then
+    table.insert(hard, 'writes a path outside the workspace')
+  end
+  if #reads > 0 then
+    if route then
+      table.insert(flagged, 'names a path outside the workspace')
+    else
+      table.insert(hard, 'touches a path outside the workspace')
+    end
   end
   for _, p in ipairs(insp.protected_paths) do
     table.insert(warnings, 'touches a protected file: ' .. p)
@@ -366,7 +392,8 @@ function Permissions:_judge_exec(prepared, args, a, key)
   if #hard > 0 then
     return decision('ask', 'judge mode: ' .. hard[1], { warnings = warnings, grant_key = key, can_always = true, hard = true, inspection = insp })
   end
-  return decision('ask', 'command execution', { warnings = warnings, grant_key = key, can_always = true, judge = true, inspection = insp })
+  local reason = #flagged > 0 and ('judge mode: ' .. flagged[1] .. ' (the judge decides)') or 'command execution'
+  return decision('ask', reason, { warnings = warnings, grant_key = key, can_always = true, judge = true, inspection = insp, flagged = flagged, outside_reads = reads })
 end
 
 return Permissions

@@ -19,7 +19,11 @@ M.PROMPT = [[
 You are the approval judge of an autonomous coding agent. The agent runs commands in a developer's workspace WITHOUT an OS sandbox, with the developer's full user permissions.
 For ONE proposed command, decide whether it may run now without asking the developer.
 
-Deterministic hard rules already ran: dangerous patterns, deletes, paths outside the workspace, protected files, network transfer tools (curl, wget, scp, ssh, rsync) and package installs never reach you. You only see what remains.
+Deterministic hard rules already ran: dangerous patterns, deletes, writes outside the workspace, protected files, remote shells and transfers (ssh, scp, rsync, raw sockets), uploads and publishing never reach you. You only see what remains.
+Some actions reach you FLAGGED (see ACTION): paths outside the workspace the command names, downloads (curl, wget) and package installs. Hold them to a higher bar:
+- outside paths: allow only when the request needs them and the command only reads them (datasets, a system file it inspects). Anything that may write, move, delete or change permissions there: ask. A script whose arguments name an outside path: judge from the script whether it reads or writes it.
+- downloads: allow a download the request needs from a well-known source into the workspace. Ask for anything that sends data (POST bodies, -d, -F, --data, --upload-file, -T), sends credentials or workspace files, or pipes what it fetched into a shell or interpreter.
+- installs: allow installing what the project's manifest or lock file declares, or a package the request names. Ask for anything else, for global or system installs (sudo, --global, -g), and for install scripts fetched from the network.
 You answer "allow" (run now) or "ask" (the developer decides). You cannot deny. "ask" is always safe.
 
 ALLOW only when ALL of these hold:
@@ -516,8 +520,16 @@ function M.build_input(req, max_bytes, opts)
     '- existing workspace files referenced: ' .. json_list(insp.files),
     '- URLs: ' .. json_list(insp.urls),
     '- flags that can run programs or write files: ' .. json_list(an.denied_flags),
-    '- outside / protected paths: none (hard rules passed)',
   })
+  local dec = req.decision or {}
+  if dec.flagged and #dec.flagged > 0 then
+    vim.list_extend(lines, {
+      '- FLAGGED (would otherwise always ask the developer; hold to the higher bar): ' .. json_list(dec.flagged),
+      '- paths outside the workspace the command names (not written by any program coagent recognizes): ' .. json_list(dec.outside_reads),
+    })
+  else
+    table.insert(lines, '- outside / protected paths: none (hard rules passed)')
+  end
   local facts = table.concat(lines, '\n')
   local budget = math.max(1000, max_bytes - #facts)
   local scripts = req.scripts or M.scripts(ctrl, insp)
