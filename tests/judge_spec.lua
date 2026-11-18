@@ -268,7 +268,11 @@ describe('judge mode: controller', function()
     assert.are.equal('judge-model', jr[1].model)
     assert.are.equal(0, jr[1].temperature)
     assert.is_true(jr[1].headless)
-    assert.are.same({}, jr[1].tools)
+    -- read-only tools only
+    for _, t in ipairs(jr[1].tools) do
+      assert.is_true(require('coagent.agent.advisor').TOOLS[t.name], t.name)
+    end
+    assert.is_true(#jr[1].tools > 0)
     assert.are.equal(Judge.PROMPT, jr[1].system_prompt)
     local input = jr[1].messages[1].content
     assert.is_truthy(input:find('train the model for one epoch', 1, true))
@@ -828,31 +832,76 @@ describe('judge: scripts given whole', function()
     assert.is_truthy(cmd.judge.scripts[1].how:find('reviewed in full in %d+ parts'))
   end)
 
-  it('includes the modules a script imports and the scripts a wrapper calls (not unchanged committed ones)', function()
-    local root = h.workspace({ ['utils.py'] = 'def helper():\n    return 1\n', ['pkg/__init__.py'] = '' }, { git = true })
+  it('the judge reads what a script uses with its own read tools; its reads are not the agent\'s', function()
+    local root = h.workspace({ ['model.py'] = 'MODEL_CODE = 1\nvalue = 2\n' }, { git = true })
+    local verdicts = 0
+    local backend = Mock.new(function(messages, _, req)
+      if req.role == 'judge' then
+        verdicts = verdicts + 1
+        if verdicts == 1 then
+          assert(#req.tools > 0, 'read tools offered')
+          return { tool_calls = { { name = 'read_file', arguments = { path = 'model.py' } } } }
+        end
+        return { content = ALLOW }
+      end
+      return nil
+    end)
+    local steps = {
+      { tool_calls = { { name = 'write_file', arguments = { path = 'train.py', content = 'import model\nprint(model.value)\n' } } } },
+      run_cmd('python3 train.py'),
+      -- the agent never read model.py: this edit must be refused
+      { tool_calls = { { name = 'edit_file', arguments = { path = 'model.py', old_string = 'value = 2', new_string = 'value = 3' } } } },
+      { content = 'ok' },
+    }
+    local bi = 0
+    local inner = backend.script
+    backend.script = function(messages, opts, req)
+      if req.role == 'judge' or req.role == 'judge_review' then
+        return inner(messages, opts, req)
+      end
+      bi = bi + 1
+      return steps[bi] or { content = 'done' }
+    end
+    local c = agent.build({
+      config = h.config(root, { mode = 'judge', judge = { workspaces = { root } }, commands = { sandbox_all = true }, limits = { edit_requires_read = true } }),
+      backend = backend,
+    })
+    local done
+    c.events:on('done', function(st)
+      done = st
+    end)
+    c:submit('train')
+    h.wait(function()
+      return done ~= nil
+    end, 10000)
+    local jr = judge_requests(backend)
+    assert.are.equal(2, #jr)
+    local tool_msg = jr[2].messages[#jr[2].messages]
+    assert.are.equal('tool', tool_msg.role)
+    assert.is_truthy(tool_msg.content:find('MODEL_CODE = 1', 1, true))
+    local cmd = tool_items(c)[2]
+    assert.are.equal('allow', cmd.judge.decision)
+    assert.are.equal(1, #cmd.judge.looked)
+    assert.is_truthy(Judge.label(cmd.judge):find('(read 1)', 1, true))
+    assert.are.equal('the judge', cmd.children_by)
+    -- read-before-edit: the judge's read is not the agent's
+    assert.are.equal('MODEL_CODE = 1\nvalue = 2\n', h.read(root .. '/model.py'))
+    -- no more guessing what a wrapper calls: only the command's own scripts are listed
+    assert.is_nil(jr[1].messages[1].content:find('### model.py', 1, true))
+  end)
+
+  it('resolves python -m to its file', function()
+    local root = h.workspace({})
     local r = build(root, {
-      { tool_calls = { { name = 'write_file', arguments = { path = 'model.py', content = 'MODEL_CODE = 1\n' } } } },
-      { tool_calls = { { name = 'write_file', arguments = { path = 'pkg/sub.py', content = 'SUB_CODE = 1\n' } } } },
-      { tool_calls = { { name = 'write_file', arguments = { path = 'train.py', content = 'import os, model\nimport utils\nfrom pkg import sub\nprint("train")\n' } } } },
-      { tool_calls = { { name = 'write_file', arguments = { path = 'run.sh', content = '#!/bin/sh\npython3 train.py --epochs 1\n' } } } },
       { tool_calls = { { name = 'write_file', arguments = { path = 'pkg/run.py', content = 'RUN_MODULE = 1\n' } } } },
-      run_cmd('sh run.sh'),
       run_cmd('python3 -m pkg.run'),
       { content = 'ok' },
     }, { ALLOW })
-    r.c:submit('train')
+    r.c:submit('run')
     wait_done(r)
-    local jr = judge_requests(r.backend)
-    local first = jr[1].messages[1].content
-    assert.is_truthy(first:find('### run.sh (a new file', 1, true))
-    assert.is_truthy(first:find('### train.py (a new file written by the agent in this session, used by run.sh', 1, true), first)
-    assert.is_truthy(first:find('### model.py (a new file written by the agent in this session, used by train.py', 1, true))
-    assert.is_truthy(first:find('### pkg/sub.py (', 1, true))
-    assert.is_truthy(first:find('SUB_CODE = 1', 1, true))
-    -- the developer's committed module is not needed
-    assert.is_nil(first:find('### utils.py', 1, true))
-    assert.is_truthy(jr[2].messages[1].content:find('### pkg/run.py (a new file', 1, true))
-    assert.is_truthy(jr[2].messages[1].content:find('RUN_MODULE = 1', 1, true))
+    local input = judge_requests(r.backend)[1].messages[1].content
+    assert.is_truthy(input:find('### pkg/run.py (a new file', 1, true))
+    assert.is_truthy(input:find('RUN_MODULE = 1', 1, true))
   end)
 
   it('names a script it could not show, and tells the agent what the judge saw when you deny', function()
@@ -877,5 +926,53 @@ describe('judge: scripts given whole', function()
     end
     assert.is_truthy(tool_msg:find('The judge had asked the user about it: not clearly part of the task', 1, true), tool_msg)
     assert.is_truthy(tool_msg:find('What the judge was shown of the scripts: huge.py (NOT SHOWN', 1, true), tool_msg)
+  end)
+end)
+
+describe('judge: on_ask = "agent"', function()
+  it('sends an ask back to the agent with the reason instead of asking you; stops after max_sent_back', function()
+    local root = h.workspace({})
+    local r = build(root, {
+      run_cmd('python3 a.py'),
+      run_cmd('python3 b.py'),
+      run_cmd('python3 c.py'),
+      { content = 'ok' },
+    }, { ASK }, { judge = { on_ask = 'agent', max_sent_back = 3 }, limits = { max_identical_calls = 10 } })
+    r.c:submit('run them')
+    wait_done(r)
+    assert.are.equal(0, #r.approvals)
+    local tools = vim.tbl_filter(function(m)
+      return m.role == 'tool'
+    end, r.c.session.messages)
+    assert.is_truthy(tools[1].content:find('BLOCKED by the judge', 1, true), tools[1].content)
+    assert.is_truthy(tools[1].content:find('not clearly part of the task', 1, true))
+    assert.is_truthy(tools[1].content:find('Do not get the same effect another way', 1, true))
+    local items = tool_items(r.c)
+    assert.is_true(items[1].judge.sent_back)
+    assert.is_truthy(Judge.label(items[1].judge):find('judge: sent back to the agent', 1, true))
+    assert.are.equal('sent back to the agent', r.c.session.judge_log[1].outcome)
+    -- three in a row: the task stops for you
+    assert.are.equal('CANCELLED', r.done.state)
+    assert.are.equal(3, #items)
+  end)
+
+  it('an allow resets the count; judge failures and hard rules still ask you', function()
+    local root = h.workspace({})
+    local r = build(root, {
+      run_cmd('python3 a.py'),
+      run_cmd('python3 ok.py'),
+      run_cmd('python3 b.py'),
+      run_cmd('curl https://example.com'),
+      run_cmd('python3 c.py'),
+      { content = 'ok' },
+    }, { ASK, ALLOW, ASK, 'not json' }, { judge = { on_ask = 'agent', max_sent_back = 2 }, limits = { max_identical_calls = 10 } })
+    r.on_approval = function(item)
+      r.c:approve(item.id, { action = 'deny' })
+    end
+    r.c:submit('go')
+    wait_done(r)
+    -- curl (hard rule) and c.py (malformed judge answer) asked you
+    assert.are.equal(2, #r.approvals)
+    assert.are.equal('COMPLETED', r.done.state)
   end)
 end)

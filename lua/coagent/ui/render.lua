@@ -202,7 +202,7 @@ local function tool(b, item, o)
         b.hl(r, 4 + #o.icons[cst[1]], -1, 'CoagentDim')
       end
     else
-      local r = b.line(string.format('    %d lookups by %s', #item.children, tostring(item.model or 'explorer')))
+      local r = b.line(string.format('    %d lookups by %s', #item.children, tostring(item.children_by or item.model or 'explorer')))
       b.hl(r, 0, -1, 'CoagentDim')
     end
   end

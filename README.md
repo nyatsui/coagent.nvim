@@ -1384,9 +1384,13 @@ For hands-off work where an allowlist is impractical (training entry points vary
 - **What the judge sees, whole.** A request cut in the middle, or a script it cannot see whole, makes the judge ask:
   - Your request goes up to `judge.max_request_bytes` (8 KB). After `/plan approve` it is your original request and the
     plan you approved (not the approval line).
-  - The scripts: the files the command runs, `python -m module`, the workspace modules they import and the scripts a
-    wrapper calls (two levels; unchanged committed modules are the developer's own code and are left out). A script the
-    agent wrote or changed is given in full (not only its diff), with its diff when it changed an existing file.
+  - The scripts: the files the command runs and `python -m module`. A script the agent wrote or changed is given in
+    full (not only its diff), with its diff when it changed an existing file.
+  - **The judge reads what it needs itself** (`judge.tools = 'read'`, the default): with read-only tools (read_file,
+    search, glob, ...) it looks at an imported module, a script a wrapper calls or a config when that could change the
+    verdict, at most `judge.max_tool_steps` (4) requests. Its reads never ask, show under the command as "lookups by the
+    judge", and do not count as the agent's reads (read-before-edit). A script that imports or calls other files is not a
+    reason to ask by itself: the judge asks for a concrete risk
   - Their full texts go up to `judge.max_script_bytes` (24 KB). A script of the agent (or uncommitted / untracked) that
     does not fit is first **reviewed in full** by a separate request, in parts of `judge.review_chunk_bytes` when long:
     what it does, reads, writes, deletes, contacts, runs and which secrets it touches. The judge gets that review instead
@@ -1396,6 +1400,11 @@ For hands-off work where an allowlist is impractical (training entry points vary
   - When the judge asks you, the tool item lists each script with how the judge saw it (full text / reviewed in full /
     NOT SHOWN) and, for reviewed ones, what the review found, so you can decide without reading the code. `/judge log`
     records it, and when you deny, the agent is told the judge's reason and what it was shown (so it does not guess)
+- **Send the judge's "ask" back to the agent: `judge.on_ask = 'agent'`** (like Claude Code's auto mode; the default
+  `'user'` asks you). The command is blocked, and the agent gets the judge's reason and what it was shown, with the
+  rule not to get the same effect another way; it takes a safer approach or stops and tells you what it needs. After
+  `judge.max_sent_back` (3) in a row (an allow resets the count) the task stops for you. Hard rules (deletes, outside
+  paths, network, installs) and failures of the judge itself (timeout, unusable answer) still ask you
 - **Your standing rules: `judge.instructions`** (a string or a list of lines), e.g.
   `{ 'Running python scripts in src/ and scripts/ for training or evaluation is fine.', 'Writing under outputs/ is fine.' }`.
   The judge follows them as your own policy. Only your config sets them (repository files such as AGENTS.md never do),
@@ -1489,6 +1498,10 @@ require('coagent').setup({
     max_script_bytes = 24000, -- the scripts the command runs, as text; longer ones are reviewed in full first
     review_chunk_bytes = 60000, -- a review reads a long script in parts of this size
     review_timeout_ms = 60000,
+    tools = 'read',           -- the judge reads files itself ('none': only what coagent sends)
+    max_tool_steps = 4, max_tool_result_bytes = 6000,
+    on_ask = 'user',          -- 'agent': an ask goes back to the agent instead of you
+    max_sent_back = 3,        -- that many in a row stop the task
     instructions = nil,       -- your standing rules for the judge (string or list of lines)
     pause_after = 3,          -- asks in a row without an approval -> asks you directly until you approve one; 0 = never
     allowed_paths = {},       -- e.g. { '/data/imagenet', '/scratch' }

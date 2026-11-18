@@ -511,7 +511,7 @@ describe('supervision checkpoints', function()
     assert.is_true(#m[3].content < 300, tostring(#m[3].content))
     -- the edit was refused and counted; then the limit message
     local m3 = adv[3].messages
-    assert.is_truthy(m3[5].content:find('not available to the advisor', 1, true))
+    assert.is_truthy(m3[5].content:find('not available to the reviewer', 1, true))
     assert.are.equal(Advisor.STEP_LIMIT, m3[6].content)
     assert.are.equal('hello\n', h.read(root .. '/a.txt'))
     -- append-only history

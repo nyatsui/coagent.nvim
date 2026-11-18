@@ -427,6 +427,20 @@ local defaults = {
     -- judge (and you, when it asks) get that review. Role "judge_review".
     review_chunk_bytes = 60000,
     review_timeout_ms = 60000,
+    -- 'read': the judge may read workspace files itself (an imported module,
+    -- a script a wrapper calls, a config), at most max_tool_steps requests;
+    -- 'none': only what coagent sends. Its reads never ask and do not count
+    -- as the agent's (read-before-edit).
+    tools = 'read',
+    max_tool_steps = 4,
+    max_tool_result_bytes = 6000,
+    -- Who gets the judge's 'ask': 'user' (you approve or deny) or 'agent'
+    -- (like Claude Code's auto mode: the command is blocked and the agent gets
+    -- the reason, then takes a safer way or stops and tells you). After
+    -- max_sent_back in a row the task stops for you. Hard rules (deletes,
+    -- outside paths, network, installs) and judge failures still ask you.
+    on_ask = 'user',
+    max_sent_back = 3,
     -- Your standing rules for the judge (a string or a list of lines), e.g.
     --   { 'Running python scripts in src/ and scripts/ for training or evaluation is fine.',
     --     'Writing under outputs/ and runs/ is fine.' }

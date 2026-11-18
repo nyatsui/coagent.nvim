@@ -97,8 +97,10 @@ function M.tools_for(ctrl)
   return out
 end
 
---- Run one advisor tool call (read kinds only, never asks the user).
----@return string content
+--- Run one reviewer tool call (advisor, critic, judge: read kinds only,
+--- never asks the user). A reviewer's read does not count as the agent's
+--- (read-before-edit): the agent has not seen that text.
+---@return string? content (nil: the task was stopped)
 local function run_tool(ctrl, gen, item, tc, max_bytes)
   local tool = ctrl.registry:get(tc.name)
   local args = util.json_decode(tc.arguments)
@@ -109,9 +111,10 @@ local function run_tool(ctrl, gen, item, tc, max_bytes)
   local content
   if not tool or not M.TOOLS[tc.name] or tool.kind ~= 'read' or not args then
     entry.status = 'failed'
-    content = 'Error: tool not available to the advisor: ' .. tostring(tc.name) .. ' (read-only tools only)'
+    content = 'Error: tool not available to the reviewer: ' .. tostring(tc.name) .. ' (read-only tools only)'
   else
     local ctx = ctrl:_tool_ctx(item, gen)
+    ctx.seen = nil
     local okp, prepared, perr = pcall(tool.prepare, args, ctx)
     async.main()
     local okt, title = pcall(tool.title, args, okp and prepared or nil)
@@ -123,7 +126,7 @@ local function run_tool(ctrl, gen, item, tc, max_bytes)
       local decision = ctrl.permissions:decide(tool, args, prepared)
       if decision.action ~= 'allow' then
         entry.status = 'denied'
-        content = 'DENIED for the advisor (' .. tostring(decision.reason) .. ').'
+        content = 'DENIED for the reviewer (' .. tostring(decision.reason) .. ').'
       else
         local okr, r = pcall(tool.run, args, ctx, prepared)
         async.main()
@@ -140,6 +143,8 @@ local function run_tool(ctrl, gen, item, tc, max_bytes)
   ctrl:_update(item)
   return content ~= '' and content or '(no output)'
 end
+
+M.run_tool = run_tool
 
 --- Ask the advisor at a checkpoint. Returns the advice text, or nil when
 --- skipped (a once-per-task checkpoint already ran) or failed (the task then

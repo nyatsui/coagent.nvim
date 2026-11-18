@@ -3182,6 +3182,11 @@ function Controller:_execute(gen, tc)
   item.decision = { action = decision.action, reason = decision.reason, warnings = decision.warnings, can_always = decision.can_always, sandbox = decision.sandbox, rule = decision.rule }
 
   if decision.action == 'deny' then
+    if decision.sent_back then
+      local out = fail('denied', decision.sent_back)
+      out.stop = decision.stop
+      return out
+    end
     return fail('denied', 'DENIED by policy: ' .. tostring(decision.reason))
   end
 
@@ -3427,15 +3432,41 @@ function Controller:_judge(gen, tool, args, prepared, decision, item)
   if self.gen ~= gen then
     return nil
   end
-  item.judge = { decision = v.decision, risk = v.risk, reason = v.reason, cached = v.cached, error = v.error, model = v.model, scripts = v.scripts }
-  entry = vim.tbl_extend('force', entry, { decision = v.decision, risk = v.risk, reason = v.reason, model = v.model, cached = v.cached, error = v.error, ms = v.ms, scripts = v.scripts })
+  local jcfg = self.config.judge or {}
+  -- judge.on_ask = 'agent' (like Claude Code's auto mode): an 'ask' verdict
+  -- goes back to the agent with the reason instead of to you. Failures of
+  -- the judge itself (timeout, malformed answer) still ask you.
+  local send_back = jcfg.on_ask == 'agent' and v.decision == 'ask' and not v.error and not v.cancelled
+  item.judge = { decision = v.decision, risk = v.risk, reason = v.reason, cached = v.cached, error = v.error, model = v.model, scripts = v.scripts, looked = v.looked, sent_back = send_back or nil }
+  entry = vim.tbl_extend('force', entry, { decision = v.decision, risk = v.risk, reason = v.reason, model = v.model, cached = v.cached, error = v.error, ms = v.ms, scripts = v.scripts, looked = v.looked })
   table.insert(self.session.judge_log, entry)
   while #self.session.judge_log > 500 do
     table.remove(self.session.judge_log, 1)
   end
+  if send_back then
+    t.judge_sent_back = (t.judge_sent_back or 0) + 1
+    entry.outcome = 'sent back to the agent'
+    local limit = math.max(1, tonumber(jcfg.max_sent_back) or 3)
+    local lines = {
+      'BLOCKED by the judge (judge.on_ask = "agent": the user was not asked): ' .. tostring(v.reason),
+    }
+    local sh = Judge.shown_text(v.scripts)
+    if sh then
+      table.insert(lines, 'What the judge was shown of the scripts: ' .. sh)
+    end
+    table.insert(lines, 'Do not get the same effect another way (the judge checks for that). Choose a safer approach that stays within '
+      .. 'the request, or stop and tell the user what you need and why.')
+    local stop
+    if t.judge_sent_back >= limit then
+      stop = string.format('The judge sent %d commands in a row back to the agent; the task stopped so you can decide. Last: %s', t.judge_sent_back, tostring(v.reason))
+      self:notice('warn', stop)
+    end
+    return vim.tbl_extend('force', decision, { action = 'deny', reason = 'judge: ' .. tostring(v.reason), judge = false, sent_back = table.concat(lines, '\n'), stop = stop }), entry
+  end
   if not v.error and not v.cancelled then
     if v.decision == 'allow' then
       t.judge_asks = 0
+      t.judge_sent_back = 0
     else
       t.judge_asks = (t.judge_asks or 0) + 1
       local limit = tonumber((self.config.judge or {}).pause_after) or 3
