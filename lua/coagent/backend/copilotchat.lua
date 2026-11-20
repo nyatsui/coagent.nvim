@@ -611,7 +611,95 @@ end
 --- Returns a result, `{cancelled=true}` when stopped, or nil + error string.
 ---@param req Coagent.AskRequest
 ---@return Coagent.AskResult?, string?
+--- Errors from the network or a server that is briefly unavailable, and a
+--- model list CopilotChat could not fetch: worth waiting for (the request
+--- never reached a model, so waiting costs no tokens).
+---@param err string
+---@return boolean
+function Backend.is_network(err)
+  err = tostring(err or ''):lower()
+  for _, pat in ipairs({
+    'could not fetch the model list', "couldn't connect", 'could not connect', 'could not resolve', 'connection reset',
+    'connection refused', 'network is unreachable', 'no route to host', 'temporary failure in name resolution',
+    'operation timed out', 'timed out', 'ssl connect error', '502', '503', '504',
+  }) do
+    if err:find(pat, 1, true) then
+      return true
+    end
+  end
+  return false
+end
+
+--- Did CopilotChat fail to fetch the model list? It then keeps an empty
+--- list for five minutes, and every request says "Model not found" although
+--- the model exists. Forget that empty list so the next request fetches it
+--- again (through CopilotChat's own code; nothing else is touched).
+---@return boolean
+local function forget_unfetched_models(client)
+  -- a provider whose list came back empty could not fetch it (the model
+  -- may well be one of its own)
+  local forgot = false
+  for _, cache in pairs(rawget(client, 'provider_cache') or {}) do
+    if type(cache) == 'table' and type(cache.models) == 'table' and next(cache.models) == nil then
+      cache.models_expires_at = 0
+      forgot = true
+    end
+  end
+  return forgot
+end
+
+-- the first wait for the network (then doubled, up to a minute)
+Backend.WAIT_BASE_MS = 2000
+
+--- `limits.network_wait_ms` (default 10 minutes; 0 = do not wait).
+local function network_wait_ms()
+  local ok, cfg = pcall(require, 'coagent.config')
+  local l = ok and cfg.options and cfg.options.limits or {}
+  return math.max(0, tonumber(l.network_wait_ms) or 10 * 60 * 1000)
+end
+
+--- Send one request. On a network error (or a model list that could not be
+--- fetched) it waits and tries again, 2s, 4s, ... up to a minute between
+--- tries, for at most limits.network_wait_ms; cancel() (stop) ends the wait.
+--- Must be called inside a coroutine.
 function Backend:ask(req)
+  if req.no_network_wait then
+    -- the caller has its own short timeout (judge, keep-alive pings)
+    return self:_ask_core(req)
+  end
+  local seq = self.cancel_seq or 0
+  local waited, tries = 0, 0
+  while true do
+    local res, err = self:_ask_core(req)
+    if res or not Backend.is_network(err) then
+      return res, err
+    end
+    local max = network_wait_ms()
+    if waited >= max then
+      if waited > 0 then
+        err = string.format('%s (gave up after waiting %s for the network)', err, util.format_duration(waited))
+      end
+      return nil, err
+    end
+    tries = tries + 1
+    local wait = math.min(60000, Backend.WAIT_BASE_MS * 2 ^ (tries - 1), max - waited)
+    if tries == 1 or tries % 5 == 0 then
+      local text = string.format('Cannot reach the model %s (%s). Waiting for the network: trying again in %ds (waited %s of at most %s; /stop to stop).',
+        tostring(req.model), util.clip(tostring(err), 120), math.floor(wait / 1000), util.format_duration(waited), util.format_duration(max))
+      for _, fn in ipairs(self.listeners) do
+        pcall(fn, 'waiting', text)
+      end
+    end
+    require('coagent.core.async').sleep(wait)
+    require('coagent.core.async').main()
+    if (self.cancel_seq or 0) ~= seq then
+      return { cancelled = true, content = '' }
+    end
+    waited = waited + wait
+  end
+end
+
+function Backend:_ask_core(req)
   local ok, err = pcall(self.ensure_ready, self)
   if not ok then
     return nil, tostring(err)
@@ -635,6 +723,10 @@ function Backend:ask(req)
       notices
     )
     res, ask_err, sent = self:_ask_once(client, req, { model = plan.base, base = plan.base })
+  end
+  if ask_err and tostring(ask_err):find('Model not found', 1, true) and forget_unfetched_models(client) then
+    -- not an unknown model: the list itself could not be fetched (network)
+    ask_err = 'could not fetch the model list (network?), so model ' .. tostring(plan.model) .. ' is not known yet'
   end
   if ask_err then
     return nil, ask_err
@@ -735,6 +827,8 @@ end
 --- Abort the in-flight request (if any).
 ---@return boolean
 function Backend:cancel()
+  -- also ends a wait for the network
+  self.cancel_seq = (self.cancel_seq or 0) + 1
   local ok, client = pcall(require, 'CopilotChat.client')
   if ok and client.stop then
     return client:stop()

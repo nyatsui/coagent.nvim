@@ -72,6 +72,7 @@ local function ping(ctrl, k)
       effort = req.effort,
       role = 'keepalive',
       headless = true, -- independent of the task's own (cancellable) request
+      no_network_wait = true, -- a ping that cannot get through is simply skipped
     })
     async.main()
     k.in_flight = false

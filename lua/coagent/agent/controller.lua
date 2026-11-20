@@ -94,6 +94,11 @@ function Controller.new(opts)
           end)
         elseif kind == 'status' then
           self.events:emit('backend_status', text)
+        elseif kind == 'waiting' and self:busy() then
+          -- waiting for the network: shown in the panel only (no popup each time)
+          vim.schedule(function()
+            self:notice('warn', text)
+          end)
         end
       end)
     )

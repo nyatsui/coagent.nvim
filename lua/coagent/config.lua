@@ -236,6 +236,12 @@ local defaults = {
     max_identical_calls = 4, -- same tool+args with the same result, no edit in between -> stop (warned once before)
     max_consecutive_denials = 3, -- user rejected N actions in a row -> stop
     max_request_retries = 2, -- transient API errors
+    -- A request that cannot reach the model (network errors, a 502/503/504,
+    -- or a model list CopilotChat could not fetch -> "Model not found") waits
+    -- and tries again (2s, 4s, ... up to 1 min apart) for at most this long,
+    -- then fails as before. No tokens are spent while waiting; /stop ends it.
+    -- 0 = do not wait.
+    network_wait_ms = 10 * 60 * 1000,
     max_tool_output_bytes = 24 * 1024, -- tool result size sent back to the model
     -- Token budgets (nil = none). Reaching one pauses the agent at the next step
     -- boundary (resumable with /resume; a running training process keeps going).

@@ -384,4 +384,129 @@ describe('CopilotChat used behind the scenes', function()
     end)
     assert.is_false(has_other())
   end)
+  describe('waiting for the network', function()
+    local cfg = require('coagent.config')
+    local curl = require('CopilotChat.utils.curl')
+    local orig_post = curl.post
+    local saved_options, saved_base, stream_lines
+    before_each(function()
+      -- a fake HTTP layer: the chat request streams a short answer
+      curl.post = async.wrap(function(_, args, cb)
+        local job = { shutdown = function() end }
+        vim.defer_fn(function()
+          for _, line in ipairs(stream_lines) do
+            args.stream(nil, line, job)
+          end
+          cb({ status = 200, body = '' })
+        end, 0)
+      end, 3)
+      saved_options, saved_base = cfg.options, Backend.WAIT_BASE_MS
+      cfg.options = vim.tbl_deep_extend('force', cfg.defaults(), { limits = { network_wait_ms = 5000 } })
+      Backend.WAIT_BASE_MS = 20
+      stream_lines = {
+        sse({ choices = { { delta = { content = 'ok' } } } }),
+        sse({ choices = { { finish_reason = 'stop', delta = {} } } }),
+        'data: [DONE]',
+      }
+    end)
+    after_each(function()
+      cfg.options, Backend.WAIT_BASE_MS = saved_options, saved_base
+      curl.post = orig_post
+    end)
+
+    local function setup_flaky(fail_times)
+      local calls = 0
+      local providers = require('CopilotChat.config.providers')
+      require('CopilotChat').setup({
+        model = 'fake-model',
+        providers = {
+          copilot = { disabled = true },
+          github_models = { disabled = true },
+          fake = { disabled = true },
+          flaky = {
+            get_headers = function()
+              return { Authorization = 'Bearer test-token' }
+            end,
+            get_models = function()
+              calls = calls + 1
+              if calls <= fail_times then
+                error('curl error: Could not resolve host: api.githubcopilot.com')
+              end
+              return { { id = 'flaky-model', name = 'Flaky', tools = true, streaming = true, max_input_tokens = 100000 } }
+            end,
+            prepare_input = providers.copilot.prepare_input,
+            prepare_output = providers.copilot.prepare_output,
+            get_url = function()
+              return 'https://fake.invalid/chat/completions'
+            end,
+          },
+        },
+      })
+      -- a fresh cache for the provider (CopilotChat keeps model lists 5 minutes)
+      local client = require('CopilotChat.client')
+      client.provider_cache.flaky = {}
+      return function()
+        return calls
+      end
+    end
+
+    it('a model list that could not be fetched is fetched again: "Model not found" turns into a wait, then the answer', function()
+      local fetches = setup_flaky(2)
+      local backend = Backend.new()
+      local waits = {}
+      backend:subscribe(function(kind, text)
+        if kind == 'waiting' then
+          table.insert(waits, text)
+        end
+      end)
+      local out = h.run_async(function()
+        local r, e = backend:ask({ model = 'flaky-model', system_prompt = 'S', messages = { { role = 'user', content = 'hi' } }, tools = {} })
+        return { r, e }
+      end, 5000)
+      local res, err = out[1], out[2]
+      assert.is_nil(err)
+      assert.are.equal('ok', res.content)
+      assert.are.equal(3, fetches())
+      assert.is_true(#waits >= 1)
+      assert.is_truthy(waits[1]:find('Waiting for the network', 1, true))
+      assert.is_truthy(waits[1]:find('could not fetch the model list', 1, true))
+    end)
+
+    it('gives up after network_wait_ms; a model really missing fails at once; stop ends the wait', function()
+      setup_flaky(1000)
+      cfg.options.limits.network_wait_ms = 100
+      local backend = Backend.new()
+      local function ask(model)
+        local out = h.run_async(function()
+          local r, e = backend:ask({ model = model, system_prompt = 'S', messages = { { role = 'user', content = 'hi' } }, tools = {} })
+          return { r, e }
+        end, 5000)
+        return out[1], out[2]
+      end
+      local res, err = ask('flaky-model')
+      assert.is_nil(res)
+      assert.is_truthy(err:find('could not fetch the model list', 1, true), err)
+      assert.is_truthy(err:find('gave up after waiting', 1, true))
+      assert.is_false(Backend.is_model_unavailable(err))
+
+      -- the list is fine but the model is not in it: no waiting
+      setup_flaky(0)
+      local started = vim.uv.now()
+      res, err = ask('no-such-model')
+      assert.is_nil(res)
+      assert.is_truthy(err:find('Model not found', 1, true))
+      assert.is_true(Backend.is_model_unavailable(err))
+      assert.is_true(vim.uv.now() - started < 1000)
+
+      -- stop (cancel) during the wait
+      setup_flaky(1000)
+      cfg.options.limits.network_wait_ms = 60000
+      Backend.WAIT_BASE_MS = 200
+      vim.defer_fn(function()
+        backend:cancel()
+      end, 50)
+      res = ask('flaky-model')
+      assert.is_true(res.cancelled)
+    end)
+  end)
 end)

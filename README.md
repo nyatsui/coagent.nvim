@@ -404,6 +404,13 @@ repeating the same investigation or fix can burn a lot of tokens (money / quota)
 - The paused state is saved with the session, so you can quit Neovim, restore it with `:CoagentSessions` and resume
 - Pausing at a limit sends a notification (`'limit'`, on by default; see "Notifications")
 - If large tasks stop too often, raise `limits.max_steps` and friends; lower them to keep costs down
+- **Waiting for the network.** A request that cannot reach the model — a network error, a 502 / 503 / 504, or a model
+  list CopilotChat could not fetch (it then keeps an empty list for five minutes, and every request says "Model not
+  found" although the model exists) — waits and tries again, 2s, 4s, ... up to a minute apart, for at most
+  `limits.network_wait_ms` (10 min), then fails as before. coagent makes CopilotChat fetch the model list again (it
+  forgets the empty one) instead of waiting out the five minutes. The panel says it is waiting; no tokens are spent
+  while waiting; `/stop` ends it. A model that is really missing from a list that was fetched fails at once (and
+  switches to `fallback_models` as before). `network_wait_ms = 0`: no waiting
 
 **Token budgets** (for unattended work) bound what a task or session may spend. They are off by default:
 

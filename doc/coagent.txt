@@ -1320,6 +1320,7 @@ the whole history, and Copilot bills by tokens. >lua
       max_tool_calls = 120,              -- tool executions } task
       max_duration_ms = 30 * 60 * 1000,  -- active time     } (resumable)
       max_consecutive_denials = 3,       -- end the task
+      network_wait_ms = 10 * 60 * 1000,  -- wait for the network, then fail
       max_identical_calls = 4,           -- end the task
       max_identical_failures = 3,        -- end the task
     }

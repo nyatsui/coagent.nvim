@@ -757,6 +757,7 @@ function M.review(ctrl, sc, cfg)
       temperature = 0,
       role = 'judge_review',
       headless = true,
+      no_network_wait = true, -- its own timeout
     }, tonumber(cfg.review_timeout_ms) or 60000)
     if r.cancelled then
       return nil, 'cancelled', true
@@ -871,6 +872,7 @@ function M.check(req)
       role = 'judge',
       -- independent of the agent's own (cancellable) request
       headless = true,
+      no_network_wait = true, -- its own timeout: no answer -> ask
     }, cfg.timeout_ms or 15000)
     local calls = (not r.cancelled and not r.timeout and r.res and not r.res.cancelled) and (r.res.tool_calls or {}) or {}
     if #calls == 0 or last then
