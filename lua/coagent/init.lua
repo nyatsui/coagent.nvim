@@ -90,6 +90,11 @@ function M.setup(opts)
     if c.archive_outputs ~= false and (c.archive_days or 30) > 0 then
       pcall(require('coagent.agent.archive').prune, config.options, c.archive_days or 30)
     end
+    -- copies of attached images
+    local days = (config.options.images or {}).keep_days or 30
+    if days > 0 then
+      pcall(require('coagent.agent.images').prune, days)
+    end
   end)
 
   local toggle = config.options.keymaps.global.toggle

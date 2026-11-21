@@ -49,6 +49,9 @@ and verify; the worker implements and runs.
   lets the previous worker go on instead: choose it when the next assignment is a follow-up or a correction on the
   same files or results and its context (shown in the report) is small next to what a new worker would re-read. Do
   not choose it for unrelated work, or when the previous worker went wrong in a way its context would repeat.
+- Images: you get the user's images by name only (each would cost your input on every step). Give a worker the ones
+  it must look at with `images`. For what you need from an image yourself, `read_images` has the worker model write
+  notes; reader "self" (your model, at its rate, once) only when the reading needs your judgement.
 - Read what you decide on or verify, not to search: let `explore` / `worker` find places and skim long files (their
   reports quote the lines as path:line), then read a narrow range yourself when it matters - the critical lines (loss,
   metric, data split, an interface), a quote that looks wrong. Your reads are limited per call and per task.
@@ -74,7 +77,7 @@ function M.lead_prompt(hands)
 end
 
 -- tools a worker does not get (no nesting, no lead-level orchestration)
-local EXCLUDE = { worker = true, explore = true, delegate = true, loop_control = true }
+local EXCLUDE = { worker = true, explore = true, delegate = true, loop_control = true, read_images = true }
 
 ---@param ctrl Coagent.Controller
 local function tools_for(ctrl)
@@ -101,6 +104,149 @@ local function brief(args)
     table.insert(parts, 'Done when: ' .. vim.trim(args.done_when))
   end
   return table.concat(parts, '\n\n')
+end
+
+--- The images the lead named (`images`: their numbers in the conversation)
+--- for a worker on `model`. Images the model does not accept are not given;
+--- the lines say so (for the worker's brief and the lead's report).
+---@param ctrl Coagent.Controller
+---@param args table
+---@param model string
+---@param who string? how the model is named in the notes (default 'the worker model')
+---@return table[] images, string[] notes for the worker, string[] notes for the lead, table? model info
+function M.images_for(ctrl, args, model, who)
+  who = who or 'the worker model'
+  local want = type(args.images) == 'table' and args.images or {}
+  if #want == 0 then
+    return {}, {}, {}, nil
+  end
+  local by_n = {}
+  for _, m in ipairs(ctrl.session.messages) do
+    for _, img in ipairs(type(m.images) == 'table' and m.images or {}) do
+      if img.n then
+        by_n[img.n] = img
+      end
+    end
+  end
+  local info
+  pcall(function()
+    info = ctrl.backend.model_info and ctrl.backend:model_info(model) or nil
+  end)
+  local Backend = require('coagent.backend.copilotchat')
+  local out, for_worker, for_lead, seen = {}, {}, {}, {}
+  for _, n in ipairs(want) do
+    n = tonumber(n)
+    local img = n and by_n[n]
+    if n and not seen[n] then
+      seen[n] = true
+      if not img then
+        table.insert(for_lead, string.format('image %d: there is no such image in this conversation', n))
+      else
+        local why = Backend.image_skip_reason(img, info, false, nil)
+        if why then
+          local text = why == 'vision' and (who .. ' ' .. model .. ' does not accept images') or (who .. ' ' .. model .. ' does not take this image (' .. why .. ')')
+          table.insert(for_lead, string.format('image %d (%s) not given: %s; describe what matters in the assignment', n, img.label, text))
+          table.insert(for_worker, string.format('[image %d: %s was meant for you but cannot be shown: %s]', n, img.label, text))
+        else
+          table.insert(out, img)
+        end
+      end
+    end
+  end
+  return out, for_worker, for_lead, info
+end
+
+--- How many images the model takes per request: what it took after
+--- refusing more this session (nil: no limit seen; the model list's
+--- max_prompt_images is not applied, models took more than it says).
+---@param ctrl Coagent.Controller
+---@param model string
+---@return integer?
+function M.images_per_request(ctrl, model)
+  local n = ctrl.backend.image_limit_for and tonumber(ctrl.backend:image_limit_for(model)) or nil
+  return n and n >= 1 and math.floor(n) or nil
+end
+
+--- Split the images for a worker whose model takes `per` per request: the
+--- first `per` (the ones the lead listed first) go to the worker itself, the
+--- rest are read beforehand in batches of `per`.
+---@return table[] direct, table[][] batches to read first
+function M.split_images(images, per)
+  if not per or #images <= per then
+    return images, {}
+  end
+  return { unpack(images, 1, per) }, M.batches({ unpack(images, per + 1) }, per)
+end
+
+M.READER = [[You read images for a coding task. Whoever does the task will not see these images: your notes are all it gets from them.
+Write down what the task needs from the images, precisely: exact text, numbers, names, error messages, layout and positions, sizes, colors, states. Quote text as written. Relate them to the notes from earlier images where that matters (differences, matches). Say what is unclear or unreadable instead of guessing. Leave out what the task does not need. No tools, no plan, no code: only the notes.]]
+
+local function image_tags(list)
+  return table.concat(vim.tbl_map(function(i)
+    return string.format('[image %d: %s]', i.n, i.label)
+  end, list), ', ')
+end
+
+--- Read images with `spec.model`, a batch per request. Unless
+--- `spec.separately`, each request also carries the notes of the batches
+--- before it, so they can be related (differences, matches).
+---@param spec {task:string, model:string, role:string, batches:table[][], per:integer, max_bytes:integer, separately:boolean?}
+---@return table[]? readings {images, text?, err?} (nil: the task was stopped / superseded)
+function M.read_batches(ctrl, gen, spec)
+  local readings = {}
+  for _, batch in ipairs(spec.batches) do
+    local limit = ctrl:_check_limits()
+    if limit then
+      table.insert(readings, { images = batch, err = 'stopped: ' .. limit })
+    else
+      local parts = { spec.task }
+      local before = {}
+      for _, r in ipairs(spec.separately and {} or readings) do
+        if r.text then
+          table.insert(before, string.format('Notes on %s:\n%s', image_tags(r.images), r.text))
+        end
+      end
+      if #before > 0 then
+        table.insert(parts, 'Notes from the images read before:\n\n' .. table.concat(before, '\n\n'))
+      end
+      table.insert(parts, 'Images to read now, attached below: ' .. image_tags(batch))
+      local res, err = ctrl.backend:ask({
+        messages = { { role = 'user', content = table.concat(parts, '\n\n'), images = vim.deepcopy(batch) } },
+        system_prompt = M.READER,
+        tools = {},
+        model = spec.model,
+        temperature = ctrl.config.temperature,
+        role = spec.role,
+      })
+      async.main()
+      if ctrl.gen ~= gen then
+        return nil
+      end
+      ctrl:_record_role(spec.role, spec.model, res)
+      local text = res and not res.cancelled and vim.trim(tostring(res.content or '')) or ''
+      if text ~= '' then
+        table.insert(readings, { images = batch, text = util.clip(text, spec.max_bytes) })
+      else
+        table.insert(readings, { images = batch, err = tostring(err or (res and res.cancelled and 'cancelled') or 'no answer') })
+      end
+    end
+  end
+  return readings
+end
+
+--- Batches of `per` images.
+---@return table[][]
+function M.batches(images, per)
+  local out = {}
+  for _, img in ipairs(images) do
+    local b = out[#out]
+    if not b or #b >= per then
+      b = {}
+      table.insert(out, b)
+    end
+    table.insert(b, img)
+  end
+  return out
 end
 
 local STATUS = { done = '✓', failed = '✗', denied = '⊘', deferred = '↺', blocked = '⊘' }
@@ -165,6 +311,49 @@ function M.run(ctrl, gen, args, item)
   local t = ctrl.task
   local messages, notes, continued, fresh_why = nil, nil, false, nil
   local last_worker = t and t.last_worker
+  -- the user's images the lead passes on (numbers as in the conversation)
+  local images, image_notes, image_report = M.images_for(ctrl, args, model)
+  -- more images than the worker model takes per request: the ones listed
+  -- first go to the worker, the rest are read beforehand, a batch per
+  -- request, and reach the worker as notes
+  local per = M.images_per_request(ctrl, model)
+  local batches
+  images, batches = M.split_images(images, per)
+  local readings = {}
+  if #batches > 0 then
+    readings = M.read_batches(ctrl, gen, { task = brief(args), model = model, role = 'worker', batches = batches, per = per, max_bytes = opts.max_report_bytes })
+    if not readings then
+      return nil
+    end
+  end
+  local read = {}
+  for _, r in ipairs(readings) do
+    if r.text then
+      table.insert(read, string.format('Notes on %s:\n%s', image_tags(r.images), r.text))
+    else
+      table.insert(image_notes, string.format('(%s could not be read for you: %s)', image_tags(r.images), r.err))
+    end
+  end
+  local function assignment()
+    local text = brief(args)
+    if #read > 0 then
+      text = text .. '\n\nThe model takes ' .. per .. ' image(s) per request, so these images were read in separate steps beforehand; '
+        .. 'the notes are what you have of them:\n\n' .. table.concat(read, '\n\n')
+    end
+    if #images > 0 then
+      text = text .. '\n\nImages from the user, attached below: ' .. image_tags(images)
+    end
+    if #image_notes > 0 then
+      text = text .. '\n\n' .. table.concat(image_notes, '\n')
+    end
+    return text
+  end
+  local function with_images(msg)
+    if #images > 0 then
+      msg.images = vim.deepcopy(images)
+    end
+    return msg
+  end
   if args.continue_previous == true then
     local ok, why = M.can_continue(last_worker, model, system, opts)
     if ok then
@@ -172,14 +361,14 @@ function M.run(ctrl, gen, args, item)
       messages = last_worker.messages
       notes = last_worker.notes
       continued = true
-      table.insert(messages, { role = 'user', content = 'Next assignment from the lead (you keep the context above: re-read a file only if it may '
-        .. 'have changed since, or for lines you have not seen):\n\n' .. brief(args) })
+      table.insert(messages, with_images({ role = 'user', content = 'Next assignment from the lead (you keep the context above: re-read a file only if it may '
+        .. 'have changed since, or for lines you have not seen):\n\n' .. assignment() }))
     else
       fresh_why = why
     end
   end
   if not messages then
-    messages = { { role = 'user', content = brief(args) } }
+    messages = { with_images({ role = 'user', content = assignment() }) }
     notes = {}
   end
   if t then
@@ -288,6 +477,24 @@ function M.run(ctrl, gen, args, item)
     '',
     'Files changed by the worker: ' .. (#files > 0 and table.concat(files, ', ') or 'none'),
   }
+  local function numbers(list)
+    return table.concat(vim.tbl_map(function(i)
+      return string.format('%d (%s)', i.n, i.label)
+    end, list), ', ')
+  end
+  if #images > 0 then
+    table.insert(out, 'Images given to the worker: ' .. numbers(images))
+  end
+  for _, r in ipairs(readings) do
+    if r.text then
+      table.insert(out, string.format('Image %s: read in a separate step first (%s takes %d per request); the worker got notes', numbers(r.images), model, per))
+    else
+      table.insert(out, string.format('Note: image %s could not be read for the worker: %s', numbers(r.images), r.err))
+    end
+  end
+  for _, line in ipairs(image_report) do
+    table.insert(out, 'Note: ' .. line)
+  end
   if diff ~= '' then
     table.insert(out, 'Diff of the worker\'s changes:\n' .. util.truncate_middle(diff, opts.max_diff_bytes))
   end
@@ -315,6 +522,15 @@ M.tool = {
       task = { type = 'string', description = 'The assignment: goal, context, decisions, constraints.' },
       files = { type = 'array', items = { type = 'string' }, description = 'Files the work involves.' },
       done_when = { type = 'string', description = 'The checks that define done (commands, expected results).' },
+      images = {
+        type = 'array',
+        items = { type = 'integer' },
+        description = 'Numbers of the user\'s images ([image N] in the conversation) the worker must look at itself, e.g. to '
+          .. 'match a screenshot or read a diagram. The worker sees nothing else of the conversation; each image costs '
+          .. 'its input tokens on every worker step, so pass only what the work needs and describe the rest. List the '
+          .. 'image the work depends on most first: when the worker model refused that many per request earlier, the ones listed '
+          .. 'first go to the worker and the rest are read in separate steps beforehand and reach it as notes.',
+      },
       continue_previous = {
         type = 'boolean',
         description = 'true: the worker of the previous assignment goes on with what it already read and ran (see "Worker '
@@ -339,6 +555,110 @@ M.tool = {
     local res = ctx.worker(args)
     if not res then
       return { ok = false, output = 'Error: the worker was stopped.' }
+    end
+    return res
+  end,
+}
+
+--- The read_images tool: notes on the user's images, read by the worker
+--- model (cheaper) or by the model running the conversation, a batch per
+--- request as the model takes them.
+---@param ctrl Coagent.Controller
+---@param gen integer
+---@param args {images:integer[], question:string, reader:string?, separately:boolean?}
+---@return table? result (nil: the task was stopped / superseded)
+function M.read_images(ctrl, gen, args)
+  local roles = ctrl:roles()
+  local reader = args.reader
+  local lines = {}
+  if reader ~= 'self' and reader ~= 'worker' then
+    reader = roles.lead and 'worker' or 'self'
+  end
+  if reader == 'worker' and not roles.lead then
+    reader = 'self'
+    table.insert(lines, 'Note: there is no worker model (roles.preset is not "lead"); your own model read the images.')
+  end
+  local model = reader == 'worker' and roles.worker_model or ctrl:active_model()
+  local who = reader == 'worker' and 'the worker model' or 'your model'
+  local images, _, skipped = M.images_for(ctrl, args, model, who)
+  for _, line in ipairs(skipped) do
+    table.insert(lines, 'Note: ' .. line:gsub('; describe what matters in the assignment$', '') .. (reader == 'worker' and ' (reader "self" reads it with your model, if it takes images)' or ''))
+  end
+  if #images == 0 then
+    return { ok = false, output = 'No image was read.\n' .. table.concat(lines, '\n'), summary = 'nothing read' }
+  end
+  local per = args.separately == true and 1 or (M.images_per_request(ctrl, model) or #images)
+  local batches = M.batches(images, per)
+  local readings = M.read_batches(ctrl, gen, {
+    task = 'Task: ' .. vim.trim(tostring(args.question or '')),
+    model = model,
+    role = reader == 'worker' and 'worker' or 'builder',
+    batches = batches,
+    per = per,
+    max_bytes = (roles.worker_opts or {}).max_report_bytes or 8000,
+    separately = args.separately == true,
+  })
+  if not readings then
+    return nil
+  end
+  local out = { string.format('Image notes (read by %s, %d request%s, %d image%s per request%s):', model, #batches, #batches == 1 and '' or 's',
+    per, per == 1 and '' or 's', args.separately == true and ', each on its own' or '') }
+  local read = 0
+  for _, r in ipairs(readings) do
+    if r.text then
+      read = read + #r.images
+      table.insert(out, string.format('\nNotes on %s:\n%s', image_tags(r.images), r.text))
+    else
+      table.insert(lines, string.format('Note: %s could not be read: %s', image_tags(r.images), r.err))
+    end
+  end
+  vim.list_extend(out, #lines > 0 and { '' } or {})
+  vim.list_extend(out, lines)
+  return { ok = read > 0, output = table.concat(out, '\n'), summary = string.format('%d image%s, %d request%s', read, read == 1 and '' or 's', #batches, #batches == 1 and '' or 's') }
+end
+
+M.read_tool = {
+  name = 'read_images',
+  kind = 'read',
+  description = 'Get written notes on the user\'s images ([image N] in the conversation) for a question, without the images '
+    .. 'entering your context. Use it for images you were not sent (named "not sent" in the conversation: your model '
+    .. 'takes only so many per request) or to have images read more cheaply. reader "worker" (the default under a '
+    .. 'lead): the cheaper worker model reads them; enough for text, numbers, error messages, layout. reader "self": your '
+    .. 'own model reads them, at its rate: only when the reading needs your judgement (subtle design, a dense diagram) '
+    .. 'or the worker model does not take images. All are read in one request, or a batch per request when the model '
+    .. 'refused that many earlier; each request carries the notes of the images before it unless `separately`. If a '
+    .. 'worker will do the work, give it the '
+    .. 'images with `worker` instead.',
+  schema = {
+    type = 'object',
+    required = { 'images', 'question' },
+    properties = {
+      images = { type = 'array', items = { type = 'integer' }, description = 'Image numbers, in the order to read them.' },
+      question = { type = 'string', description = 'What you need from the images (the task and what to look for).' },
+      reader = { type = 'string', enum = { 'worker', 'self' }, description = 'Who reads them (see above).' },
+      separately = { type = 'boolean', description = 'true: one image per request, each without the earlier notes (unrelated images).' },
+    },
+  },
+  title = function(args)
+    local ns = type(args.images) == 'table' and table.concat(vim.tbl_map(tostring, args.images), ', ') or '?'
+    return 'Read images ' .. ns .. (args.reader == 'self' and ' (self)' or '')
+  end,
+  prepare = function(args, ctx)
+    if type(args.images) ~= 'table' or #args.images == 0 then
+      return nil, 'images is required'
+    end
+    if type(args.question) ~= 'string' or vim.trim(args.question) == '' then
+      return nil, 'question is required'
+    end
+    if not ctx.read_images then
+      return nil, 'read_images is not available here'
+    end
+    return {}
+  end,
+  run = function(args, ctx)
+    local res = ctx.read_images(args)
+    if not res then
+      return { ok = false, output = 'Error: stopped.' }
     end
     return res
   end,

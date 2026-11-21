@@ -448,6 +448,9 @@ function M.item(item, o)
     if item.attachments then
       b.line(string.format('  (+%d attachment%s)', item.attachments, item.attachments > 1 and 's' or ''), 'CoagentDim')
     end
+    for k, desc in ipairs(type(item.images) == 'table' and item.images or {}) do
+      b.line(string.format('  (+image %d: %s)', k, desc), 'CoagentDim')
+    end
     if item.ledger then
       b.line('  (+ project ledger digest)', 'CoagentDim')
     end
@@ -548,7 +551,7 @@ function M.intro(o)
   b.line('Describe a task in the input below. The agent investigates, edits, runs checks and', 'CoagentDim')
   b.line('reports back. Edits and commands ask for approval in supervised mode.', 'CoagentDim')
   b.line('')
-  b.line('Context: @path @dir/ #buffer #buffers #selection #file:path #diagnostics #gitdiff', 'CoagentDim')
+  b.line('Context: @path @dir/ #buffer #buffers #selection #file:path #diagnostics #gitdiff #image[:path]', 'CoagentDim')
   b.line('Commands: /help /plan /compact /model /mode /new /usage ... (// sends a literal "/")', 'CoagentDim')
   b.line('Help: g? in this panel', 'CoagentDim')
   b.line('')

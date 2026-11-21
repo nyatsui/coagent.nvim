@@ -17,7 +17,8 @@ M.REFERENCES = {
   diagnostics = 'LSP diagnostics of the current buffer',
   gitdiff = 'Uncommitted git diff (#gitdiff:staged for staged changes)',
   url = 'A web page: #url:https://... (fetched with GET, text clipped)',
-  clipboard = 'The system clipboard (+ register, else the unnamed register)',
+  clipboard = 'The system clipboard (+ register, else the unnamed register; an image when it holds no text)',
+  image = 'An image for the model: #image:path/shot.png, or #image alone for the clipboard image',
 }
 
 ------------------------------------------------------------------------------
@@ -108,10 +109,38 @@ end
 
 --- Resolve `#refs` in `text`. Must run inside a coroutine.
 ---@param text string
----@param env {ws:Coagent.Workspace, source:{bufnr:integer?, winnr:integer?}, selection:table?, references:table?}
----@return string clean_text, string[] attachments, string[] errors, string[] infos
+---@param env {ws:Coagent.Workspace, source:{bufnr:integer?, winnr:integer?}, selection:table?, references:table?, image_base:integer?}
+---@return string clean_text, string[] attachments, string[] errors, string[] infos, Coagent.Image[] images
 function M.resolve_references(text, env)
-  local atts, errors, infos = {}, {}, {}
+  local atts, errors, infos, images = {}, {}, {}, {}
+  local Images = require('coagent.agent.images')
+  -- set by a handler that attached an image: what replaces its #ref in the text
+  local image_repl
+
+  --- Add a stored image (or an error) to this message.
+  ---@param img Coagent.Image?
+  ---@param err string?
+  local function add_image(img, err)
+    async.main()
+    if not img then
+      table.insert(errors, err or 'image not attached')
+      return
+    end
+    local max = (Images.options().max_per_message or 5)
+    if #images >= max then
+      table.insert(errors, string.format('%s: at most %d images per message (images.max_per_message); not attached', img.label, max))
+      return
+    end
+    for _, i in ipairs(images) do
+      if i.id == img.id then
+        return
+      end
+    end
+    -- numbered across the session, so "image 3" means one image everywhere
+    img.n = (tonumber(env.image_base) or 0) + #images + 1
+    table.insert(images, img)
+    image_repl = string.format('[image %d: %s]', img.n, img.label)
+  end
   local refcfg = env.references or require('coagent.config').options.references or {}
   local source = env.source or {}
   local cc_source = {
@@ -157,6 +186,10 @@ function M.resolve_references(text, env)
     local data = util.read_file(info.real)
     if not data then
       table.insert(errors, ref .. ' not found')
+      return
+    end
+    if Images.sniff(data) then
+      add_image(Images.store(data, info.rel))
       return
     end
     if data:find('\0', 1, true) then
@@ -241,10 +274,44 @@ function M.resolve_references(text, env)
       table.insert(infos, string.format('Fetched %s (%s%s)', url, human(#data), clipped and (', attached the first ' .. human(#body)) or ''))
       table.insert(atts, attachment('url', url, 'text', body .. (clipped and '\n[... clipped]' or '')))
     end,
+    image = function(arg)
+      if not arg or arg == '' then
+        -- the image in the clipboard now
+        async.main()
+        local img, err = Images.from_clipboard()
+        add_image(img, err and ('#image: ' .. err))
+        return
+      end
+      local id = arg:match('^clip:(%x+)$')
+      if id then
+        add_image(Images.find(id))
+        return
+      end
+      local info = env.ws:check(arg)
+      if not info.inside then
+        table.insert(errors, '#image:' .. arg .. ' is outside the workspace (copy the image and use #image, or the paste key, to attach it from the clipboard)')
+        return
+      end
+      if info.protected then
+        table.insert(errors, '#image:' .. arg .. ' is a protected file (' .. info.protected .. '); not attached')
+        return
+      end
+      if info.is_dir or not info.exists then
+        table.insert(errors, '#image:' .. arg .. ' not found')
+        return
+      end
+      add_image(Images.from_file(info.real, info.rel))
+    end,
     clipboard = function()
       async.main()
       local data = M.read_clipboard()
       if not data or data == '' then
+        -- nothing as text: an image (a screenshot) may be there
+        local img = Images.from_clipboard()
+        if img then
+          add_image(img)
+          return
+        end
         table.insert(errors, '#clipboard: the clipboard is empty')
         return
       end
@@ -280,8 +347,12 @@ function M.resolve_references(text, env)
         tok = tok:sub(1, #tok - (#arg - #stripped))
         arg = stripped
       end
-      add({ s = pos, e = pos + #tok - 1, repl = '' }, '#' .. name .. ':' .. arg, function()
+      local span = { s = pos, e = pos + #tok - 1, repl = '' }
+      add(span, '#' .. name .. ':' .. arg, function()
+        image_repl = nil
         handlers[name](arg)
+        -- an attached image keeps a marker where it was written
+        span.repl = image_repl or span.repl
       end)
     end
   end
@@ -317,7 +388,7 @@ function M.resolve_references(text, env)
     end
   end
   table.insert(parts, text:sub(last))
-  return vim.trim(table.concat(parts)), atts, errors, infos
+  return vim.trim(table.concat(parts)), atts, errors, infos, images
 end
 
 M.MENTION_ALIASES = { buffer = true, selection = true }
@@ -372,6 +443,9 @@ function M.estimate(messages, system_prompt)
   local chars = #(system_prompt or '')
   for _, m in ipairs(messages) do
     chars = chars + #(m.content or '') + 16
+    for _, img in ipairs(type(m.images) == 'table' and m.images or {}) do
+      chars = chars + (tonumber(img.tokens) or 1000) * 3.5
+    end
     for _, tc in ipairs(m.tool_calls or {}) do
       chars = chars + #(tc.arguments or '') + #(tc.name or '') + 16
     end
@@ -728,6 +802,19 @@ end
 ---@param archive (fun(text:string):string?)? saves tool outputs (their ids appear in the transcript)
 ---@param kept {i:integer}[]?
 ---@return string
+--- "\n[images attached: a.png, clipboard]" for a message with images ('' without).
+---@param m table
+---@return string
+function M.image_note(m)
+  if type(m.images) ~= 'table' or #m.images == 0 then
+    return ''
+  end
+  local labels = vim.tbl_map(function(i)
+    return i.label or 'image'
+  end, m.images)
+  return '\n[images attached (not shown here): ' .. table.concat(labels, ', ') .. ']'
+end
+
 function M.transcript(messages, from, upto, prev_summary, archive, kept)
   local is_kept = {}
   for _, k in ipairs(kept or {}) do
@@ -745,7 +832,7 @@ function M.transcript(messages, from, upto, prev_summary, archive, kept)
       table.insert(parts, '## user (kept verbatim beside the summary: do not restate it)\n' .. util.clip(M.user_text(m) or '', 300))
     elseif M.user_text(m) then
       -- not kept verbatim: whole, so the summary can carry every instruction
-      table.insert(parts, '## user (NOT kept: carry its instructions into the summary)\n' .. M.user_text(m))
+      table.insert(parts, '## user (NOT kept: carry its instructions into the summary)\n' .. M.user_text(m) .. M.image_note(m))
     else
       local text = '## ' .. m.role .. '\n' .. util.clip(m.content or '', 4000)
       for _, tc in ipairs(m.tool_calls or {}) do

@@ -88,6 +88,8 @@ I'll find the `add` implementation and its tests.
   exactly that environment and you watch them live. Long runs become background jobs writing `.coagent/logs/`, which
   coagent tails locally (monitoring, `/exp`, the output panel keep working). Same approval rules; no host or path settings
 - **`#url` / `#clipboard`** — attach the text of a web page you typed, or the clipboard
+- **Images** — `#image:shot.png`, `@shot.png`, `#image` (the clipboard) or `<M-v>` in the input send a screenshot or
+  diagram with the message (models that accept images; see [Images](#images))
 - **Inline edit** — `:'<,'>CoagentInline <instruction>` rewrites just the selection with one request (no tools) and previews
   the diff in the buffer (`ga` apply / `gr` discard / `gi` follow-up). Applied edits can be rewound
 - **Follow-up messages while it works** — messages sent while the agent is busy are queued and delivered at the next step
@@ -208,7 +210,55 @@ The input understands these context references:
 | `#diagnostics` | LSP diagnostics of the current buffer |
 | `#gitdiff` / `#gitdiff:staged` | Unstaged / staged diff |
 | `#url:https://...` | Text of a web page (fetched with GET, clipped to `references.url_max_bytes`, 32KB by default) |
-| `#clipboard` | Clipboard (`+` register, falling back to the unnamed register `"`; clipped to `references.clipboard_max_bytes`) |
+| `#clipboard` | Clipboard (`+` register, falling back to the unnamed register `"`; clipped to `references.clipboard_max_bytes`). An image when it holds no text |
+| `#image:path` / `#image` | An image file in the workspace / the image in the clipboard, sent as an image (see [Images](#images)). `@shot.png` works too |
+
+### Images
+
+`#image:path` (or `@path` / `#file:path` on a PNG, JPEG, GIF or WebP file) sends the picture itself with the message;
+`#image` alone takes the image in the clipboard when the message is sent. `<M-v>` in the input
+(`keymaps.input.paste_image`) saves the clipboard image right away and inserts `#image:clip:<id>`, so later clipboard
+changes do not matter. The clipboard is read with a local command: `osascript` (macOS), PowerShell (Windows / WSL),
+`wl-paste` (Wayland) or `xclip` (X11). Each image shows on the panel with its size and rough token cost.
+
+- The image is copied to `stdpath('state')/coagent/images` (`images.dir`; unused copies are deleted after
+  `images.keep_days`, 30) and the session keeps only its path. It is sent with its message every time the conversation is
+  sent, so it costs input tokens (roughly 100-1500 per image) on every step, like the rest of the conversation (prompt
+  caching applies). It stops being sent when its message is summarized or dropped from the context.
+- The request goes through CopilotChat as usual: coagent only turns that message into text + image parts in the body
+  CopilotChat builds (Chat Completions and Responses API), and adds the `Copilot-Vision-Request: true` header the Copilot
+  API expects on such requests (as VS Code does; `images.vision_header = false` leaves it out). No other header, URL or
+  authentication changes. If CopilotChat gains image support of its own, a message it already sends as parts is left alone.
+- What each model takes comes from the Copilot models API (read from the model list CopilotChat fetches; no extra
+  request): whether it reads images at all, the size (3 MB for most) and the types. An image a model does not take is
+  not sent: the message names it instead (`[image 2: shot.png not sent: ...]`), and a notice says so once. Attaching
+  warns at once when the model reading the conversation does not take the image. With `auto`, this is checked on the
+  model the server picked.
+- The list also gives a number of images per request (1 for most models), but models took more than it says (two
+  images, in one message or across the history, both read), so it is not applied: every image of the conversation is
+  sent. A model that refuses a request with several images (an error about images) gets it again with the newest
+  (as many as the list says), and no more than that go to it for the rest of the session.
+- A model that still refuses the images gets the same request again without them, and no images go to it for the rest
+  of the session. Another error on a request with images says it carried images. coagent
+  does not work around a refusal by your organization's policy.
+- Images are numbered across the session (`[image 3: ...]`). Under a lead, the lead's model gets their names only, not
+  the images (`images.to_lead = false`, the default): an image in the conversation would cost the lead's input on every
+  step. The lead has them read when it needs them: `read_images` (below), or a worker that looks at them itself with the
+  `worker` tool's `images: [3]` (a worker whose model does not take them gets a note, and the lead is told).
+  `images.to_lead = true` sends them to the lead with the conversation. Each image costs the worker's input tokens on
+  every worker step, so the lead passes only what the work needs. When the worker model refused that many per request
+  earlier, the ones listed first go to the worker, and the rest are read beforehand by the same model, a request per
+  batch, each with the notes
+  of the images before it; the worker gets those notes. A reading request has no tools and costs about one image plus
+  the assignment, not a worker step each. Explorers, summaries and the judge get the image's name only.
+- The `read_images` tool (offered once the session has images) returns written notes on images for a question: for
+  images the model was not sent, or to have them read more cheaply. `reader: "worker"`
+  (the default under a lead) uses the worker model; `reader: "self"` the conversation's model, at its rate, when the
+  reading needs its judgement or the worker model takes no images. All are read in one request (a batch per request
+  when the model refused that many earlier, each with the notes of the ones before); `separately: true` reads one per
+  request, each on its own.
+- Limits: `images.max_bytes` (5 MB) per image, `images.max_per_message` (5). Paths outside the workspace and protected
+  files are refused, as for `#file` (copy such an image and use the clipboard).
 
 `#url` fetches only URLs you typed yourself (no approval prompt: it is a fetch, not a send). URLs that are not
 `http://` / `https://`, that omit the scheme, or that contain `user:pass@` are rejected. The page is fetched with

@@ -570,7 +570,7 @@ function M.complete_reference(before)
   local items = {}
   for _, n in ipairs(names) do
     if vim.startswith(n, base) then
-      local takes_arg = n == 'file' or n == 'url' or n == 'gitdiff'
+      local takes_arg = n == 'file' or n == 'url' or n == 'gitdiff' or n == 'image'
       table.insert(items, { word = '#' .. n .. ((n == 'file' or n == 'url') and ':' or ''), abbr = '#' .. n .. (takes_arg and ':' or ''), menu = refs[n] })
     end
   end

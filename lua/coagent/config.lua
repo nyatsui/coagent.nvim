@@ -499,6 +499,24 @@ local defaults = {
     clipboard_max_bytes = 32 * 1024, -- #clipboard text attached at most
   },
 
+  -- Images sent with a message: #image:path, #image (the clipboard), @shot.png,
+  -- or the input's paste_image key. The model must accept images; each image
+  -- costs input tokens (roughly 100-1500) every time the conversation is sent.
+  images = {
+    max_bytes = 5 * 1024 * 1024, -- larger files are refused (crop or shrink them)
+    max_per_message = 5,
+    dir = nil, -- nil = stdpath('state')/coagent/images (copies of the attached images)
+    keep_days = 30, -- copies not used for this long are deleted
+    -- the header the Copilot API expects on requests with images
+    -- (Copilot-Vision-Request: true, as VS Code sends it); false = never sent
+    vision_header = true,
+    -- roles.preset = "lead": false = the lead's model gets the images' names
+    -- only (no image tokens on every lead step); it has them read when needed
+    -- (read_images: the worker model, or its own with reader "self"; worker
+    -- images). true = they go to the lead with the conversation
+    to_lead = false,
+  },
+
   -- Repository instruction files injected as *untrusted, lower-priority* project notes.
   instruction_files = { 'AGENTS.md', '.github/copilot-instructions.md', 'CLAUDE.md' },
   instructions = {
@@ -839,6 +857,8 @@ local defaults = {
       close = false,
       history_prev = '<C-p>',
       history_next = '<C-n>',
+      -- the image in the clipboard: saved now, "#image:clip:<id>" inserted (Normal and Insert)
+      paste_image = '<M-v>',
       -- Normal-mode keys in the input. Single-letter panel keys (a, d, i, r, q...)
       -- stay normal editing keys here, so approvals use g-prefixed keys.
       approve = 'ga',

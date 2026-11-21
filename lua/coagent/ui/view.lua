@@ -327,6 +327,35 @@ function View:_submit_deny(text)
   return true, { history = false }
 end
 
+--- Save the clipboard image now and put "#image:clip:<id>" in the input at
+--- the cursor (the message sends that image, whatever the clipboard holds by
+--- then).
+function View:paste_image()
+  local Images = require('coagent.agent.images')
+  local img, err = Images.from_clipboard()
+  if not img then
+    vim.notify('[coagent] ' .. tostring(err), vim.log.levels.WARN)
+    return
+  end
+  local token = '#image:clip:' .. img.id
+  local win = self.wins and self.wins.input
+  if not (win and vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win) == self.input.buf) then
+    self.input:append(token)
+  else
+    local row, col = unpack(vim.api.nvim_win_get_cursor(win))
+    local line = vim.api.nvim_buf_get_lines(self.input.buf, row - 1, row, false)[1] or ''
+    local insert = vim.fn.mode():sub(1, 1) == 'i'
+    -- Normal mode: after the cursor character; Insert mode: at the cursor
+    local at = insert and col or math.min(#line, col + 1)
+    local before, after = line:sub(1, at), line:sub(at + 1)
+    local text = (before ~= '' and not before:match('%s$') and ' ' or '') .. token .. (after:match('^%s') and '' or ' ')
+    vim.api.nvim_buf_set_text(self.input.buf, row - 1, at, row - 1, at, { text })
+    vim.api.nvim_win_set_cursor(win, { row, at + #text })
+    self.input:placeholder()
+  end
+  vim.notify('[coagent] image pasted: ' .. Images.describe(img), vim.log.levels.INFO)
+end
+
 function View:focus_input()
   if not self:visible() then
     self:open()
@@ -882,6 +911,9 @@ function View:_keymaps()
   imap('n', ik.history_next, function()
     self.input:history_move(1)
   end, 'next prompt')
+  imap({ 'n', 'i' }, ik.paste_image, function()
+    self:paste_image()
+  end, 'paste the clipboard image')
 
   -- Panel actions reachable from the input's Normal mode (g-prefixed).
   local function nmap_nowait(lhs, fn, desc)

@@ -297,7 +297,44 @@ References in a prompt attach context:
   #url:https://...    A web page, fetched with GET and attached as text
                       (clipped to `references.url_max_bytes`, 32 KB).
   #clipboard          The + register (else the unnamed register), clipped
-                      to `references.clipboard_max_bytes`.
+                      to `references.clipboard_max_bytes`. The clipboard
+                      image when it holds no text.
+  #image:path         An image file (PNG, JPEG, GIF, WebP) sent as an
+                      image; @shot.png and #file:shot.png do the same.
+  #image              The image in the clipboard when the message is sent.
+
+Images ~                                                     *coagent-images*
+The picture itself goes with the message, for models that accept images.
+<M-v> in the input (`keymaps.input.paste_image`) saves the clipboard image
+now and inserts "#image:clip:<id>". The clipboard is read with osascript
+(macOS), PowerShell (Windows/WSL), wl-paste (Wayland) or xclip (X11).
+Images are copied to stdpath('state')/coagent/images (`images.dir`,
+deleted after `images.keep_days` unused) and sent with their message every
+time the conversation is sent: input tokens (about 100-1500 each) on every
+step, until the message is summarized or dropped. coagent turns that
+message into text + image parts in the body CopilotChat builds and adds
+the `Copilot-Vision-Request: true` header the Copilot API expects
+(`images.vision_header = false` leaves it out); nothing else changes.
+What a model takes (images at all, size, types) comes from the models
+API, read from the list CopilotChat fetches. An image a model does not
+take is not sent; the message names it instead. The list's images per
+request is not applied (models took more): a model that refuses several
+images gets the request again with the newest and no more than that for
+the session. A model that refuses images anyway gets the request again
+without them and no images for the rest of the session. coagent does not work around a refusal
+by organization policy. Images are numbered across the session. Under a
+lead, the lead's model gets their names only (`images.to_lead = false`,
+default; `true` sends them): it has them read when needed, with
+`read_images` or the `worker` tool's `images: [N]` for a worker that must
+see them. If its model refused that many per request, the ones listed
+first go to the worker and the rest are read beforehand, a request per
+batch with the notes of the ones before; the worker gets the notes.
+The `read_images` tool returns notes on images for a question, read by
+the worker model (`reader: "worker"`, default under a lead) or by the
+conversation's model (`reader: "self"`): in one request, or a batch per
+request with the earlier notes when the model refused that many;
+`separately: true` reads one per request.
+Limits: `images.max_bytes` (5 MB), `images.max_per_message` (5).
 
 #url fetches only URLs you type: no approval is asked because it is a
 fetch, not a send. Only http:// and https:// are accepted; other schemes,

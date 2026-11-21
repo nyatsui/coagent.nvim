@@ -27,6 +27,13 @@
 ---     by the coroutine running client:ask, so parallel requests never mix.
 ---   * Never sent for the 'auto' model. A 400 that rejects the parameter is
 ---     retried once without it and the model is remembered as unsupported.
+---
+--- Images (user messages with `images`, see agent/images.lua; handed to
+--- CopilotChat as `coagent_images`): the same
+--- prepare_input wrapper turns those messages into text + image parts in the
+--- body CopilotChat built and adds the Copilot-Vision-Request header the
+--- Copilot API expects on such requests (Backend.add_images). A message
+--- CopilotChat already sent as parts is left alone.
 local util = require('coagent.core.util')
 
 ---@class Coagent.Backend
@@ -61,6 +68,9 @@ function Backend.new(opts)
     hide_ui = opts.hide_ui ~= false,
     -- models that rejected a reasoning effort (this editor session)
     no_effort = {},
+    -- model id -> true: refused images this session (not sent to it again)
+    no_vision = {},
+    image_limit = {}, -- model -> images per request it took after refusing more (learned this session)
     noted = {},
   }, Backend)
   self._on_message = function(msg)
@@ -236,6 +246,9 @@ function Backend:models()
       multiplier = tonumber(m.multiplier),
       reasoning_efforts = m.reasoning_efforts,
       reasoning_effort = m.reasoning_effort,
+      -- from the models API (see wrap_get_models); nil = not known
+      vision = m.vision,
+      vision_limits = m.vision_limits,
     })
   end
   table.sort(out, function(a, b)
@@ -258,6 +271,13 @@ end
 
 ---@param model string
 ---@return table?
+--- Images per request the model took after refusing more (nil: no limit seen).
+---@param model string
+---@return integer?
+function Backend:image_limit_for(model)
+  return self.image_limit and self.image_limit[model] or nil
+end
+
 function Backend:model_info(model)
   for _, m in ipairs(self:models()) do
     if m.id == model then
@@ -281,6 +301,14 @@ local function to_history(messages)
       msg.tool_calls = vim.tbl_map(function(tc)
         return { id = tc.id, name = tc.name, arguments = fix(tc.arguments or '{}') }
       end, m.tool_calls)
+    end
+    if m.role == 'user' and type(m.images) == 'table' and #m.images > 0 then
+      -- only where the files are; the prepare_input wrapper reads them. Not
+      -- `images`: a CopilotChat with image support of its own may use that name
+      -- for another shape
+      msg.coagent_images = vim.tbl_map(function(i)
+        return { path = i.path, mime = i.mime, label = i.label, bytes = i.bytes, n = i.n }
+      end, m.images)
     end
     table.insert(out, msg)
   end
@@ -325,6 +353,140 @@ local function same_model(id, model)
   return id ~= '' and (id == model or vim.startswith(model, id .. ':'))
 end
 
+------------------------------------------------------------------------------
+-- Images
+------------------------------------------------------------------------------
+
+-- Header the Copilot API expects on a request that carries images (VS Code
+-- sends it too). It only says the request has images; it does not change
+-- who the client is. images.vision_header = false leaves it out.
+Backend.VISION_HEADER = 'Copilot-Vision-Request'
+
+--- Why an image is not sent to `model` (nil: it is sent).
+---@param img table {mime, bytes}
+---@param model table? CopilotChat's model entry with `vision` / `vision_limits` (see wrap_get_models)
+---@param blocked boolean? the model refused images earlier this session
+---@param left integer? images the request may still carry
+---@return string? reason 'vision' | 'type' | 'size' | 'count'
+function Backend.image_skip_reason(img, model, blocked, left)
+  if blocked or (type(model) == 'table' and model.vision == false) then
+    return 'vision'
+  end
+  local lim = type(model) == 'table' and type(model.vision_limits) == 'table' and model.vision_limits or {}
+  if type(lim.supported_media_types) == 'table' and #lim.supported_media_types > 0 and not vim.tbl_contains(lim.supported_media_types, img.mime) then
+    return 'type'
+  end
+  local max = tonumber(lim.max_prompt_image_size)
+  if max and (tonumber(img.bytes) or 0) > max then
+    return 'size'
+  end
+  if left and left <= 0 then
+    return 'count'
+  end
+end
+
+--- The note the model reads instead of an image that is not sent.
+local function skip_text(reason, model, img, limit)
+  local id = type(model) == 'table' and tostring(model.id or 'this model') or 'this model'
+  local lim = type(model) == 'table' and type(model.vision_limits) == 'table' and model.vision_limits or {}
+  if reason == 'vision' then
+    return 'not sent: model ' .. id .. ' does not accept images'
+  elseif reason == 'type' then
+    return 'not sent: model ' .. id .. ' does not take ' .. tostring(img.mime)
+  elseif reason == 'size' then
+    return string.format('not sent: larger than the %s model %s takes', require('coagent.agent.images').human(tonumber(lim.max_prompt_image_size) or 0), id)
+  elseif reason == 'count' then
+    return string.format('not sent again: model %s refused more than %s image(s) per request, so only the newest are sent', id, tostring(limit))
+  end
+  return 'is no longer available'
+end
+
+--- Turn the user messages that carry `coagent_images` into text + image
+--- parts, in the body CopilotChat built (Chat Completions `messages` or
+--- Responses API `input`). What the model does not take (no vision, a type or
+--- size it refuses per the model list, more images per request than it took
+--- after refusing more: the newest are kept) is not sent; the message says so
+--- in its text instead. The model list's max_prompt_images is not applied:
+--- models took more than it says. A message
+--- CopilotChat already sent as parts (image support of its own) is left alone.
+---@param request table body from prepare_input
+---@param inputs table[] messages given to prepare_input
+---@param responses boolean Responses API body
+---@param model table? CopilotChat's model entry (opts.model)
+---@param blocked boolean? the model refused images earlier this session
+---@param limit integer? images per request the model took after refusing more
+---@return integer added, table<string, integer> skipped count per reason
+function Backend.add_images(request, inputs, responses, model, blocked, limit)
+  local skipped = {}
+  local list = type(request) == 'table' and (responses and request.input or request.messages) or nil
+  if type(list) ~= 'table' or type(inputs) ~= 'table' then
+    return 0, skipped
+  end
+  local Images = require('coagent.agent.images')
+  local function text_part(t)
+    return responses and { type = 'input_text', text = t } or { type = 'text', text = t }
+  end
+  local function image_part(url)
+    return responses and { type = 'input_image', image_url = url } or { type = 'image_url', image_url = { url = url } }
+  end
+  -- decide newest first: a per-request image limit keeps the latest images
+  local left = tonumber(limit)
+  local decision = {}
+  for i = #inputs, 1, -1 do
+    local input = inputs[i]
+    local images = type(input) == 'table' and input.role == 'user' and input.coagent_images or nil
+    if type(images) == 'table' then
+      decision[i] = {}
+      for k = #images, 1, -1 do
+        local why = Backend.image_skip_reason(images[k], model, blocked, left)
+        decision[i][k] = why or true
+        if why then
+          skipped[why] = (skipped[why] or 0) + 1
+        elseif left then
+          left = left - 1
+        end
+      end
+    end
+  end
+  local used, added = {}, 0
+  for i, input in ipairs(inputs) do
+    local images = decision[i] and input.coagent_images
+    if type(images) == 'table' and #images > 0 then
+      for j, out in ipairs(list) do
+        -- the same message: role user and the very same text (still a string)
+        if not used[j] and type(out) == 'table' and out.role == 'user' and type(out.content) == 'string' and out.content == input.content then
+          used[j] = true
+          local parts, notes, sent = { text_part(out.content) }, {}, 0
+          for k, img in ipairs(images) do
+            local label = string.format('[image %d: %s', tonumber(img.n) or k, tostring(img.label or 'image'))
+            local url = decision[i][k] == true and Images.data_url(img) or nil
+            if url then
+              table.insert(parts, text_part(label .. ']'))
+              table.insert(parts, image_part(url))
+              sent = sent + 1
+            else
+              local why = decision[i][k] ~= true and decision[i][k] or nil
+              table.insert(notes, label .. ' ' .. skip_text(why, model, img, limit) .. ']')
+            end
+          end
+          if sent > 0 then
+            for _, n in ipairs(notes) do
+              table.insert(parts, text_part(n))
+            end
+            out.content = parts
+            added = added + sent
+          else
+            -- nothing to show: the text stays a plain string
+            out.content = out.content .. '\n\n' .. table.concat(notes, '\n')
+          end
+          break
+        end
+      end
+    end
+  end
+  return added, skipped
+end
+
 --- Wrap a provider's prepare_input so it adds the effort coagent set for the
 --- current request. Without a pending effort the original body is returned
 --- unchanged (CopilotChat's own chat requests are never affected).
@@ -339,6 +501,16 @@ function Backend.wrap_prepare_input(orig)
     local co = current_co()
     local entry = co and pending[co]
     local model = type(opts) == 'table' and opts.model or nil
+    if entry and entry.images and type(request) == 'table' then
+      local id = type(model) == 'table' and tostring(model.id or '') or ''
+      local n, skipped = Backend.add_images(request, inputs, type(model) == 'table' and model.use_responses == true, model, entry.no_vision and entry.no_vision[id],
+        entry.image_limit and (entry.image_limit[id] or entry.image_limit[entry.model]))
+      entry.images_sent, entry.images_skipped, entry.sent_model = n, skipped, id
+      local o = require('coagent.agent.images').options()
+      if n > 0 and o.vision_header ~= false then
+        extra = vim.tbl_extend('force', extra or {}, { [Backend.VISION_HEADER] = 'true' })
+      end
+    end
     if entry and type(opts) == 'table' then
       by_options[opts] = entry
     end
@@ -487,6 +659,10 @@ function Backend.wrap_providers(providers)
       if wrappers[provider.prepare_input] then
         provider.prepare_output = Backend.wrap_prepare_output(provider.prepare_output)
       end
+    end
+    -- the Copilot models API (data[].capabilities): what each model takes in images
+    if name == 'copilot' and type(provider) == 'table' and type(provider.get_models) == 'function' and not wrappers[provider.get_models] then
+      provider.get_models = Backend.wrap_get_models(provider.get_models)
     end
   end
   return n
@@ -713,7 +889,31 @@ function Backend:_ask_core(req)
   end
   local plan = self:_plan_effort(req, models, notices)
 
-  local res, ask_err, sent = self:_ask_once(client, req, plan)
+  local res, ask_err, sent, meta = self:_ask_once(client, req, plan)
+  if ask_err and meta and (meta.images_sent or 0) > 1 and Backend.is_image_rejection(ask_err) then
+    -- maybe too many images in one request: send again with the newest the
+    -- model list allows (1 when it allows as many), and keep to that
+    local id = (meta.sent_model and meta.sent_model ~= '') and meta.sent_model or plan.model
+    if not self.image_limit[id] then
+      local info = self:model_info(id)
+      local listed = info and type(info.vision_limits) == 'table' and tonumber(info.vision_limits.max_prompt_images) or nil
+      local keep = (listed and listed >= 1 and listed < meta.images_sent) and math.floor(listed) or 1
+      self.image_limit[id] = keep
+      self.image_limit[plan.model] = keep
+      self:_note('imglimit:' .. id, string.format('Model %s refused a request with %d images (%s); sent again with the newest %d, and at most %d per request go to it this session.',
+        id, meta.images_sent, util.clip(tostring(ask_err), 160), keep, keep), notices)
+      res, ask_err, sent, meta = self:_ask_once(client, req, plan)
+    end
+  end
+  if ask_err and meta and (meta.images_sent or 0) > 0 and Backend.is_image_rejection(ask_err) then
+    -- the model refused the images: remember and send again without them
+    -- (the messages say which images were left out)
+    local id = (meta.sent_model and meta.sent_model ~= '') and meta.sent_model or plan.model
+    self.no_vision[id] = true
+    self:_note('novision:' .. id, string.format('Model %s refused the images (%s); sent again without them, and no images go to this model again this session. /model picks one that reads images.',
+      id, util.clip(tostring(ask_err), 160)), notices)
+    res, ask_err, sent, meta = self:_ask_once(client, req, plan)
+  end
   if ask_err and plan.via and Backend.is_effort_rejection(ask_err) then
     -- the server rejected the parameter: remember and retry once without it
     self.no_effort[plan.base] = true
@@ -722,7 +922,11 @@ function Backend:_ask_core(req)
       string.format('Model %s rejected reasoning effort "%s"; retried without it (not sent to this model again this session).', plan.base, plan.effort),
       notices
     )
-    res, ask_err, sent = self:_ask_once(client, req, { model = plan.base, base = plan.base })
+    res, ask_err, sent, meta = self:_ask_once(client, req, { model = plan.base, base = plan.base })
+  end
+  if ask_err and meta and (meta.images_sent or 0) > 0 and not Backend.is_network(ask_err) then
+    ask_err = ask_err .. string.format(' (the request carried %d image%s: the model %s may not accept them; /model picks another)',
+      meta.images_sent, meta.images_sent > 1 and 's' or '', tostring(plan.model))
   end
   if ask_err and tostring(ask_err):find('Model not found', 1, true) and forget_unfetched_models(client) then
     -- not an unknown model: the list itself could not be fetched (network)
@@ -732,9 +936,10 @@ function Backend:_ask_core(req)
     return nil, ask_err
   end
   res.effort = sent
-  if #notices > 0 then
-    res.notices = notices
+  for _, n in ipairs(res.notices or {}) do
+    table.insert(notices, n)
   end
+  res.notices = #notices > 0 and notices or nil
   return res
 end
 
@@ -768,6 +973,10 @@ function Backend:_ask_once(client, req, plan)
   if co then
     -- effort only when it goes in the body; usage is collected for every request
     entry = { effort = plan.via == 'body' and plan.effort or nil, model = plan.model }
+    local _, n_images = require('coagent.agent.images').count(req.messages)
+    entry.images = n_images > 0 and n_images or nil
+    entry.no_vision = self.no_vision
+    entry.image_limit = self.image_limit
     pending[co] = entry
   end
 
@@ -800,7 +1009,7 @@ function Backend:_ask_once(client, req, plan)
   local sent = (plan.via == 'variant' and plan.effort) or (entry and entry.applied) or nil
 
   if not ok_ask then
-    return nil, util.redact(Backend.explain_error(tostring(res)))
+    return nil, util.redact(Backend.explain_error(tostring(res))), nil, entry
   end
   if res == nil then
     return { cancelled = true, content = '', tool_calls = {}, usage = {} }
@@ -815,13 +1024,16 @@ function Backend:_ask_once(client, req, plan)
     })
   end
 
+  local notices = {}
+  self:_image_notices(entry, plan, notices)
   return {
     content = res.message.content or '',
     reasoning = res.message.reasoning,
     tool_calls = tool_calls,
     usage = vim.tbl_extend('force', entry and entry.usage or {}, { total_tokens = res.token_count, max_tokens = res.token_max_count }),
     model = res.message.model,
-  }, nil, sent
+    notices = #notices > 0 and notices or nil,
+  }, nil, sent, entry
 end
 
 --- Abort the in-flight request (if any).
@@ -834,6 +1046,125 @@ function Backend:cancel()
     return client:stop()
   end
   return false
+end
+
+--- A 4xx that refuses the images of a request (not auth, not a rate limit).
+---@param err string
+---@return boolean
+function Backend.is_image_rejection(err)
+  err = tostring(err or ''):lower()
+  if Backend.is_network(err) or err:find('401', 1, true) or err:find('429', 1, true) or err:find('rate limit', 1, true) then
+    return false
+  end
+  for _, pat in ipairs({ 'image', 'vision', 'multimodal', 'media type' }) do
+    if err:find(pat, 1, true) then
+      return true
+    end
+  end
+  return false
+end
+
+local SKIP_NOTE = {
+  vision = 'model %s does not accept images (per the model list): %d image(s) not sent; it is told they exist. /model picks one that reads images.',
+  type = 'model %s does not take the type of %d image(s); they were not sent.',
+  size = 'model %s does not take %d image(s) of that size; they were not sent (crop or shrink them).',
+  count = 'model %s refused more images per request: %d older image(s) were not sent again, the newest were.',
+}
+
+--- Notices (once per model and reason) for images not sent.
+function Backend:_image_notices(entry, plan, notices)
+  if not (entry and entry.images) then
+    return
+  end
+  local id = (entry.sent_model and entry.sent_model ~= '') and entry.sent_model or tostring(plan.model)
+  local any = false
+  for why, n in pairs(entry.images_skipped or {}) do
+    any = true
+    if SKIP_NOTE[why] then
+      self:_note('img:' .. why .. ':' .. id, string.format(SKIP_NOTE[why], id, n), notices)
+    end
+  end
+  if not any and entry.images_skipped == nil then
+    -- the wrapper never ran: the provider's body is not one coagent can add images to
+    self:_note('img:none:' .. id, string.format('%d attached image(s) not sent with model %s: its provider takes no images through coagent.', entry.images, id), notices)
+  end
+end
+
+-- curl.get observer while CopilotChat fetches a model list (see wrap_get_models)
+local observe = { depth = 0, sinks = {} }
+
+local function observe_start(curl, sink)
+  if observe.depth == 0 then
+    observe.orig = curl.get
+    observe.fn = function(url, o)
+      local r, e = observe.orig(url, o)
+      if type(url) == 'string' and url:match('/models$') and type(r) == 'table' and type(r.body) == 'table' and type(r.body.data) == 'table' then
+        for sk in pairs(observe.sinks) do
+          sk.data = r.body.data
+        end
+      end
+      return r, e
+    end
+    curl.get = observe.fn
+  end
+  observe.depth = observe.depth + 1
+  observe.sinks[sink] = true
+end
+
+local function observe_stop(curl, sink)
+  observe.sinks[sink] = nil
+  observe.depth = observe.depth - 1
+  if observe.depth == 0 then
+    if curl.get == observe.fn then
+      curl.get = observe.orig
+    end
+    observe.fn, observe.orig = nil, nil
+  end
+end
+
+--- Wrap a provider's get_models so its models keep what the models API says
+--- about images (`vision`, and `vision_limits`: max_prompt_images,
+--- max_prompt_image_size, supported_media_types). CopilotChat drops these
+--- when it builds its list; the wrapper only reads the same response
+--- CopilotChat fetched (no request of its own). Models that already carry
+--- `vision` (CopilotChat with image support) are left as they are.
+---@param orig function
+---@return function
+function Backend.wrap_get_models(orig)
+  if wrappers[orig] then
+    return orig
+  end
+  local function wrapped(headers, ...)
+    local curl = require('CopilotChat.utils.curl')
+    local sink = {}
+    observe_start(curl, sink)
+    local ok, models = pcall(orig, headers, ...)
+    observe_stop(curl, sink)
+    if not ok then
+      error(models, 0)
+    end
+    if type(models) == 'table' and type(sink.data) == 'table' then
+      local by_id = {}
+      for _, raw in ipairs(sink.data) do
+        if type(raw) == 'table' and raw.id then
+          by_id[raw.id] = raw
+        end
+      end
+      for _, m in ipairs(models) do
+        local raw = type(m) == 'table' and by_id[m.id]
+        if raw and m.vision == nil then
+          local caps = type(raw.capabilities) == 'table' and raw.capabilities or {}
+          local sup = type(caps.supports) == 'table' and caps.supports or {}
+          local lim = type(caps.limits) == 'table' and caps.limits or {}
+          m.vision = sup.vision == true
+          m.vision_limits = type(lim.vision) == 'table' and lim.vision or nil
+        end
+      end
+    end
+    return models
+  end
+  wrappers[wrapped] = orig
+  return wrapped
 end
 
 --- Errors meaning "this model cannot be used right now" (switch to a fallback

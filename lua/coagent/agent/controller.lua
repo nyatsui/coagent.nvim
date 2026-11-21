@@ -503,11 +503,12 @@ function Controller:submit(text, opts)
   local approved = opts.plan_approved
   local brief_from = (planning and self.session.plan.start) or (approved and approved.start) or nil
   return self:_start(function(gen)
-    local clean, atts, errors, infos = context.resolve_references(text, {
+    local clean, atts, errors, infos, images = context.resolve_references(text, {
       ws = self.ws,
       source = opts.source or {},
       selection = opts.selection,
       references = self.config.references,
+      image_base = self:_image_count(),
     })
     async.main()
     for _, i in ipairs(infos or {}) do
@@ -541,7 +542,9 @@ function Controller:submit(text, opts)
     -- what the user typed (not a text the agent generated, like a plan
     -- approval): summaries keep it word for word
     local own = not opts.generated
-    table.insert(self.session.messages, { role = 'user', content = content, from_user = own or nil, user_text = own and text or nil })
+    local msg = { role = 'user', content = content, from_user = own or nil, user_text = own and text or nil }
+    self:_attach_images(msg, user_item, images)
+    table.insert(self.session.messages, msg)
     self:_loop(gen)
   end, {
     planning = planning ~= nil,
@@ -557,6 +560,99 @@ function Controller:submit(text, opts)
     strong = strong,
     final_check = opts.final_check,
   })
+end
+
+--- Put the images attached to a user message on it (the backend sends them
+--- with that message) and list them on the panel item, with a note of what
+--- they cost.
+---@param msg table session message
+---@param item table? its panel item
+---@param images Coagent.Image[]?
+function Controller:_attach_images(msg, item, images)
+  if not images or #images == 0 then
+    return
+  end
+  local Images = require('coagent.agent.images')
+  msg.images = vim.tbl_map(function(i)
+    return { id = i.id, n = i.n, path = i.path, mime = i.mime, label = i.label, bytes = i.bytes, width = i.width, height = i.height, tokens = i.tokens }
+  end, images)
+  if item then
+    item.images = vim.tbl_map(Images.describe, images)
+    self:_update(item)
+  end
+  local tokens = Images.count({ msg })
+  if (self.config.images or {}).to_lead ~= true and self:roles().lead then
+    -- the lead gets the names; the worker model reads them when the lead asks
+    local roles = self:roles()
+    local refused = self:_image_problems(roles.worker_model, msg.images)
+    self:notice(refused and 'warn' or 'info', string.format('%d image%s not sent to the lead (%s): it gets the name%s and has %s read when needed '
+      .. '(read_images by the worker model %s, or by itself; ~%d input tokens per reading).%s', #images, #images > 1 and 's are' or ' is',
+      tostring(roles.lead_model), #images > 1 and 's' or '', #images > 1 and 'them' or 'it', tostring(roles.worker_model), tokens,
+      refused and (' ' .. refused .. ' The lead can still read them with its own model.') or ''))
+    return
+  end
+  local model = self:active_model()
+  local refused = self:_image_problems(model, msg.images)
+  if refused then
+    self:notice('warn', refused)
+    return
+  end
+  self:notice('info', string.format('%d image%s sent with this message to %s (~%d input tokens each time the conversation is sent).',
+    #images, #images > 1 and 's are' or ' is', tostring(model), tokens))
+end
+
+Controller.LEAD_IMAGE_NOTE = 'not shown to you, to save input on every step: read_images gives notes on what you need '
+  .. '(the worker model reads them; reader "self" only when it needs your judgement); `worker` with images: [N] gives them to a worker'
+
+--- Under a lead with images.to_lead = false: the lead's requests carry the
+--- images' names only.
+---@return boolean
+function Controller:_lead_without_images()
+  return (self.config.images or {}).to_lead ~= true and self:_is_lead_call()
+end
+
+--- Images attached so far in this session (the next one is numbered after them).
+---@return integer
+function Controller:_image_count()
+  local _, n = require('coagent.agent.images').count(self.session.messages)
+  return n
+end
+
+
+--- What `model` will not take of `images`, per the models API; nil when all
+--- can be sent (or nothing is known about the model). Must run in a coroutine.
+---@param model string
+---@param images table[]
+---@return string?
+function Controller:_image_problems(model, images)
+  local ok, info = pcall(function()
+    return self.backend.model_info and self.backend:model_info(model) or nil
+  end)
+  if not ok or type(info) ~= 'table' then
+    return nil
+  end
+  if info.vision == false then
+    return string.format('Model %s does not accept images (per the model list): the image%s will not be sent to it, only named. /model picks one that reads images%s.',
+      model, #images > 1 and 's' or '', self:roles().lead and ', or the lead can pass them to a worker whose model does (worker images)' or '')
+  end
+  local Backend = require('coagent.backend.copilotchat')
+  local lim = type(info.vision_limits) == 'table' and info.vision_limits or {}
+  local probs = {}
+  for _, img in ipairs(images) do
+    local why = Backend.image_skip_reason(img, info, false, nil)
+    if why == 'type' then
+      table.insert(probs, string.format('%s: %s does not take %s', img.label, model, img.mime))
+    elseif why == 'size' then
+      table.insert(probs, string.format('%s: larger than the %s %s takes', img.label, require('coagent.agent.images').human(tonumber(lim.max_prompt_image_size) or 0), model))
+    end
+  end
+  local max = self.backend.image_limit_for and self.backend:image_limit_for(model) or nil
+  if max and self:_image_count() + #images > max then
+    table.insert(probs, string.format('%s refused more than %d image(s) per request earlier: only the newest %d of this conversation are sent', model, max, max))
+  end
+  if #probs > 0 then
+    return 'Some images will not be sent: ' .. table.concat(probs, '; ') .. '.'
+  end
 end
 
 --- `/strong <task>`: run one task with the strong model (roles.strong_model,
@@ -956,15 +1052,16 @@ function Controller:_deliver_queue(gen)
     return
   end
   self:_emit_queue({ delivered = #batch })
-  local parts, typed = {}, {}
+  local parts, typed, batch_images = {}, {}, {}
   for _, q in ipairs(batch) do
     local item = self:_add({ type = 'user', text = q.text, followup = true })
     self:_ledger_cite(q.text)
-    local clean, atts, errors, infos = context.resolve_references(q.text, {
+    local clean, atts, errors, infos, images = context.resolve_references(q.text, {
       ws = self.ws,
       source = q.opts.source or {},
       selection = q.opts.selection,
       references = self.config.references,
+      image_base = self:_image_count() + #batch_images,
     })
     async.main()
     if self.gen ~= gen then
@@ -984,8 +1081,17 @@ function Controller:_deliver_queue(gen)
     end
     table.insert(parts, Controller.FOLLOWUP_LABEL .. content)
     table.insert(typed, q.text)
+    for _, img in ipairs(images or {}) do
+      table.insert(batch_images, img)
+    end
+    if images and #images > 0 then
+      item.images = vim.tbl_map(require('coagent.agent.images').describe, images)
+      self:_update(item)
+    end
   end
-  table.insert(self.session.messages, { role = 'user', content = table.concat(parts, '\n\n'), from_user = true, user_text = table.concat(typed, '\n\n') })
+  local msg = { role = 'user', content = table.concat(parts, '\n\n'), from_user = true, user_text = table.concat(typed, '\n\n') }
+  self:_attach_images(msg, nil, batch_images)
+  table.insert(self.session.messages, msg)
 end
 
 --- After a task (or a `/compact summary`) ends: start a new task with the
@@ -2839,6 +2945,9 @@ function Controller:_request(gen)
     if t.name == 'worker' and not roles.lead then
       return false
     end
+    if t.name == 'read_images' and self:_image_count() == 0 then
+      return false
+    end
     if t.name == 'ledger' and not (self.ledger and self.ledger:enabled()) then
       return false
     end
@@ -2898,6 +3007,9 @@ function Controller:_request(gen)
     messages, cinfo = compact(false)
   end
   self:_set_watermark(cinfo.watermark)
+  if self:_lead_without_images() then
+    messages = require('coagent.agent.images').as_names(messages, Controller.LEAD_IMAGE_NOTE)
+  end
   if cinfo.dropped > 0 then
     -- an injected ledger digest may be among the dropped turns
     self.ledger_dropped = true
@@ -3128,6 +3240,10 @@ function Controller:_tool_ctx(item, gen)
     end or nil,
     worker = self:roles().lead and function(args)
       return require('coagent.agent.worker').run(self, gen, args, item)
+    end or nil,
+    -- not for the worker's own calls (it is not offered there)
+    read_images = not self.worker_item and function(args)
+      return require('coagent.agent.worker').read_images(self, gen, args)
     end or nil,
     on_file_changed = function(info)
       self.events:emit('file_changed', { path = info.real, rel = info.rel })
