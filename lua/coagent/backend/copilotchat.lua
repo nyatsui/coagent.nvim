@@ -898,11 +898,18 @@ function Backend:_ask_core(req)
       local info = self:model_info(id)
       local listed = info and type(info.vision_limits) == 'table' and tonumber(info.vision_limits.max_prompt_images) or nil
       local keep = (listed and listed >= 1 and listed < meta.images_sent) and math.floor(listed) or 1
-      self.image_limit[id] = keep
-      self.image_limit[plan.model] = keep
-      self:_note('imglimit:' .. id, string.format('Model %s refused a request with %d images (%s); sent again with the newest %d, and at most %d per request go to it this session.',
-        id, meta.images_sent, util.clip(tostring(ask_err), 160), keep, keep), notices)
-      res, ask_err, sent, meta = self:_ask_once(client, req, plan)
+      while true do
+        self.image_limit[id] = keep
+        self.image_limit[plan.model] = keep
+        self:_note('imglimit:' .. id .. ':' .. keep, string.format('Model %s refused a request with %d images (%s); sent again with the newest %d, and at most %d per request go to it this session.',
+          id, meta.images_sent, util.clip(tostring(ask_err), 160), keep, keep), notices)
+        res, ask_err, sent, meta = self:_ask_once(client, req, plan)
+        -- still refused with several: one image before giving up on images
+        if keep == 1 or not (ask_err and meta and (meta.images_sent or 0) > 1 and Backend.is_image_rejection(ask_err)) then
+          break
+        end
+        keep = 1
+      end
     end
   end
   if ask_err and meta and (meta.images_sent or 0) > 0 and Backend.is_image_rejection(ask_err) then
@@ -1048,12 +1055,29 @@ function Backend:cancel()
   return false
 end
 
---- A 4xx that refuses the images of a request (not auth, not a rate limit).
+--- A client error (400 / 413 / 415 / 422) that refuses the images of a
+--- request. Not auth (401 / 403), a rate limit, a server error (5xx) or the
+--- network: those pass, and must not stop images for the session.
 ---@param err string
 ---@return boolean
 function Backend.is_image_rejection(err)
   err = tostring(err or ''):lower()
-  if Backend.is_network(err) or err:find('401', 1, true) or err:find('429', 1, true) or err:find('rate limit', 1, true) then
+  if Backend.is_network(err) or err:find('rate limit', 1, true) or err:find('%f[%d]5%d%d%f[%D]') then
+    return false
+  end
+  for _, code in ipairs({ '401', '403', '429' }) do
+    if err:find('%f[%d]' .. code .. '%f[%D]') then
+      return false
+    end
+  end
+  local client = false
+  for _, code in ipairs({ '400', '413', '415', '422' }) do
+    client = client or err:find('%f[%d]' .. code .. '%f[%D]') ~= nil
+  end
+  for _, pat in ipairs({ 'bad request', 'unprocessable', 'payload too large', 'unsupported media type' }) do
+    client = client or err:find(pat, 1, true) ~= nil
+  end
+  if not client then
     return false
   end
   for _, pat in ipairs({ 'image', 'vision', 'multimodal', 'media type' }) do
@@ -1087,6 +1111,11 @@ function Backend:_image_notices(entry, plan, notices)
   if not any and entry.images_skipped == nil then
     -- the wrapper never ran: the provider's body is not one coagent can add images to
     self:_note('img:none:' .. id, string.format('%d attached image(s) not sent with model %s: its provider takes no images through coagent.', entry.images, id), notices)
+  elseif not any and (entry.images_sent or 0) == 0 then
+    -- the wrapper ran but found no message to put them in: CopilotChat may
+    -- have changed how it builds the request
+    self:_note('img:unmatched:' .. id, string.format('%d attached image(s) not sent with model %s: coagent did not find their message in the request '
+      .. 'CopilotChat built (a CopilotChat update may have changed it). Please report this.', entry.images, id), notices)
   end
 end
 

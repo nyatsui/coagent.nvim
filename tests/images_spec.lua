@@ -437,6 +437,62 @@ describe('images in the request body', function()
       assert.are.equal(1, count(captured[3].body))
     end)
 
+    it('after a refused smaller batch, one image is tried before images stop for the model', function()
+      local backend = Backend.new()
+      backend.model_info = function()
+        return { id = 'fake-model', vision = true, vision_limits = { max_prompt_images = 2 } }
+      end
+      local imgs = {}
+      for k = 1, 3 do
+        local c = vim.deepcopy(img)
+        c.n, c.label = k, 'i' .. k .. '.png'
+        imgs[k] = c
+      end
+      local calls = 0
+      local post = curl.post
+      curl.post = function(url, args)
+        calls = calls + 1
+        if calls <= 2 then
+          table.insert(captured, { body = vim.deepcopy(args.body), headers = args.headers })
+          error('400: too many images', 0)
+        end
+        return post(url, args)
+      end
+      local out = h.run_async(function()
+        local r, e = backend:ask({ model = 'fake-model', system_prompt = 'S', tools = {}, messages = { { role = 'user', content = 'three', images = imgs } }, no_network_wait = true })
+        return { r = r, e = e }
+      end)
+      assert.are.equal('a cat', out.r.content)
+      local function count(body)
+        local n = 0
+        for _, p in ipairs(type(body.messages[2].content) == 'table' and body.messages[2].content or {}) do
+          n = n + (p.type == 'image_url' and 1 or 0)
+        end
+        return n
+      end
+      assert.are.same({ 3, 2, 1 }, { count(captured[1].body), count(captured[2].body), count(captured[3].body) })
+      assert.are.equal(1, backend:image_limit_for('fake-model'))
+      assert.is_nil(backend.no_vision['fake-model'])
+    end)
+
+    it('only client errors count as refusing images', function()
+      assert.is_true(Backend.is_image_rejection('400: image input is not supported'))
+      assert.is_true(Backend.is_image_rejection('Bad Request: invalid image'))
+      assert.is_true(Backend.is_image_rejection('413 payload too large: image'))
+      assert.is_false(Backend.is_image_rejection('500 internal error while processing image'))
+      assert.is_false(Backend.is_image_rejection('403 forbidden: vision is disabled by policy'))
+      assert.is_false(Backend.is_image_rejection('429 too many requests (image)'))
+      assert.is_false(Backend.is_image_rejection('image could not be processed'))
+      assert.is_false(Backend.is_image_rejection('400 bad request: max_tokens too large'))
+    end)
+
+    it('says so when the wrapper found no message for the images', function()
+      local b = Backend.new()
+      local notices = {}
+      b:_image_notices({ images = 2, images_skipped = {}, images_sent = 0, sent_model = 'm' }, { model = 'm' }, notices)
+      assert.is_truthy(table.concat(notices, '\n'):find('did not find their message', 1, true))
+    end)
+
     it('other errors with images say the model may not accept them', function()
       fail = '400 bad request'
       local out = ask({ { role = 'user', content = 'what is it?', images = { img } } })
