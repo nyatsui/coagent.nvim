@@ -95,6 +95,11 @@ function M.setup(opts)
     if days > 0 then
       pcall(require('coagent.agent.images').prune, days)
     end
+    -- converted documents (documents.cache)
+    local docs = config.options.documents or {}
+    if docs.enabled and (docs.cache or {}).enabled ~= false then
+      pcall(require('coagent.agent.documents').prune, docs)
+    end
   end)
 
   local toggle = config.options.keymaps.global.toggle

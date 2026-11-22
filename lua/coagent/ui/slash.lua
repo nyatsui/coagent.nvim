@@ -568,10 +568,12 @@ function M.complete_reference(before)
   local names = vim.tbl_keys(refs)
   table.sort(names)
   local items = {}
+  local docs = require('coagent.agent.documents').enabled()
   for _, n in ipairs(names) do
-    if vim.startswith(n, base) then
-      local takes_arg = n == 'file' or n == 'url' or n == 'gitdiff' or n == 'image'
-      table.insert(items, { word = '#' .. n .. ((n == 'file' or n == 'url') and ':' or ''), abbr = '#' .. n .. (takes_arg and ':' or ''), menu = refs[n] })
+    if vim.startswith(n, base) and (n ~= 'docimage' or docs) then
+      local takes_arg = n == 'file' or n == 'url' or n == 'gitdiff' or n == 'image' or n == 'docimage'
+      local colon = n == 'file' or n == 'url' or n == 'docimage'
+      table.insert(items, { word = '#' .. n .. (colon and ':' or ''), abbr = '#' .. n .. (takes_arg and ':' or ''), menu = refs[n] })
     end
   end
   return hash - 1, items

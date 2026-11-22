@@ -4,6 +4,8 @@
 ---   title(args, prepared) -> string,          -- one-line timeline label
 ---   prepare(args, ctx) -> prepared | nil, err, -- validation + preview (diff), no side effects
 ---   run(args, ctx, prepared, approval) -> { ok, output, summary?, display?, meta? } }
+--- Optional: available(config) -> boolean; false keeps the tool out of the
+--- definitions sent to the model (an opt-in feature that is off).
 --- Users can add tools with `require('coagent').register_tool(tool)`.
 local M = {}
 
@@ -17,6 +19,7 @@ local builtin = {
   fs.glob,
   fs.search,
   fs.read_file,
+  require('coagent.agent.documents').tool,
   require('coagent.agent.subagent').tool,
   require('coagent.agent.worker').tool,
   require('coagent.agent.worker').read_tool,
@@ -106,14 +109,17 @@ local function normalize_schema(schema)
 end
 M.normalize_schema = normalize_schema
 
---- Tool definitions for the model, filtered by a predicate on kind.
+--- Tool definitions for the model, filtered by a predicate on kind and by
+--- each tool's `available(config)`.
 ---@param offers fun(kind:string):boolean
+---@param config table? the agent's config (nil = the global options)
 ---@return table[]
-function Registry:schemas(offers)
+function Registry:schemas(offers, config)
   local out = {}
+  config = config or require('coagent.config').options
   for _, name in ipairs(self.order) do
     local t = self.tools[name]
-    if offers(t.kind) then
+    if offers(t.kind) and (type(t.available) ~= 'function' or t.available(config) ~= false) then
       table.insert(out, { name = t.name, description = t.description, schema = normalize_schema(t.schema) })
     end
   end

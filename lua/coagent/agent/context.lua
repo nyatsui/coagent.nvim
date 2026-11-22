@@ -19,6 +19,7 @@ M.REFERENCES = {
   url = 'A web page: #url:https://... (fetched with GET, text clipped)',
   clipboard = 'The system clipboard (+ register, else the unnamed register; an image when it holds no text)',
   image = 'An image for the model: #image:path/shot.png, or #image alone for the clipboard image',
+  docimage = 'An image embedded in a document: #docimage:slides/deck.pptx:3 (image 3 as read_document lists it; documents.enabled)',
 }
 
 ------------------------------------------------------------------------------
@@ -109,7 +110,9 @@ end
 
 --- Resolve `#refs` in `text`. Must run inside a coroutine.
 ---@param text string
----@param env {ws:Coagent.Workspace, source:{bufnr:integer?, winnr:integer?}, selection:table?, references:table?, image_base:integer?}
+--- env.documents: the documents options (nil = the global ones); env.set_cancel
+--- receives a function that stops a running document conversion (/stop).
+---@param env {ws:Coagent.Workspace, source:{bufnr:integer?, winnr:integer?}, selection:table?, references:table?, image_base:integer?, documents:table?, set_cancel:fun(fn:function?)?}
 ---@return string clean_text, string[] attachments, string[] errors, string[] infos, Coagent.Image[] images
 function M.resolve_references(text, env)
   local atts, errors, infos, images = {}, {}, {}, {}
@@ -142,6 +145,19 @@ function M.resolve_references(text, env)
     image_repl = string.format('[image %d: %s]', img.n, img.label)
   end
   local refcfg = env.references or require('coagent.config').options.references or {}
+  local Documents = require('coagent.agent.documents')
+  local doc_opts = env.documents or require('coagent.config').options.documents
+
+  --- Convert a document (checked path) or report why not. Yields.
+  ---@return Coagent.Document?
+  local function load_document(ref, info)
+    local doc, err = Documents.load(info, { documents = doc_opts, set_cancel = env.set_cancel })
+    async.main()
+    if not doc then
+      table.insert(errors, ref .. ': ' .. tostring(err))
+    end
+    return doc
+  end
   local source = env.source or {}
   local cc_source = {
     bufnr = source.bufnr,
@@ -180,6 +196,18 @@ function M.resolve_references(text, env)
     if info.is_dir then
       local res = require('coagent.tools.fs').list_dir.run({ depth = 2 }, nil, { path = info })
       table.insert(atts, attachment('directory', info.rel == '.' and './' or (info.rel .. '/'), 'text', res.output))
+      return
+    end
+    -- PDF / Office documents (documents.enabled): the converted Markdown
+    if Documents.format(info.real) and Documents.enabled(doc_opts) then
+      local doc = load_document(ref, info)
+      if doc then
+        local text, whole = Documents.attachment(doc, doc_opts)
+        if not whole then
+          table.insert(infos, string.format('%s: attached an overview and the first lines of its %d lines of Markdown; the agent reads on with read_document', info.rel, #doc.lines))
+        end
+        table.insert(atts, attachment('document', info.rel, 'markdown', text))
+      end
       return
     end
     -- from disk (CopilotChat's reader caches by whole-second mtime)
@@ -301,6 +329,61 @@ function M.resolve_references(text, env)
         return
       end
       add_image(Images.from_file(info.real, info.rel))
+    end,
+    docimage = function(arg)
+      if not Documents.enabled(doc_opts) then
+        table.insert(errors, '#docimage needs documents.enabled = true')
+        return
+      end
+      local path, n = tostring(arg or ''):match('^(.+):(%d+)$')
+      if not path then
+        table.insert(errors, '#docimage requires a document and an image number: #docimage:slides/deck.pptx:3 (read_document lists the images)')
+        return
+      end
+      local ref = '#docimage:' .. arg
+      local info = env.ws:check(path)
+      if not info.inside then
+        table.insert(errors, ref .. ' is outside the workspace')
+        return
+      end
+      if info.protected then
+        table.insert(errors, ref .. ' is a protected file (' .. info.protected .. '); not attached')
+        return
+      end
+      if info.is_dir or not info.exists then
+        table.insert(errors, ref .. ': ' .. path .. ' not found')
+        return
+      end
+      if not Documents.format(info.real) then
+        table.insert(errors, ref .. ': ' .. path .. ' is not a PDF, DOCX, DOC, PPTX, XLSX or XLS file')
+        return
+      end
+      local doc = load_document(ref, info)
+      if not doc then
+        return
+      end
+      local img = doc.images[tonumber(n)]
+      if not img then
+        table.insert(errors, string.format('%s: %s has %d embedded image%s%s', ref, info.rel, #doc.images, #doc.images == 1 and '' or 's',
+          #doc.images > 0 and ' (numbered from 1)' or (doc.format == 'xls' and ' (images are not extracted from XLS files)' or '')))
+        return
+      end
+      local where = {}
+      for _, l in ipairs(img.locations or {}) do
+        table.insert(where, tostring(l.label))
+      end
+      -- EMF, TIFF, JPEG 2000, CMYK JPEG, ...: a PNG made locally
+      local file, cerr, converted = Documents.attachable(img, { documents = doc_opts, set_cancel = env.set_cancel })
+      async.main()
+      if not file then
+        table.insert(errors, ref .. ': ' .. tostring(cerr))
+        return
+      end
+      local label = string.format('%s image %d%s', info.rel, img.n, (#where > 0 and where[1] ~= 'document') and (' (' .. table.concat(where, ', ') .. ')') or '')
+      if converted then
+        table.insert(infos, string.format('%s: %s image converted to PNG to send it', ref, img.ext:upper()))
+      end
+      add_image(Images.from_file(file, label))
     end,
     clipboard = function()
       async.main()

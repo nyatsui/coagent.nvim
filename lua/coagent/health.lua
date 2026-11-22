@@ -1,5 +1,48 @@
 local M = {}
 
+--- documents.*: Python, MarkItDown and (for .doc) LibreOffice. Runs the
+--- bundled helper's `probe` (a local Python start; nothing is installed).
+function M.check_documents(h)
+  local Documents = require('coagent.agent.documents')
+  local o = Documents.options()
+  if not o.enabled then
+    h.info('documents.enabled = false: PDF / Office documents are not converted (optional; :help coagent-documents)')
+    return
+  end
+  local python = vim.fs.normalize(o.python or 'python3')
+  if vim.fn.executable(python) == 0 then
+    h.error(string.format('documents.python = %q not found', python), { Documents.install_hint(python) })
+    return
+  end
+  local res = vim.system({ python, Documents.helper(), 'probe' }, { text = true, env = { PYTHONDONTWRITEBYTECODE = '1' }, cwd = vim.fn.stdpath('state') }):wait(30000)
+  local ok, info = pcall(vim.json.decode, vim.trim(res.stdout or ''))
+  if res.code ~= 0 or not ok or type(info) ~= 'table' then
+    h.error('the document helper failed with ' .. python .. ': ' .. vim.trim((res.stderr or '') .. (res.stdout or '')))
+  elseif type(info.markitdown) ~= 'string' then
+    h.error('MarkItDown is not installed for ' .. python, { Documents.install_hint(python) })
+  else
+    h.ok(string.format('MarkItDown %s (Python %s at %s)', info.markitdown, tostring(info.python), python))
+    local function optional(key, what, pkg)
+      if type(info[key]) == 'string' then
+        h.ok(string.format('%s %s: %s', pkg, info[key], what))
+      else
+        h.warn(string.format('%s not installed: %s unavailable (%s -m pip install %s)', pkg, what, python, pkg))
+      end
+    end
+    optional('pdfminer', 'PDF images', 'pdfminer.six')
+    optional('pillow', 'EMF / TIFF / ... images as PNG, page pictures', 'pillow')
+    optional('pypdfium2', 'pages / slides as pictures (read_images with a document)', 'pypdfium2')
+  end
+  local lo = o.legacy_doc or {}
+  if lo.enabled == false then
+    h.info('.doc files: off (documents.legacy_doc.enabled = false)')
+  elseif Documents.find_soffice(lo.converter) then
+    h.ok('LibreOffice for .doc files: ' .. Documents.find_soffice(lo.converter))
+  else
+    h.warn('LibreOffice (soffice) not found: .doc files cannot be read (other formats work)', { Documents.soffice_hint(lo.converter or 'soffice') })
+  end
+end
+
 function M.check()
   local h = vim.health
   h.start('coagent.nvim')
@@ -62,6 +105,8 @@ function M.check()
   if pcall(require, 'render-markdown') then
     h.info("render-markdown.nvim found: add 'coagent' to its file_types to render the panel")
   end
+
+  M.check_documents(h)
 
   local cfg = require('coagent.config').options
   local templates, warnings = require('coagent.agent.templates').all(cfg.prompts)

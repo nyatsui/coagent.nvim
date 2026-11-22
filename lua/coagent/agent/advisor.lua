@@ -88,7 +88,7 @@ function M.tools_for(ctrl)
   for _, s in
     ipairs(ctrl.registry:schemas(function(kind)
       return kind == 'read'
-    end))
+    end, ctrl.config))
   do
     if M.TOOLS[s.name] then
       table.insert(out, s)

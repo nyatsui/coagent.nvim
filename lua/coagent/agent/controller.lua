@@ -509,6 +509,11 @@ function Controller:submit(text, opts)
       selection = opts.selection,
       references = self.config.references,
       image_base = self:_image_count(),
+      documents = self.config.documents,
+      -- /stop kills a document conversion (@report.pdf)
+      set_cancel = function(fn)
+        self.cancel_fn = fn
+      end,
     })
     async.main()
     for _, i in ipairs(infos or {}) do
@@ -1062,6 +1067,10 @@ function Controller:_deliver_queue(gen)
       selection = q.opts.selection,
       references = self.config.references,
       image_base = self:_image_count() + #batch_images,
+      documents = self.config.documents,
+      set_cancel = function(fn)
+        self.cancel_fn = fn
+      end,
     })
     async.main()
     if self.gen ~= gen then
@@ -2945,7 +2954,8 @@ function Controller:_request(gen)
     if t.name == 'worker' and not roles.lead then
       return false
     end
-    if t.name == 'read_images' and self:_image_count() == 0 then
+    -- (also for document pages, with documents.enabled)
+    if t.name == 'read_images' and self:_image_count() == 0 and not require('coagent.agent.documents').enabled(self.config.documents) then
       return false
     end
     if t.name == 'ledger' and not (self.ledger and self.ledger:enabled()) then
@@ -2958,7 +2968,7 @@ function Controller:_request(gen)
     return not (forced and tool and tool.kind ~= 'read' and not forced[t.name])
   end, self.registry:schemas(function(kind)
     return self.permissions:offers(kind)
-  end))
+  end, self.config))
   local budget = self:_budget(model)
   async.main()
   local info = self.model_cache[model]

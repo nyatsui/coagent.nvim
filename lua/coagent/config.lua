@@ -517,6 +517,44 @@ local defaults = {
     to_lead = false,
   },
 
+  -- Documents (opt-in): PDF, Word (.docx; .doc through LibreOffice), PowerPoint
+  -- (.pptx) and Excel (.xlsx, .xls) read as Markdown converted by MarkItDown.
+  -- Needs Python with MarkItDown installed by you (coagent never installs it):
+  --   python3 -m venv ~/.local/share/coagent-markitdown
+  --   ~/.local/share/coagent-markitdown/bin/pip install 'markitdown[pdf,docx,pptx,xlsx,xls]' pypdfium2
+  -- With enabled = true, @report.pdf / #file:report.pdf attach the converted
+  -- Markdown (an overview and the first lines past max_attach_chars), the
+  -- read_document tool reads any part (slides / sheets by name), and
+  -- #docimage:<path>:<n> attaches one embedded image. false: no tool is
+  -- offered and documents stay binary files, as before. The conversion runs
+  -- locally (no network, no OCR, no image descriptions by a model, no macros).
+  documents = {
+    enabled = false,
+    python = 'python3', -- the Python that has MarkItDown (e.g. '~/.local/share/coagent-markitdown/bin/python')
+    timeout_ms = 120 * 1000, -- per conversion (a .doc includes the LibreOffice step); /stop cancels it
+    max_file_bytes = 50 * 1024 * 1024, -- larger documents are not converted
+    max_attach_chars = 12000, -- @file / #file attach the whole Markdown up to this, else an overview + the first lines
+    extract_images = true, -- keep the embedded images of DOCX / PPTX / XLSX / PDF (listed; sent only with #docimage, as PNG when the model cannot take their type)
+    max_images = 100, -- per document
+    max_image_bytes = 20 * 1024 * 1024, -- per image (larger ones are skipped)
+    max_images_total_bytes = 100 * 1024 * 1024, -- per document
+    -- read_images with document + pages: pages / slides as pictures with their
+    -- text, read by the worker model (or reader "self"); PDF needs pypdfium2
+    -- in documents.python, PPTX / DOCX / DOC also LibreOffice
+    max_pages_per_read = 10,
+    -- .doc (Word 97-2003): converted to .docx by LibreOffice first (headless,
+    -- a throwaway profile); converter = the soffice command or its full path
+    legacy_doc = { enabled = true, converter = 'soffice' },
+    -- converted Markdown and images, keyed by the file's content + settings +
+    -- MarkItDown version (a changed file converts again)
+    cache = {
+      enabled = true, -- false: kept only until Neovim exits
+      dir = nil, -- nil = stdpath('state')/coagent/documents
+      keep_days = 30, -- entries not used for this long are deleted
+      max_bytes = 500 * 1024 * 1024, -- past this the least recently used entries go
+    },
+  },
+
   -- Repository instruction files injected as *untrusted, lower-priority* project notes.
   instruction_files = { 'AGENTS.md', '.github/copilot-instructions.md', 'CLAUDE.md' },
   instructions = {

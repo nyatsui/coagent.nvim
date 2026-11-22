@@ -82,6 +82,10 @@ I'll find the `add` implementation and its tests.
 - **`#url` / `#clipboard`** — 入力した URL のページ本文やクリップボードを添付
 - **画像** — `#image:shot.png`、`@shot.png`、`#image`（クリップボード）、入力欄の `<M-v>` でスクリーンショットや図を
   メッセージと一緒に送信（画像に対応したモデルのみ。[画像](#画像) を参照）
+- **ドキュメント（任意）** — `@report.pdf`、`#file:deck.pptx`、`read_document` ツールで PDF・Word・PowerPoint・Excel を、
+  ローカルの [MarkItDown](https://github.com/microsoft/markitdown) が変換した Markdown として読めます。スライドやシートを
+  名前で読み、埋め込み画像は一覧にして、頼まれたときだけ添付します（`#docimage:deck.pptx:2`）。既定はオフで、MarkItDown は
+  ご自身で入れます（[ドキュメント](#ドキュメントの読み込み) を参照）
 - **インライン編集** — `:'<,'>CoagentInline 指示` で選択範囲だけを 1 リクエスト（ツールなし）で書き換え、
   バッファ内に diff プレビュー（`ga` 適用 / `gr` 破棄 / `gi` 追加指示）。適用した変更は巻き戻し可能
 - **作業中の追加指示** — 作業中に送ったメッセージはキューに入り、次のステップ境界で届く（ツールや承認は中断しない）
@@ -101,6 +105,7 @@ I'll find the `add` implementation and its tests.
 | [CopilotChat.nvim](https://github.com/CopilotC-Nvim/CopilotChat.nvim) | **v4 系（`main` ブランチ）**。廃止済み `canary` ブランチは不可 |
 | plenary.nvim | CopilotChat の依存 |
 | 任意 | `rg`（高速検索）、treesitter `markdown` パーサ、[render-markdown.nvim](https://github.com/MeanderingProgrammer/render-markdown.nvim) |
+| 任意（ドキュメント） | [MarkItDown](https://github.com/microsoft/markitdown) を入れた Python 3.10 以上、`.doc` には LibreOffice（[ドキュメント](#ドキュメントの読み込み) を参照） |
 
 ## インストール（lazy.nvim）
 
@@ -201,6 +206,7 @@ nvim --clean -u scripts/demo.lua
 | `#url:https://...` | Web ページの本文（GET で取得し、`references.url_max_bytes`（既定 32KB）で切り詰め） |
 | `#clipboard` | クリップボード（`+` レジスタ、無ければ無名レジスタ `"`。`references.clipboard_max_bytes` で切り詰め）。テキストが無く画像があれば画像 |
 | `#image:path` / `#image` | ワークスペース内の画像ファイル / クリップボードの画像を画像として送信（[画像](#画像) を参照）。`@shot.png` でも可 |
+| `#docimage:path:N` | ドキュメントに埋め込まれた N 番目の画像を画像として送信（`documents.enabled` が必要。[ドキュメント](#ドキュメントの読み込み) を参照） |
 
 ### 画像
 
@@ -237,7 +243,7 @@ X11 は `xclip`）。添付した画像は、サイズとおおよその tokens 
 - worker のモデルが以前にその枚数を拒否していた場合は、先に挙げられた画像を worker に渡します。
   残りは同じモデルで先に1回ずつ読み、それまでの画像のメモも合わせて渡します。worker にはそのメモが渡ります。
   先に読むリクエストはツールを使わず、画像1枚と依頼文ほどの tokens で済みます（worker の各ステップに画像を載せ続けるわけではありません）。
-- `read_images` ツール（セッションに画像があるときに使えます）は、指定した画像を読んで、知りたいことについてのメモを返します。
+- `read_images` ツール（セッションに画像があるとき、または `documents.enabled` でドキュメントのページを読むときに使えます）は、指定した画像を読んで、知りたいことについてのメモを返します。
   送られなかった画像を読むときや、安く読みたいときに使います。
   `reader: "worker"`（lead 構成での既定）は worker のモデルで読みます。`reader: "self"` は会話中のモデルで読みます（そのモデルの単価がかかります）。
   判断が要る読み取りや、worker のモデルが画像を受け付けないときに使います。
@@ -245,6 +251,111 @@ X11 は `xclip`）。添付した画像は、サイズとおおよその tokens 
   `separately: true` なら1枚ずつ、メモを渡さずに読みます。
 - 上限: 1枚 `images.max_bytes`（5 MB）、1メッセージ `images.max_per_message`（5枚）。ワークスペース外と保護ファイルは
   `#file` と同じく拒否します（そうした画像はコピーしてクリップボードから添付してください）。
+
+### ドキュメントの読み込み
+
+任意の機能で、既定はオフです。`documents.enabled = true` にすると、PDF、Word（`.docx`。`.doc` は LibreOffice 経由）、
+PowerPoint（`.pptx`）、Excel（`.xlsx`、`.xls`）を [MarkItDown](https://github.com/microsoft/markitdown) が変換した
+Markdown として読めます。`.ppt` は対象外です。オフのまま（既定）なら何も変わりません。モデルにツールは追加されず、
+これらのファイルはこれまでどおりバイナリファイルとして扱われます。
+
+**準備** — coagent は Python パッケージを自動ではインストールしません。MarkItDown を専用の仮想環境に入れ、その Python を
+指定してください（`:checkhealth coagent` で確認できます）。
+
+```sh
+python3 -m venv ~/.local/share/coagent-markitdown
+~/.local/share/coagent-markitdown/bin/pip install 'markitdown[pdf,docx,pptx,xlsx,xls]' pypdfium2
+```
+
+```lua
+documents = {
+  enabled = true,
+  python = '~/.local/share/coagent-markitdown/bin/python', -- Windows: ...\Scripts\python.exe
+},
+```
+
+`pypdfium2` はページを画像として読むとき（後述）だけ必要です。Pillow は `markitdown[pptx]` と一緒に入ります。
+
+`.doc`（Word 97-2003）や、PPTX / DOCX のページを画像にするには LibreOffice も必要です。ヘッドレスで動くので画面は開きません。
+`soffice` が `PATH` にあること（macOS のアプリは自動で見つけます）、または `documents.legacy_doc.converter` に
+フルパスを指定してください。
+
+- macOS: `brew install --cask libreoffice`（アプリ一式。macOS には GUI なしの版がありません）。macOS のヘッドレス
+  LibreOffice はそのままではシステムフォントを使えず、ページ画像から日本語などが消えるため、ヘルパーがシステムフォントの
+  場所を指定します（`FONTCONFIG_FILE` を設定済みならそれを使います）
+- Debian / Ubuntu: GUI なしのパッケージでかなり小さくなります。
+  `sudo apt install --no-install-recommends libreoffice-writer-nogui libreoffice-impress-nogui`（`-writer-` は .doc / .docx、
+  `-impress-` は .pptx 用）。文書の言語のフォントも入れてください（日本語なら `fonts-noto-cjk` など）
+- Fedora / RHEL: `sudo dnf install libreoffice-writer libreoffice-impress`（`libreoffice-core` も入ります。デスクトップ連携は不要です）
+
+`.doc` は使い捨てプロファイル（既定のマクロセキュリティ。マクロは実行されません）で `.docx` に変換してから読みます。`legacy_doc.enabled = false` で `.doc` を無効にできます。
+LibreOffice がなければ `.doc` はその旨のエラーになり、他の形式は使えます。
+
+**使い方**
+
+- `@docs/report.pdf` や `#file:slides/deck.pptx` は変換した Markdown を添付します。`documents.max_attach_chars`（12000）
+  までは全文、それを超えると概要（スライド／シートと行範囲、埋め込み画像）と先頭の数行、`read_document` での続きの読み方を添付します。
+  ワークスペース外・シンボリックリンク・保護ファイルのチェックは通常の `@path` と同じです。
+- `read_document` ツール（読み取り専用。`documents.enabled` のときだけ提供）は任意の部分を読みます。Markdown の
+  `start_line` / `end_line`、または `section` にスライド番号（`"3"`）かシート名（`"Sales"`）。最初の読み込みで構成を一覧します。
+  PDF と Word のページ番号は推測しません（MarkItDown が保持しないため）。行範囲で読みます。出力は
+  `limits.max_tool_output_bytes` で行の区切りに合わせて止め、続きの行番号を示します。ドキュメントに対する `read_file` は、
+  バイナリのエラーを返す代わりに `read_document` に任せます。`read_file` と同様、ワークスペース外や保護ファイルを読む前には確認します。
+- Markdown は変換された読み取り専用のテキストで、ドキュメントそのものではありません（編集ツールでドキュメントは変わりません）。
+  内容は信頼できないデータとして扱い、指示としては従わないようモデルに伝えます。
+
+```text
+@docs/spec.pdf を要約して、#file:slides/review.pptx と比べて
+#docimage:slides/review.pptx:2 のグラフは何を示している？
+```
+
+**埋め込み画像**（DOCX・PPTX・XLSX・PDF。`documents.extract_images`）はファイルから取り出し、番号・代替テキスト・
+載っているページ／スライド／シートを一覧にします。勝手には送りません。`#docimage:<path>:<n>` で n 番目の画像を通常の画像の経路
+（[画像](#画像)：サイズの制限、tokens）で添付します。Markdown 内のどこにある画像かは対応付けません（MarkItDown が示さないため）。
+ページ・スライド・シートは対応付けます。
+
+- DOCX / PPTX / XLSX: 元のバイトのまま、ファイルの zip から直接読みます。パッケージ内のパスをディスク上のパスに使うことはありません。
+  スライドやシートはファイル自身の関連付けから読みます。パッケージの外を指す参照とリンク（外部）画像は無視し、その旨を表示します。
+- PDF: 各ページ（とページが描くフォーム）の画像オブジェクトを pdfminer.six（`markitdown[pdf]` で入ります）で読みます。
+  JPEG と JPEG 2000 は元のバイトのまま、生のピクセル画像（グレー・RGB・CMYK・インデックスカラー）は PNG にします。
+  複数ページに描かれた同じ画像は1つとして、すべてのページを示します。JBIG2 / CCITT（スキャンしたページ）、その他の色空間、
+  インライン画像は取り出さず、その旨を表示します。透過（ソフトマスク）は失われます。ベクターで描かれた図は画像ではないので取り出せません。
+- モデルがそのままでは受け取れない画像（EMF・WMF・TIFF・BMP・JPEG 2000・CMYK の JPEG）は、添付するときにローカルで PNG に
+  変換します（1回だけ。PNG はキャッシュに残します）。長辺は最大 2048 px です。変換には `documents.python` の Pillow
+  （`markitdown[pptx]` で入ります。なければその環境に `pip install pillow`）を使い、Pillow が読めない EMF / WMF（Windows 以外）は
+  LibreOffice を使います。どちらもなければ、何を入れればよいかをエラーで示します。
+- 図形・コネクタ・テキストボックス・SmartArt・グラフは Office が XML から描くもので、画像ではありません。取り出しも、
+  周りの画像との合成もしません。そうした図はスクリーンショットを撮って添付してください（`#image`、`<M-v>`）。
+  「図として貼り付け」た図（EMF）は1枚の画像なので、上のとおり変換して送れます。
+- 上限は `max_images`（100）、`max_image_bytes`（1枚 20 MB）、`max_images_total_bytes`（100 MB）。XLS の画像は取り出しません。
+
+**ページを画像として読む** — テキストでは、図・グラフ・図形を組み合わせた図・レイアウトが失われます。`read_images` に
+`document` と `pages` を渡すと（`{document: "slides/deck.pptx", pages: "3-5", question: "..."}`）、ページ／スライドを
+画像として、そのページのテキストと組にして読みます。PPTX はスライドごとの MarkItDown のテキスト、PDF と DOCX / DOC は
+そのページから取ったテキストです。いつ必要かはモデルが判断します（read_document の最初の出力に使い方が出ます）。
+
+- ページはツールなしの別リクエストで読み、会話には書かれたメモだけが入ります。画像は会話に入らないので、その後のステップで
+  再送されません。reader `"worker"`（`roles.preset = 'lead'` での既定）は安い worker のモデルが、reader `"self"` は会話のモデルが
+  読みます（lead 自身が図を判断すべきとき）。複数ページを1リクエストで読みます（モデルがその枚数を拒否したことがあればバッチに分けます）。
+- 1ページあたり読み手の入力で約 1,100 tokens です（長辺最大 1568 px で描画）。1回に `documents.max_pages_per_read`（10）ページまで。
+- PDF のページは pypdfium2 で描画します（`documents.python` に `pip install pypdfium2`）。PPTX・DOCX・DOC は LibreOffice で
+  いったん PDF にします（非表示スライドも含む）。そのためフォントや位置が PowerPoint / Word と少しずれることがあり、DOCX の
+  ページ番号は Word ではなく LibreOffice のページ分けです（ラベルにそう書きます）。スライド数と LibreOffice のページ数が
+  合わないときは対応付けず、その旨を伝えます。Excel のシートにはページがありません。
+- 描画したページはキャッシュに残し、同じページは1回しか描画しません。ページのテキストは信頼できない文書の内容として、
+  読み手にもそう示します。
+
+**キャッシュ** — 変換結果（Markdown、メタデータ、画像）は `stdpath('state')/coagent/documents/`（0700）に保存します。
+キーはファイル内容の SHA-256＋変換設定＋MarkItDown のバージョンなので、変わっていないファイルの2回目以降は Python を起動せず、
+変更されたファイルは変換し直します。`cache.keep_days`（30）使われなかったものは削除し、`cache.max_bytes`（500 MB）を超えると
+古く使われたものから削除します。`cache.enabled = false` なら Neovim の終了までしか残しません。変換は同梱のヘルパー
+（`python/coagent_markitdown.py`）を引数リストで（シェルを通さず）、専用の一時フォルダで実行します。失敗したら一時フォルダは削除します。
+`documents.timeout_ms`（2分）で打ち切り、`/stop` で中止できます。`max_file_bytes`（50 MB）を超えるファイルは変換しません。
+
+**変換の限界**（MarkItDown 側）: スキャンした PDF や画像だけのページにはテキストがありません（OCR はしません。MarkItDown の
+プラグインは無効で、画像の説明をモデルに頼むこともしません）。レイアウト、図形、SmartArt、グラフ、テキストボックス、
+ノートの配置は失われたり簡略化されたりします。表は Markdown の表になります。ヘッダー／フッターが欠けることがあります。
+ネットワークは使いません。`documents` の設定は実行するプログラムを指定するため、`/config` では注意が必要な設定として表示されます。
 
 `#url` は自分で入力した URL だけを取得します（承認は求めません。送信ではなく取得のため）。`http://` / `https://` 以外、
 スキーム省略、`user:pass@` を含む URL は拒否します。取得には CopilotChat の `resources.get_url`（`lynx -dump`、無ければ
@@ -1204,6 +1315,7 @@ terminal = {
 | 種類 | ツール | 承認（supervised） |
 |---|---|---|
 | 調査 | `list_dir`, `glob`, `search`, `read_file`, `git_status`, `git_diff`, `diagnostics` | 不要 |
+| ドキュメント | `read_document`（PDF / Office ファイルを変換した Markdown で読む）、`document` + `pages` を渡した `read_images`（ページ／スライドをテキストと組の画像として別リクエストで読む）。`documents.enabled` のときだけ提供 | 不要 |
 | スキル | `use_skill`（スキルの手順を読み込む。スキルがあるときだけ提供） | 不要 |
 | 実験 | `experiments`（ローカルの実験ログ: 表・詳細・比較） | 不要 |
 | プロジェクト台帳 | `ledger`（台帳のファイルを読む、知見・決定を記録、`methods.md` の節を書き直す。書くのはリポジトリ外の台帳だけ、`/ledger undo` で戻せる） | 不要 |

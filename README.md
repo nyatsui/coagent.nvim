@@ -90,6 +90,10 @@ I'll find the `add` implementation and its tests.
 - **`#url` / `#clipboard`** — attach the text of a web page you typed, or the clipboard
 - **Images** — `#image:shot.png`, `@shot.png`, `#image` (the clipboard) or `<M-v>` in the input send a screenshot or
   diagram with the message (models that accept images; see [Images](#images))
+- **Documents (optional)** — `@report.pdf`, `#file:deck.pptx` and the `read_document` tool read PDF, Word, PowerPoint and
+  Excel files as Markdown converted locally by [MarkItDown](https://github.com/microsoft/markitdown); slides and sheets
+  by name, embedded images listed and attached on request (`#docimage:deck.pptx:2`). Off by default; you install
+  MarkItDown (see [Documents](#documents-pdf-word-powerpoint-excel))
 - **Inline edit** — `:'<,'>CoagentInline <instruction>` rewrites just the selection with one request (no tools) and previews
   the diff in the buffer (`ga` apply / `gr` discard / `gi` follow-up). Applied edits can be rewound
 - **Follow-up messages while it works** — messages sent while the agent is busy are queued and delivered at the next step
@@ -112,6 +116,7 @@ I'll find the `add` implementation and its tests.
 | [CopilotChat.nvim](https://github.com/CopilotC-Nvim/CopilotChat.nvim) | **v4 (`main` branch)**. The retired `canary` branch does not work |
 | plenary.nvim | dependency of CopilotChat |
 | Optional | `rg` (faster search), treesitter `markdown` parser, [render-markdown.nvim](https://github.com/MeanderingProgrammer/render-markdown.nvim) |
+| Optional (documents) | Python 3.10+ with [MarkItDown](https://github.com/microsoft/markitdown); LibreOffice for `.doc` (see [Documents](#documents-pdf-word-powerpoint-excel)) |
 
 ## Installation (lazy.nvim)
 
@@ -212,6 +217,7 @@ The input understands these context references:
 | `#url:https://...` | Text of a web page (fetched with GET, clipped to `references.url_max_bytes`, 32KB by default) |
 | `#clipboard` | Clipboard (`+` register, falling back to the unnamed register `"`; clipped to `references.clipboard_max_bytes`). An image when it holds no text |
 | `#image:path` / `#image` | An image file in the workspace / the image in the clipboard, sent as an image (see [Images](#images)). `@shot.png` works too |
+| `#docimage:path:N` | Image N embedded in a document, sent as an image (`documents.enabled`; see [Documents](#documents-pdf-word-powerpoint-excel)) |
 
 ### Images
 
@@ -251,7 +257,7 @@ changes do not matter. The clipboard is read with a local command: `osascript` (
   batch, each with the notes
   of the images before it; the worker gets those notes. A reading request has no tools and costs about one image plus
   the assignment, not a worker step each. Explorers, summaries and the judge get the image's name only.
-- The `read_images` tool (offered once the session has images) returns written notes on images for a question: for
+- The `read_images` tool (offered once the session has images, or with `documents.enabled` for document pages) returns written notes on images for a question: for
   images the model was not sent, or to have them read more cheaply. `reader: "worker"`
   (the default under a lead) uses the worker model; `reader: "self"` the conversation's model, at its rate, when the
   reading needs its judgement or the worker model takes no images. All are read in one request (a batch per request
@@ -259,6 +265,123 @@ changes do not matter. The clipboard is read with a local command: `osascript` (
   request, each on its own.
 - Limits: `images.max_bytes` (5 MB) per image, `images.max_per_message` (5). Paths outside the workspace and protected
   files are refused, as for `#file` (copy such an image and use the clipboard).
+
+### Documents (PDF, Word, PowerPoint, Excel)
+
+Optional, off by default. With `documents.enabled = true`, PDF, Word (`.docx`; `.doc` through LibreOffice), PowerPoint
+(`.pptx`) and Excel (`.xlsx`, `.xls`) files are read as Markdown converted by
+[MarkItDown](https://github.com/microsoft/markitdown). `.ppt` is not supported. Without it (the default) nothing
+changes: no tool is offered to the model and such files stay binary files.
+
+**Setup** — coagent never installs Python packages. Put MarkItDown in a virtual environment of its own and point
+coagent at it (`:checkhealth coagent` checks it):
+
+```sh
+python3 -m venv ~/.local/share/coagent-markitdown
+~/.local/share/coagent-markitdown/bin/pip install 'markitdown[pdf,docx,pptx,xlsx,xls]' pypdfium2
+```
+
+```lua
+documents = {
+  enabled = true,
+  python = '~/.local/share/coagent-markitdown/bin/python', -- Windows: ...\Scripts\python.exe
+},
+```
+
+`pypdfium2` is needed only for pages as pictures (below); Pillow comes with `markitdown[pptx]`.
+
+For `.doc` (Word 97-2003) and for pictures of PPTX / DOCX pages, install LibreOffice too. It runs headless (no window
+opens); `soffice` must be on `PATH` (the macOS app bundle is found by itself) or set `documents.legacy_doc.converter`
+to its full path.
+
+- macOS: `brew install --cask libreoffice` (the full app; there is no GUI-less build for macOS). Headless LibreOffice
+  on macOS does not see the system fonts by itself, so the helper points it at them (Japanese and other text would
+  otherwise vanish from page pictures); a `FONTCONFIG_FILE` you set is used as is
+- Debian / Ubuntu: the GUI-less packages, much smaller:
+  `sudo apt install --no-install-recommends libreoffice-writer-nogui libreoffice-impress-nogui` (`-writer-` for
+  .doc / .docx, `-impress-` for .pptx), plus fonts for the documents' languages (e.g. `fonts-noto-cjk` for Japanese)
+- Fedora / RHEL: `sudo dnf install libreoffice-writer libreoffice-impress` (`libreoffice-core` is pulled in; no
+  desktop integration is needed)
+
+For `.doc`, LibreOffice converts the file to `.docx` with a throwaway profile
+(default macro security; no macros run). `legacy_doc.enabled = false` turns `.doc` off. Without LibreOffice, a `.doc`
+gives an error saying so; the other formats work.
+
+**Use**
+
+- `@docs/report.pdf` or `#file:slides/deck.pptx` attaches the converted Markdown. Up to `documents.max_attach_chars`
+  (12000) the whole text; past it an overview — the slides / sheets with their line ranges, the embedded images — the
+  first lines, and how to read on with `read_document`. The workspace, symlink and protected-file checks are those of
+  any `@path`.
+- The `read_document` tool (read-only; offered only with `documents.enabled`) reads any part: `start_line` / `end_line`
+  of the Markdown, or `section` = a slide number (`"3"`) or a sheet name (`"Sales"`). The first read lists the
+  structure. PDF and Word pages are not guessed — MarkItDown does not keep them — so those are read by line ranges.
+  Output stops at `limits.max_tool_output_bytes` at a line boundary and says which line to continue with. `read_file`
+  on a document hands it to `read_document` instead of returning a binary-file error. Like `read_file`, it asks
+  before reading outside the workspace or a protected file.
+- The Markdown is converted, read-only text — not the document (edit tools cannot change a document through it) — and
+  untrusted content: the model is told to treat it as data, never as instructions.
+
+```text
+summarize @docs/spec.pdf and compare it with #file:slides/review.pptx
+what does the chart in #docimage:slides/review.pptx:2 show?
+```
+
+**Embedded images** (DOCX, PPTX, XLSX, PDF; `documents.extract_images`) are copied out of the file and listed with
+their number, alt text and the page / slide / sheet they are on. They are never sent by themselves:
+`#docimage:<path>:<n>` attaches image n through the normal image path ([Images](#images): size limits, token cost).
+Where an image sits inside the Markdown is not mapped (MarkItDown does not say); the page, slide or sheet is.
+
+- DOCX / PPTX / XLSX: the original bytes, read straight from the file's zip parts with no path from the package ever
+  used on disk; the slide or sheet comes from the file's own relationships. References pointing outside the package
+  and linked (external) images are ignored, with a note.
+- PDF: the image objects of each page (and of the forms it draws), read with pdfminer.six (installed with
+  `markitdown[pdf]`). JPEG and JPEG 2000 keep their bytes; raw pixel images (gray, RGB, CMYK, indexed) become PNG. An
+  image drawn on several pages is listed once with all its pages. Not extracted, with a note: JBIG2 / CCITT fax
+  (scanned pages), other color spaces, inline images; transparency (soft masks) is dropped. Vector drawings are not
+  images and are not extracted.
+- An image the model cannot take as it is — EMF, WMF, TIFF, BMP, JPEG 2000, a CMYK JPEG — is converted to PNG
+  locally when you attach it (once; the PNG is kept in the cache), at most 2048 px on its longest side. This uses
+  Pillow in `documents.python` (installed with `markitdown[pptx]`; else `pip install pillow` there), or LibreOffice
+  for EMF / WMF where Pillow cannot read them (outside Windows). Without them, attaching such an image gives an
+  error that says what to install.
+- Shapes, connectors, text boxes, SmartArt and charts are drawn by Office from XML; they are not images and are not
+  extracted, nor composed with the pictures they surround. For such a diagram, take a screenshot and attach it
+  (`#image`, `<M-v>`). A diagram pasted "as picture" (EMF) is one image and is converted as above.
+- Limits: `max_images` (100), `max_image_bytes` (20 MB each), `max_images_total_bytes` (100 MB). XLS images are not
+  extracted.
+
+**Pages as pictures** — text loses figures, charts, diagrams made of shapes, and layout. `read_images` with
+`document` and `pages` (`{document: "slides/deck.pptx", pages: "3-5", question: "..."}`) has pages / slides read as
+pictures, each together with its text: PPTX slides with MarkItDown's text of that slide, PDF pages and DOCX / DOC
+pages with the text of that page. The model decides when it needs them (read_document's first read says how):
+
+- The pages go to a separate request with no tools; the conversation gets the written notes only, never the
+  pictures, so later steps do not resend them. reader `"worker"` (the default under `roles.preset = 'lead'`) reads
+  with the cheaper worker model; reader `"self"` with the conversation's model, when the lead must judge a diagram
+  itself. Several pages go in one request (a batch per request when a model refused that many).
+- A page costs the reader about 1,100 input tokens (rendered at most 1568 px on its longest side). At most
+  `documents.max_pages_per_read` (10) pages per call.
+- PDF pages are rendered with pypdfium2 (`pip install pypdfium2` in `documents.python`). PPTX, DOCX and DOC are laid
+  out by LibreOffice as PDF first (hidden slides included), so fonts and positions may differ a little from
+  PowerPoint / Word, and DOCX page numbers are LibreOffice's pagination, not Word's (the label says so). If
+  LibreOffice gives a different number of pages than the deck has slides, slides are not paired and it says so.
+  Excel sheets have no pages.
+- Rendered pages are kept in the cache entry; a page is rendered once. The page text is untrusted document content,
+  marked as such for the reader.
+
+**Cache** — conversions are kept in `stdpath('state')/coagent/documents/` (0700): the Markdown, metadata and images,
+keyed by the file's content (SHA-256) + conversion settings + MarkItDown version, so the second read of an unchanged
+file starts no Python, and a changed file converts again. Entries unused for `cache.keep_days` (30) are deleted; past
+`cache.max_bytes` (500 MB) the least recently used go first. `cache.enabled = false` keeps conversions only until
+Neovim exits. Each conversion runs the bundled helper (`python/coagent_markitdown.py`) with an argument list (no
+shell) in a private temporary folder that is removed when it fails, with `documents.timeout_ms` (2 minutes); `/stop`
+cancels it. Files above `max_file_bytes` (50 MB) are not converted.
+
+**Limits of the conversion** (MarkItDown's): scanned PDFs and pictures have no text (no OCR: MarkItDown plugins are
+off and no model is asked to describe images); layout, shapes, SmartArt, charts, text boxes and speaker-notes
+placement may be lost or simplified; tables come out as Markdown tables; headers / footers may be missing. Nothing
+here uses the network. Settings under `documents` count as sensitive for `/config` (they name the programs that run).
 
 `#url` fetches only URLs you typed yourself (no approval prompt: it is a fetch, not a send). URLs that are not
 `http://` / `https://`, that omit the scheme, or that contain `user:pass@` are rejected. The page is fetched with
@@ -1253,6 +1376,7 @@ terminal = {
 | Kind | Tools | Approval (supervised) |
 |---|---|---|
 | Investigation | `list_dir`, `glob`, `search`, `read_file`, `git_status`, `git_diff`, `diagnostics` | No |
+| Documents | `read_document` (PDF / Office files as converted Markdown), `read_images` with `document` + `pages` (pages / slides as pictures with their text, read in a separate request); offered only with `documents.enabled` | No |
 | Skills | `use_skill` (loads a skill's instructions; offered only when skills exist) | No |
 | Experiments | `experiments` (the local experiment log: table, details, comparison) | No |
 | Project ledger | `ledger` (read a ledger file; record a finding / decision; rewrite a `methods.md` section — only coagent's ledger, outside the repository, `/ledger undo`) | No |

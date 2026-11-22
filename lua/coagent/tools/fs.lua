@@ -123,6 +123,15 @@ M.read_file = {
   end,
   run = function(args, ctx, prepared)
     local info = prepared.path
+    -- a PDF / Office document (documents.enabled): read_document's converted
+    -- Markdown instead of a binary-file error the model would retry
+    local Documents = require('coagent.agent.documents')
+    if Documents.format(info.real) and Documents.enabled(ctx.config and ctx.config.documents) then
+      local res = Documents.run(args, ctx, info)
+      res.output = string.format('[read_file on a document: this is the read-only Markdown read_document converted from %s '
+        .. '(line numbers are those of the Markdown). Use read_document for documents.]\n', info.rel) .. res.output
+      return res
+    end
     local data, encoding_note, disk
     -- Always from disk: CopilotChat's file reader caches by whole-second
     -- mtime and returns stale text for a file rewritten within the same
