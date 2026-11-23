@@ -25,3 +25,28 @@ jobs:
       - name: git identity for test repositories
         run: git config --global user.email ci@example.com && git config --global user.name ci
       - run: make test
+
+  # PDF / Office documents with the real MarkItDown and LibreOffice (Linux
+  # only: the macOS app is ~1 GB). Versions are pinned so an upstream release
+  # does not break CI; raise them on purpose.
+  documents:
+    runs-on: ubuntu-latest
+    env:
+      COAGENT_MARKITDOWN_PYTHON: ${{ github.workspace }}/.venv-markitdown/bin/python
+      COAGENT_DOCUMENTS_STRICT: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rhysd/action-setup-vim@v1
+        with:
+          neovim: true
+          version: stable
+      - name: LibreOffice (GUI-less) and CJK fonts
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends libreoffice-writer-nogui libreoffice-impress-nogui fonts-noto-cjk
+      - name: MarkItDown
+        run: |
+          python3 -m venv .venv-markitdown
+          .venv-markitdown/bin/pip install -q 'markitdown[pdf,docx,pptx,xlsx,xls]==0.1.9' pypdfium2==5.15.2 pillow==13.0.0
+          .venv-markitdown/bin/python python/coagent_markitdown.py probe
+      - run: make test-file F=tests/documents_integration_spec.lua

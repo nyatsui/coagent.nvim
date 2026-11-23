@@ -2,6 +2,7 @@
 -- MarkItDown is installed: the Python is $COAGENT_MARKITDOWN_PYTHON, else
 -- ~/.local/share/coagent-markitdown/bin/python, else python3.
 --   COAGENT_MARKITDOWN_PYTHON=/path/to/venv/bin/python make test-file F=tests/documents_integration_spec.lua
+-- With COAGENT_DOCUMENTS_STRICT=1 (CI) whatever is missing fails the test.
 local h = require('tests.helpers')
 local context = require('coagent.agent.context')
 local Documents = require('coagent.agent.documents')
@@ -21,9 +22,18 @@ end
 
 local PY, VERSION = find_python()
 
+-- CI sets COAGENT_DOCUMENTS_STRICT=1: there a missing piece is a failure,
+-- not a silent skip
+local function skip(why)
+  if vim.env.COAGENT_DOCUMENTS_STRICT == '1' then
+    error(why .. ' (COAGENT_DOCUMENTS_STRICT=1)')
+  end
+  pending(why)
+end
+
 if not PY then
   describe('documents with MarkItDown', function()
-    pending('MarkItDown is not installed (set COAGENT_MARKITDOWN_PYTHON to a Python that has it)')
+    skip('MarkItDown is not installed (set COAGENT_MARKITDOWN_PYTHON to a Python that has it)')
   end)
   return
 end
@@ -66,7 +76,7 @@ describe('documents with MarkItDown ' .. VERSION, function()
 
   it('renders PDF pages as pictures with the text of each page (pypdfium2)', function()
     if vim.system({ PY, '-c', 'import pypdfium2, PIL' }):wait().code ~= 0 then
-      pending('pypdfium2 is not installed with MarkItDown')
+      skip('pypdfium2 is not installed with MarkItDown')
       return
     end
     local res, err = unpack(h.run_async(function()
@@ -85,7 +95,7 @@ describe('documents with MarkItDown ' .. VERSION, function()
 
   it('lays out PPTX slides with LibreOffice and pairs them with the slide text', function()
     if not Documents.find_soffice('soffice') or not vim.uv.fs_stat(root .. '/docs/deck.pptx') or vim.system({ PY, '-c', 'import pypdfium2' }):wait().code ~= 0 then
-      pending('LibreOffice, python-pptx or pypdfium2 is not installed')
+      skip('LibreOffice, python-pptx or pypdfium2 is not installed')
       return
     end
     local res, err = unpack(h.run_async(function()
@@ -99,7 +109,7 @@ describe('documents with MarkItDown ' .. VERSION, function()
 
   it('lays out DOCX pages with LibreOffice, Japanese text included', function()
     if not Documents.find_soffice('soffice') or vim.system({ PY, '-c', 'import pypdfium2' }):wait().code ~= 0 then
-      pending('LibreOffice or pypdfium2 is not installed')
+      skip('LibreOffice or pypdfium2 is not installed')
       return
     end
     local res, err = unpack(h.run_async(function()
@@ -116,7 +126,7 @@ describe('documents with MarkItDown ' .. VERSION, function()
   it('turns an EMF picture into a PNG of the picture, not of a whole page (LibreOffice)', function()
     local soffice = Documents.find_soffice('soffice')
     if not soffice then
-      pending('LibreOffice is not installed')
+      skip('LibreOffice is not installed')
       return
     end
     -- an EMF made by LibreOffice from a 200 x 100 SVG
@@ -125,7 +135,7 @@ describe('documents with MarkItDown ' .. VERSION, function()
     h.write(dir .. '/shape.svg', '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><rect width="200" height="100" fill="#3366cc"/></svg>')
     local res = vim.system({ soffice, '-env:UserInstallation=file://' .. dir .. '/profile', '--headless', '--convert-to', 'emf', '--outdir', dir, dir .. '/shape.svg' }, { cwd = dir }):wait(120000)
     if res.code ~= 0 or not vim.uv.fs_stat(dir .. '/shape.emf') then
-      pending('LibreOffice could not write an EMF')
+      skip('LibreOffice could not write an EMF')
       return
     end
     vim.uv.fs_rename(dir .. '/shape.emf', dir .. '/001-x.emf')
@@ -142,7 +152,7 @@ describe('documents with MarkItDown ' .. VERSION, function()
   it('turns an image the model cannot take into PNG (Pillow)', function()
     local res = vim.system({ PY, '-c', 'import PIL' }):wait()
     if res.code ~= 0 or not vim.uv.fs_stat(root .. '/docs/shot.tiff') then
-      pending('Pillow is not installed with MarkItDown')
+      skip('Pillow is not installed with MarkItDown')
       return
     end
     local cache = vim.fn.tempname()
@@ -176,7 +186,7 @@ describe('documents with MarkItDown ' .. VERSION, function()
 
   it('reads a PPTX slide by slide with the images placed on their slide', function()
     if not vim.uv.fs_stat(root .. '/docs/deck.pptx') then
-      pending('python-pptx is not installed with MarkItDown')
+      skip('python-pptx is not installed with MarkItDown')
       return
     end
     local doc, err = load('docs/deck.pptx')
@@ -194,7 +204,7 @@ describe('documents with MarkItDown ' .. VERSION, function()
 
   it('reads an XLSX sheet by name', function()
     if not vim.uv.fs_stat(root .. '/docs/book.xlsx') then
-      pending('openpyxl is not installed with MarkItDown')
+      skip('openpyxl is not installed with MarkItDown')
       return
     end
     local doc, err = load('docs/book.xlsx')
