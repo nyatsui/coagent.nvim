@@ -128,7 +128,7 @@ function M.experiment_section(m)
   }, '\n')
 end
 
----@param opts {root:string, mode:string, plan:boolean?, instruction_files:string[], tools:table[], skills:string?, monitor:table?}
+---@param opts {root:string, mode:string, plan:boolean?, instruction_files:string[], tools:table[], skills:string?, monitor:table?, todo:boolean?}
 ---  skills: the <skills> section (Skills:prompt_section), stable for a task
 ---  monitor: experiments.monitor (with defaults) when monitored runs are on
 ---@return string
@@ -163,6 +163,10 @@ function M.build(opts)
   end
   if opts.monitor and not opts.plan then
     table.insert(parts, M.experiment_section(opts.monitor))
+  end
+
+  if opts.todo and not opts.plan then
+    table.insert(parts, vim.trim(require('coagent.agent.todo').PROMPT))
   end
 
   if opts.lead then

@@ -1462,6 +1462,7 @@ function Controller:_compact_view(watermark)
       instructions_override = (self.config.instructions or {}).override,
       skills = self.skills and self.skills:prompt_section() or nil,
       monitor = require('coagent.agent.monitor').enabled(self.config) and require('coagent.agent.monitor').cfg(self.config) or nil,
+      todo = require('coagent.agent.todo').enabled(self.config),
     })
   local sent = context.with_summary(self.session.messages, self.session.compact_summary)
   local _, cinfo = context.compact(sent, budget, { system_prompt = sp, watermark = watermark, archive = self:_archiver() })
@@ -1570,6 +1571,8 @@ function Controller:_compact_summary()
         local cinfo = self:_after_compact('summary')
         local own = #info.kept > 0 and string.format(' (%d of your messages kept word for word)', #info.kept) or ''
         self:notice('info', string.format('Summarized %d older messages into one%s: ~%d -> ~%d tokens.\n%s\n\n%s', upto - from, own, before.tokens or 0, cinfo.tokens or 0, CACHE_NOTE, text))
+        -- a stretch of discussion ends here: the ledger keeps what it settled
+        pcall(self._ledger_auto_capture, self, 'compact')
       end
       refresh()
     end, debug.traceback)
@@ -2135,6 +2138,10 @@ function Controller:_loop(gen)
       end
       local note = results_note
       if not note then
+        -- open items on the todo list: go on instead of ending with a report
+        note = self:_todo_nudge()
+      end
+      if not note then
         -- BEFORE_DONE (files changed) or ANSWER (no changes)
         local stopped
         note, stopped = self:_review_final(gen, res.content)
@@ -2543,6 +2550,56 @@ end
 
 --- Ledger entries (D-3 / F-12) named in a message count as used.
 ---@param text string?
+--- The todo tool: store the conversation's step list (current prompt).
+--- The panel shows the list under the newest todo item only.
+---@param items table[]
+---@param item table? the tool's timeline item
+function Controller:_set_todo(items, item)
+  local Todo = require('coagent.agent.todo')
+  local prev = self.session.todo and self.session.todo.item and self.session:get_item(self.session.todo.item)
+  local td = Todo.set(self.session, items)
+  if prev and prev ~= item then
+    prev.todo_lines = nil
+    self:_update(prev)
+  end
+  if item then
+    td.item = item.id
+    item.todo_lines = Todo.render(items)
+  end
+  self.events:emit('state', { state = self.machine.current, prev = self.machine.current })
+  return td
+end
+
+--- The model ended its turn: a message sending it back to its open todo
+--- items (nil: none open, the list is of an earlier prompt, or the nudges of
+--- this prompt are used up).
+---@return string?
+function Controller:_todo_nudge()
+  local Todo = require('coagent.agent.todo')
+  if not Todo.enabled(self.config) or self.task.planning then
+    return nil
+  end
+  local td = Todo.of_prompt(self.session)
+  if not td then
+    return nil
+  end
+  local open = Todo.open(td.items)
+  if #open == 0 then
+    return nil
+  end
+  local max = tonumber((self.config.todo or {}).max_nudges) or 2
+  if (td.nudges or 0) >= max then
+    if not self.task.todo_left_noticed then
+      self.task.todo_left_noticed = true
+      self:notice('warn', string.format('Todo: the agent ended with %d open item%s (%s done); it was sent back %d time%s already.', #open, #open == 1 and '' or 's', Todo.progress(td.items), max, max == 1 and '' or 's'))
+    end
+    return nil
+  end
+  td.nudges = (td.nudges or 0) + 1
+  self:notice('info', string.format('Todo: %d open item%s (%s done); the agent goes on (%d/%d).', #open, #open == 1 and '' or 's', Todo.progress(td.items), td.nudges, max))
+  return Todo.nudge_text(td)
+end
+
 function Controller:_ledger_cite(text)
   local l = self.ledger
   if l and type(text) == 'string' and text:find('[DF]%-%d') then
@@ -2924,6 +2981,7 @@ function Controller:_request(gen)
       monitor = require('coagent.agent.monitor').enabled(self.config) and require('coagent.agent.monitor').cfg(self.config) or nil,
       lead = self:roles().lead and not self.task.strong and not self.task.model_override,
       lead_hands = self:roles().lead_hands,
+      todo = not planning and require('coagent.agent.todo').enabled(self.config),
     })
     self.task.system_mode = key
   end
@@ -3193,6 +3251,10 @@ function Controller:_tool_ctx(item, gen)
     experiments = self.experiments,
     ledger = self.ledger,
     loop = self.loop,
+    -- the conversation's step list (not for the lead's worker)
+    todo = not self.worker_item and function(items)
+      return self:_set_todo(items, item)
+    end or nil,
     -- files imported by /receive are reviewed by the user as a whole; the
     -- read-before-edit rule is for the model's own edits
     seen = not tostring(item and item.call_id or ''):match('^receive_') and self.seen or nil,
@@ -4490,20 +4552,87 @@ function Controller:_ledger_task_event(state, summary, t)
   }
 end
 
---- After a task: ONE small request records it in the ledger (auto_update).
+--- After a task: ONE small request records it in the ledger (auto_update);
+--- every ledger.auto_capture tasks the latest discussion is organized too.
+--- In a git repository the ledger starts by itself (ledger.auto_create).
 function Controller:_ledger_after_task(state, summary, t)
   local l = self.ledger
-  if not (l and l:enabled() and l:exists()) then
+  if not (l and l:enabled()) then
     return
   end
   local ok, ev = pcall(self._ledger_task_event, self, state, summary, t)
   if not ok or not ev then
     return
   end
+  if not l:exists() and not self:_ledger_auto_create() then
+    return
+  end
   self.last_ledger_event = ev
   if l.config.auto_update ~= false then
     l:record(ev)
   end
+  local pass = self:_ledger_pass()
+  pass.tasks = pass.tasks + 1
+  local every = tonumber(l.config.auto_capture) or 0
+  if l.config.auto_capture ~= false and every > 0 and pass.tasks >= every then
+    self:_ledger_auto_capture('tasks')
+  end
+end
+
+--- ledger.auto_create: start the ledger after the first task in a git
+--- repository (templates only, no request).
+---@return boolean created
+function Controller:_ledger_auto_create()
+  local l = self.ledger
+  if l.config.auto_create == false or not vim.uv.fs_stat(self.ws.root .. '/.git') then
+    return false
+  end
+  local ok = pcall(l.ensure, l)
+  if not ok or not l:exists() then
+    return false
+  end
+  self:notice('info', string.format('Project ledger started (%s): coagent now keeps what is decided and learned across chats, in the background. '
+    .. '/ledger sets your goals; /ledger init writes the code overview (1 request). ledger.auto_create = false turns this off.', vim.fn.fnamemodify(l:dir(), ':~')))
+  return true
+end
+
+--- Where the automatic ledger pass left off in this session's timeline.
+---@return {item:integer, tasks:integer}
+function Controller:_ledger_pass()
+  local p = self.session.ledger_pass
+  if type(p) ~= 'table' then
+    p = { item = 0, tasks = 0 }
+    self.session.ledger_pass = p
+  end
+  if (p.item or 0) > #self.session.items then
+    p.item = #self.session.items -- rewound past it
+  end
+  p.item, p.tasks = p.item or 0, p.tasks or 0
+  return p
+end
+
+--- The automatic ledger pass: ONE background request reads the conversation
+--- since the previous pass and keeps what was decided, learned and is still
+--- open (ledger.auto_capture). Skipped when there is little new talk.
+---@param why 'tasks'|'compact'
+---@return boolean started
+function Controller:_ledger_auto_capture(why)
+  local l = self.ledger
+  if not (l and l:enabled() and l:exists()) or l.config.auto_capture == false or (tonumber(l.config.auto_capture) or 0) <= 0 then
+    return false
+  end
+  local Ledger = require('coagent.agent.ledger')
+  local pass = self:_ledger_pass()
+  if why == 'compact' and pass.tasks == 0 then
+    return false
+  end
+  local from = pass.item
+  local chat = Ledger.transcript(vim.list_slice(self.session.items, from + 1), l.config.auto_capture_bytes or 40 * 1024)
+  if #vim.trim(chat) < (l.config.auto_capture_min_bytes or 1500) then
+    return false
+  end
+  pass.item, pass.tasks = #self.session.items, 0
+  return (l:capture({ sources = { 'chat' }, chat = chat, auto = true }))
 end
 
 return Controller

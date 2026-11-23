@@ -14,6 +14,7 @@ CONTENTS                                              *coagent-contents*
      Skills .................................. |coagent-skills|
      Experiment log .......................... |coagent-experiments|
      Project ledger .......................... |coagent-ledger|
+     Step list ............................... |coagent-todo|
      Loops ................................... |coagent-loop|
      Settings ................................ |coagent-settings|
      Delegating subtasks ..................... |coagent-delegate|
@@ -1109,6 +1110,17 @@ Requests (everything else is local):
   changed and rewrites status.md (`auto_update`). Files changed and
   the outcome are written by coagent. If the request fails a plain entry
   is written and status.md is left alone. Only once the ledger exists.
+- Every `auto_capture` (4) finished tasks, and at `/compact summary`: ONE
+  background request reads the conversation since the previous pass (up
+  to `auto_capture_bytes`; skipped below `auto_capture_min_bytes`; model
+  `auto_capture_model`, else `update_model`) and keeps what the discussion
+  settled or learned: agreed decisions, findings, status.md "Open issues"
+  (open questions, hypotheses, decisions waiting for you) and "Next
+  steps". No files, no duplicates, no subtask entry; one line says what
+  it kept (/ledger undo reverts it).
+- The ledger starts by itself (`auto_create`): after the first task in a
+  git repository coagent creates it (templates, no request) and says so
+  once. Elsewhere it starts with /ledger or /ledger init.
 
   /ledger             Open goals.md and status.md in a split for editing
                       (creates the ledger) and show its state.
@@ -1167,6 +1179,10 @@ are masked, and the digest cannot close its own block.
     dir = nil,            -- nil = stdpath('state')/coagent/ledger
     dir_in_repo = nil,    -- e.g. '.coagent/ledger'
     auto_update = true, inject = true,
+    auto_create = true,   -- start it in a git repository (no request)
+    auto_capture = 4,     -- organize the discussion every N tasks (0 = off)
+    auto_capture_bytes = 40 * 1024, auto_capture_min_bytes = 1500,
+    auto_capture_model = nil,
     model = nil, update_model = nil,   -- nil = the selected model
     recent = 10, digest_decisions = 5, digest_findings = 8,
     digest_method_bytes = 800, digest_max_bytes = 10000,
@@ -1192,6 +1208,21 @@ are masked, and the digest cannot close its own block.
       The digest block local tasks get (and its rev).
   require('coagent').ledger(arg)
       Same as "/ledger arg".
+
+                                                          *coagent-todo*
+Step list: for a request with several steps the agent writes them with
+the `todo` tool and works through them (like Claude Code's todo list).
+The panel shows the list under its newest update ([x] done, [>] in
+progress, [ ] pending, [!] blocked, [-] dropped); the winbar "todo 2/5".
+When the agent ends its turn with pending items, coagent sends it back to
+them (`todo.max_nudges` = 2 per prompt, one request each). Items that need
+you are marked blocked with the reason, items no longer needed dropped;
+then the task ends. The list belongs to its prompt (/rewind drops it) and
+is saved with the session; the lead's worker and the explorers do not get
+the tool.
+>lua
+  todo = { enabled = true, max_nudges = 2 },
+<
 
                                                           *coagent-loop*
 Loops: run a prompt (or a slash command) again and again in this session,

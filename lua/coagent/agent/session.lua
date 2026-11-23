@@ -27,6 +27,8 @@ local M = {}
 ---@field checkpoints Coagent.Checkpoint[] one per user prompt (/rewind)
 ---@field plan table? plan phase: {phase='planning'|'ready', start, item, reviewed, advice}
 ---@field skills_disabled table<string,true> skills disabled for this session (/skills)
+---@field todo table? the agent's step list {cp = checkpoint id of its prompt, items = {{text, status, note?}}, nudges}
+---@field ledger_pass table? the automatic ledger pass: {item = timeline index it read up to, tasks = finished tasks since}
 ---@field judge_log table[]? judge mode: every judge verdict {at, item, tool, command, cwd, decision, risk, reason, model, cached, error, ms, outcome}
 ---@field terminal table? the attached terminal (:CoagentTerminal): {buf, chan, tag, host, root, python, shared}; re-attached on restore while that buffer is open
 ---@field waiting table? the task waits for a delegated subtask: {id, kind, call_id, results = {{call_id, content}}, since}
@@ -128,6 +130,10 @@ function Session:truncate(cp)
   self.checkpoints = vim.tbl_filter(function(c)
     return c.id < cp.id
   end, self.checkpoints)
+  -- the step list of a dropped prompt (its id would be reused)
+  if self.todo and self.todo.cp >= cp.id then
+    self.todo = nil
+  end
   -- back to the plan phase of that moment (a plan approved or revised later
   -- is waiting again)
   self.plan = cp.plan and vim.deepcopy(cp.plan) or nil
@@ -270,6 +276,8 @@ function Session:serialize(opts)
     terminal = self.terminal,
     nested_notes = self.nested_notes,
     nested_notes_bytes = self.nested_notes_bytes,
+    todo = self.todo,
+    ledger_pass = self.ledger_pass,
     judge_log = self.judge_log and vim.tbl_map(function(e)
       return vim.tbl_extend('force', e, { command = clean(e.command, 2000), reason = clean(e.reason) })
     end, self.judge_log) or nil,
@@ -307,6 +315,8 @@ function M.deserialize(data)
   s.plan = data.plan
   s.waiting = data.waiting
   s.judge_log = data.judge_log
+  s.todo = data.todo
+  s.ledger_pass = data.ledger_pass
   s.nested_notes = data.nested_notes
   s.nested_notes_bytes = data.nested_notes_bytes
   s.terminal = data.terminal

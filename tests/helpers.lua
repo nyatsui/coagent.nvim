@@ -80,6 +80,11 @@ function M.config(root, extra)
   if not (extra and extra.limits and extra.limits.edit_requires_read ~= nil) then
     cfg.limits.edit_requires_read = false
   end
+  -- a ledger only where a spec makes one (its requests would change the
+  -- scripted mock backends of git workspaces); ledger_auto_spec tests it
+  if not (extra and extra.ledger and extra.ledger.auto_create ~= nil) then
+    cfg.ledger.auto_create = false
+  end
   -- never pick up the developer's own ~/.config/coagent/skills (lists replace)
   cfg.skills.paths = extra and extra.skills and extra.skills.paths or {}
   return cfg

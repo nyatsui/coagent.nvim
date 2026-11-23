@@ -344,6 +344,7 @@ describe('experiments in the agent', function()
       session = { persist = false },
       ui = { render_throttle_ms = 0 },
       experiments = { dir = vim.fn.tempname() },
+      ledger = { auto_create = false }, -- its requests would change the scripted backend
     }, extra or {}))
     return agent.controller()
   end

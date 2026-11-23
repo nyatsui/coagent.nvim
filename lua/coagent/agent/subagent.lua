@@ -20,7 +20,7 @@ When done, reply WITHOUT tool calls with a concise report (at most ~25 lines):
 ]]
 
 -- tools an explorer may use (read-only, no process control, no recursion)
-local EXCLUDE = { explore = true, read_images = true, use_skill = true, read_process_output = true, wait_process = true, list_processes = true, stop_process = true }
+local EXCLUDE = { explore = true, read_images = true, todo = true, use_skill = true, read_process_output = true, wait_process = true, list_processes = true, stop_process = true }
 
 ---@param ctrl CopilotAgent.Controller
 local function tools_for(ctrl)

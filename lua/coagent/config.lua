@@ -698,6 +698,17 @@ local defaults = {
     -- `.coagent/` to .gitignore, or commit it to share the ledger)
     dir_in_repo = nil,
     auto_update = true, -- false: no automatic request; /ledger note, /ledger decision, /ledger update
+    -- start the ledger by itself after the first task in a git repository
+    -- (templates only, no request; /ledger init adds the code overview)
+    auto_create = true,
+    -- every N finished tasks of a session, and at /compact summary, ONE
+    -- background request reads the conversation since the previous pass and
+    -- keeps what was decided, learned and is still open (status.md "Open
+    -- issues" / "Next steps", decisions, findings). 0 or false = off
+    auto_capture = 4,
+    auto_capture_bytes = 40 * 1024, -- conversation sent per pass (longer: the middle is cut)
+    auto_capture_min_bytes = 1500, -- less new conversation than this: no pass
+    auto_capture_model = nil, -- nil = ledger.update_model, else the selected model
     inject = true, -- digest in local agent tasks
     model = nil, -- init / refresh model (nil = the selected model)
     update_model = nil, -- model of the small update request (nil = the selected model)
@@ -718,6 +729,17 @@ local defaults = {
     init_max_bytes = 160 * 1024, -- core file text sent by /ledger init (quality first)
     max_file_bytes = 24 * 1024, -- per file
     tree_max_entries = 300, -- lines of the directory tree
+  },
+
+  -- The agent's step list (todo tool, like Claude Code's todo list): for a
+  -- multi-step request the agent writes the steps first and works through
+  -- them; the panel and the winbar show the progress. When it ends its turn
+  -- with items still pending, coagent sends it back to them (a progress
+  -- report is not the end of the task). Items that need you are marked
+  -- blocked with the reason, and then the task ends.
+  todo = {
+    enabled = true,
+    max_nudges = 2, -- per prompt: times the agent is sent back to its open items (0 = never)
   },
 
   -- /loop [interval] [xN] <prompt or /command>: run it again and again in the

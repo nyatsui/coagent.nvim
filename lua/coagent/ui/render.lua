@@ -176,6 +176,16 @@ local function tool(b, item, o)
     local r = b.line('  ' .. item.summary)
     b.hl(r, 2, -1, grp)
   end
+  -- the agent's step list (todo tool): shown under its newest update
+  if item.todo_lines then
+    for _, l in ipairs(item.todo_lines) do
+      local r = b.line('    ' .. l)
+      local grp = l:match('^%[x%]') and 'CoagentDim' or (l:match('^%[>%]') and 'CoagentKey' or (l:match('^%[!%]') and 'CoagentWarn' or (l:match('^%[%-%]') and 'CoagentDim' or nil)))
+      if grp then
+        b.hl(r, 4, -1, grp)
+      end
+    end
+  end
   -- judge mode: the judge's verdict ("judge: allowed — runs the training script")
   if item.judge then
     local r = b.line('  ' .. require('coagent.agent.judge').label(item.judge))

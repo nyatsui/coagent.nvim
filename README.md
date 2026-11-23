@@ -1079,9 +1079,14 @@ delegate a subtask to) starts from the whole picture.
 | `/ledger capture` | 1, no tools | **What to keep, read from what you already have.** coagent collects this session's conversation (prompts and replies in full, tool calls as one line, the tail of command output), the newest saved sessions of the project (`capture_sessions` = 5), and the code, docs and notebooks most likely to describe data loading, preprocessing, evaluation and plots (names such as `data`, `loader`, `transform`, `eval`, `metric`, `plot`, `.ipynb` cells without outputs; up to `capture_max_bytes` = 120 KB, secrets masked, protected files skipped). The model (`capture_model`, else `roles.strong_model`, else the selected one) fills `methods.md`, the `goals.md` sections still empty, new decisions and findings (not already recorded), and the status. The notice shows the input size and estimated tokens before sending |
 | after a task / imported result / background experiment | 1 small, no tools | `ledger.auto_update = true`: a subtask entry, any real decisions and findings, the `methods.md` sections the task established or changed, and the rewritten `status.md`. Files changed and the outcome come from coagent, not the model. Experiments run during a task go into that task's entry. If the request fails, a plain entry is written and `status.md` stays |
 
-Automatic updates only happen once the ledger exists (`/ledger` or `/ledger init` created it). With `auto_update = false`
-nothing is sent automatically; use `/ledger note`, `/ledger decision`, edit the files, or `/ledger update` (records the last
-finished task with one request).
+| every `auto_capture` (4) finished tasks, and at `/compact summary` | 1, no tools, in the background | **The discussion, organized while you work.** The conversation since the previous pass (up to `auto_capture_bytes` = 40 KB; none when less than `auto_capture_min_bytes` is new) goes to the model (`auto_capture_model`, else `update_model`, else the selected one), which keeps what the discussion settled or learned: agreed decisions (with the reason and the rejected options), findings from the results you read, `status.md` "Open issues" (questions still open, hypotheses being weighed, decisions waiting for you with the options) and "Next steps". No files are read, nothing already recorded is added again, and it writes no subtask entry. One line tells what it kept; `/ledger undo` reverts it |
+
+**The ledger starts by itself** (`ledger.auto_create = true`): after the first task in a git repository coagent creates
+it (templates only, no request) and says so once, so the updates above run without `/ledger` first. `/ledger` sets your
+goals and `/ledger init` writes the code overview (1 request). Elsewhere, or with `auto_create = false`, automatic updates
+only happen once the ledger exists (`/ledger` or `/ledger init` created it). With `auto_update = false` and
+`auto_capture = 0` nothing is sent automatically; use `/ledger note`, `/ledger decision`, edit the files, or
+`/ledger update` (records the last finished task with one request).
 
 **Commands.**
 
@@ -1134,6 +1139,22 @@ values and the last runs).
 **Trust.** The ledger contains model-written and repository-derived text. It is context data only: it cannot change
 permissions, the mode or the model. Model text cannot add sections or fake entries (`#` lines become bold text),
 secrets are masked, and the digest cannot close its own block.
+
+### Step list (todo)
+
+For a request with several steps (change the code, run it, evaluate, read and compare the results, propose or try the
+next change), the agent first writes the steps with the `todo` tool and works through them, like Claude Code's todo list.
+The panel shows the list under its newest update (`[x]` done, `[>]` in progress, `[ ]` pending, `[!]` blocked,
+`[-]` dropped) and the winbar shows `todo 2/5`.
+
+- **A progress report is not the end of the task.** When the agent ends its turn while items are still pending, coagent
+  sends it back to them (`todo.max_nudges` = 2 times per prompt; each is one more request). Items that need you (a
+  decision only you can make, credentials, information it cannot find) are marked blocked with the reason, items no
+  longer needed dropped with the reason; then the task ends with the summary and the questions for you.
+- The list belongs to the prompt it was written under: a new message starts fresh, and `/rewind` drops it with that
+  prompt. It is saved with the session. The lead keeps the list; its worker and the explorers do not get the tool.
+- It adds no step the request does not ask for (the experiment section's "start another run only if the task asks for
+  it" still holds). `todo = { enabled = false }` turns it off (no tool, no prompt section).
 
 ### Loops (/loop)
 
@@ -1381,6 +1402,7 @@ terminal = {
 | Experiments | `experiments` (the local experiment log: table, details, comparison) | No |
 | Project ledger | `ledger` (read a ledger file; record a finding / decision; rewrite a `methods.md` section — only coagent's ledger, outside the repository, `/ledger undo`) | No |
 | Loops | `loop_control` (schedule the next `/loop` iteration or end the loop; offered only while a loop runs) | No |
+| Step list | `todo` (the agent's steps for a multi-step request; see "Step list (todo)") | No |
 | Saved outputs | `recall_output` (read back a tool output that was cut or shortened: a range, or the lines matching a query; see "Context length") | No |
 | Delegation | `delegate` (bundle a heavy subtask for another chat; the task waits for `/receive`) | **Always**, also in auto mode |
 | Language server | `lsp_definition`, `lsp_references`, `lsp_symbols` (outline / symbol search), `lsp_hover` (types / docs) | No |
@@ -1757,6 +1779,8 @@ require('coagent').setup({
     enabled = true,
     dir_in_repo = nil,  -- e.g. '.coagent/ledger' (default: stdpath('state')/coagent/ledger/<project>)
     auto_update = true, -- one small request after each task / imported result / experiment
+    auto_create = true, -- start the ledger after the first task in a git repository (no request)
+    auto_capture = 4,   -- every N tasks and at /compact summary: organize the latest discussion (1 request; 0 = off)
     inject = true,      -- digest (goals, status, recent decisions) in local tasks
     model = nil, update_model = nil, -- nil = the selected model
     recent = 10,        -- entries in full in views and bundles

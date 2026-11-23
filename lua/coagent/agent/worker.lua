@@ -77,7 +77,7 @@ function M.lead_prompt(hands)
 end
 
 -- tools a worker does not get (no nesting, no lead-level orchestration)
-local EXCLUDE = { worker = true, explore = true, delegate = true, loop_control = true, read_images = true }
+local EXCLUDE = { worker = true, explore = true, delegate = true, loop_control = true, read_images = true, todo = true }
 
 ---@param ctrl Coagent.Controller
 local function tools_for(ctrl)

@@ -1637,7 +1637,7 @@ function Ledger:_ask(kind, system, user)
     return nil, 'no backend'
   end
   async.main()
-  local model = (kind == 'update' and self.config.update_model) or (kind == 'capture' and (self.config.capture_model or self.config.model or ctrl:roles().strong_model)) or self.config.model or ctrl:model()
+  local model = (kind == 'update' and self.config.update_model) or (kind == 'auto_capture' and (self.config.auto_capture_model or self.config.update_model)) or (kind == 'capture' and (self.config.capture_model or self.config.model or ctrl:roles().strong_model)) or self.config.model or ctrl:model()
   local res, err = ctrl.backend:ask({
     messages = { { role = 'user', content = user } },
     system_prompt = system,
@@ -2175,11 +2175,23 @@ Rules:
 - Markdown bullets inside the strings; no headers ("#").
 ]]
 
+M.AUTO_CAPTURE_NOTE = [[
+This is an AUTOMATIC pass, made in the background while the user works: the conversation is only its latest part
+(since the previous pass), and no files are attached. Keep what the discussion settled or learned, not the chatter:
+- decisions the user and the agent agreed on (with the reason and the rejected options), findings from the results
+  they read (with the numbers);
+- status: "Open issues" = the questions still open in the discussion (hypotheses being weighed, decisions waiting for
+  the user, with the options on the table), "Next steps" = what was planned next; rewrite only these and
+  "Current state" / "Best results" when the conversation changes them;
+- methods only for what the conversation states about how the work is done.
+Return empty lists and leave out sections when the conversation adds nothing.]]
+
 ---@class Coagent.LedgerCaptureOpts
 ---@field sources string[]? 'chat' | 'sessions' | 'code' | 'docs'
 ---@field chat string? transcript of the current session
 ---@field sessions string? transcripts of earlier sessions
 ---@field paths string[]? workspace files / folders to read first
+---@field auto boolean? the automatic pass over the latest conversation (brief notices, no subtask entry)
 
 --- Parse `/ledger capture` arguments: source words and workspace paths.
 ---@param arg string
@@ -2330,20 +2342,26 @@ function Ledger:capture(opts, cb)
       return false, 'nothing to read'
     end
     local user = table.concat(parts, '\n\n')
-    self:_notice('info', string.format('Ledger: capturing from %s%s%d files (%s; about %s input tokens, 1 request)...',
-      chat_bytes > 0 and 'this chat, ' or '', session_bytes > 0 and 'earlier sessions, ' or '', #files,
-      math.floor(#user / 1024) .. ' KB', require('coagent.agent.usage').k(math.floor(#user / 3.5))))
-    local text, err, model = self:_ask('capture', M.CAPTURE_PROMPT, user)
+    local tokens = require('coagent.agent.usage').k(math.floor(#user / 3.5))
+    if opts.auto then
+      self:_notice('info', string.format('Ledger: organizing the latest discussion in the background (about %s input tokens, 1 request)...', tokens))
+    else
+      self:_notice('info', string.format('Ledger: capturing from %s%s%d files (%s; about %s input tokens, 1 request)...',
+        chat_bytes > 0 and 'this chat, ' or '', session_bytes > 0 and 'earlier sessions, ' or '', #files,
+        math.floor(#user / 1024) .. ' KB', tokens))
+    end
+    local what = opts.auto and 'Ledger (background)' or 'Ledger capture'
+    local text, err, model = self:_ask(opts.auto and 'auto_capture' or 'capture', opts.auto and (M.CAPTURE_PROMPT .. '\n' .. M.AUTO_CAPTURE_NOTE) or M.CAPTURE_PROMPT, user)
     if not text then
-      self:_notice('error', 'Ledger capture: the request failed: ' .. tostring(err))
+      self:_notice(opts.auto and 'warn' or 'error', what .. ': the request failed: ' .. tostring(err))
       return false, err
     end
     local obj = extract_json(text, { 'methods', 'goals', 'decisions', 'findings', 'status' })
     if not obj then
-      self:_notice('error', 'Ledger capture: the reply was not JSON; the ledger is unchanged.')
+      self:_notice(opts.auto and 'warn' or 'error', what .. ': the reply was not JSON; the ledger is unchanged.')
       return false, 'invalid reply'
     end
-    local res = self:_apply_capture(obj, { files = files, chat = chat_bytes > 0, sessions = session_bytes > 0, model = model })
+    local res = self:_apply_capture(obj, { files = files, chat = chat_bytes > 0, sessions = session_bytes > 0, model = model, auto = opts.auto })
     return true, res
   end, cb)
   return true
@@ -2355,7 +2373,7 @@ end
 ---@return table result
 function Ledger:_apply_capture(obj, info)
   info = info or {}
-  self:snapshot('capture')
+  self:snapshot(info.auto and 'background capture' or 'capture')
   local res = { methods = { applied = {}, pending = {} }, goals = { applied = {}, pending = {} }, status = { applied = {}, pending = {} }, decisions = 0, findings = 0 }
   local function str(v)
     return type(v) == 'string' and vim.trim(v) ~= '' and v or nil
@@ -2430,6 +2448,9 @@ function Ledger:_apply_capture(obj, info)
     table.insert(from, #info.files .. ' files')
   end
   res.summary = str(obj.summary) and clean_block(obj.summary, 800) or nil
+  if info.auto then
+    return self:_auto_capture_notice(res)
+  end
   res.subtask = self:add_subtask({
     kind = 'note',
     title = 'Ledger capture from ' .. (#from > 0 and table.concat(from, ', ') or 'the material'),
@@ -2461,6 +2482,40 @@ function Ledger:_apply_capture(obj, info)
   end
   table.insert(lines, '/ledger open methods to read or edit; /ledger undo reverts this capture.')
   self:_notice(#pend > 0 and 'warn' or 'info', table.concat(lines, '\n'))
+  return res
+end
+
+--- One line for the automatic pass (it runs often; the details are in the files).
+---@param res table
+---@return table res
+function Ledger:_auto_capture_notice(res)
+  local parts = {}
+  local function add(name, r)
+    if #r.applied > 0 then
+      table.insert(parts, name .. '.md (' .. table.concat(r.applied, ', ') .. ')')
+    end
+  end
+  add('status', res.status)
+  add('methods', res.methods)
+  add('goals', res.goals)
+  if res.decisions > 0 then
+    table.insert(parts, res.decisions .. ' decision' .. (res.decisions == 1 and '' or 's'))
+  end
+  if res.findings > 0 then
+    table.insert(parts, res.findings .. ' finding' .. (res.findings == 1 and '' or 's'))
+  end
+  local pend = {}
+  for _, n in ipairs({ 'methods', 'goals', 'status' }) do
+    for _, sec in ipairs(res[n].pending) do
+      table.insert(pend, n .. '.md#' .. sec)
+    end
+  end
+  local msg = #parts > 0 and ('Ledger: kept from the discussion: ' .. table.concat(parts, ', ') .. '. /ledger open status, /ledger log, /ledger undo.')
+    or 'Ledger: nothing new to keep from the latest discussion.'
+  if #pend > 0 then
+    msg = msg .. ' Waiting for /ledger review (you edited them): ' .. table.concat(pend, ', ') .. '.'
+  end
+  self:_notice(#pend > 0 and 'warn' or 'info', msg)
   return res
 end
 

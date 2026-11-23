@@ -547,7 +547,7 @@ describe('/exp watch', function()
       session = { persist = false },
       ui = { render_throttle_ms = 0 },
       experiments = { dir = vim.fn.tempname() },
-      ledger = { dir = vim.fn.tempname() },
+      ledger = { dir = vim.fn.tempname(), auto_create = false },
       mode = 'auto',
       auto = { workspaces = { root } },
     })

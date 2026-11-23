@@ -436,6 +436,10 @@ function View:bar()
   local segs = {}
   if c.task and State.is_busy(st) then
     table.insert(segs, { 1, 2, 'step ' .. c.task.steps })
+    local td = c.session and require('coagent.agent.todo').of_prompt(c.session)
+    if td then
+      table.insert(segs, { 1.2, 2.5, 'todo ' .. require('coagent.agent.todo').progress(td.items) })
+    end
     local u = c.task.usage
     if self.config.usage.show_tokens ~= false and u and u.requests > 0 then
       local text = Usage.short(u, self.config.usage.rates, ic.approx)
