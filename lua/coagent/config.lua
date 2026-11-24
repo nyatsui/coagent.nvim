@@ -421,8 +421,8 @@ local defaults = {
   -- deletes, writes outside the workspace, protected paths, remote shells
   -- and transfers, uploads, delegate); every other command is shown to a
   -- separate judge model that answers allow (run now) or ask. Downloads,
-  -- package installs and outside reads go to the judge flagged (see
-  -- hard_rules). The judge can never override a hard rule, and any failure,
+  -- package installs and outside reads (by commands and by read tools; not
+  -- credentials) go to the judge flagged (see hard_rules). The judge can never override a hard rule, and any failure,
   -- timeout or malformed answer means ask. Trade-off: a command the judge allows runs with your full user
   -- permissions; the judge is a model and can be wrong.
   judge = {
@@ -476,9 +476,12 @@ local defaults = {
     -- of yours in between) the judge pauses: commands ask you directly until
     -- you approve one. 0 = never pause.
     pause_after = 3,
-    -- Absolute paths that command arguments may name without forcing a
-    -- question (datasets, caches, scratch dirs: { '/data', '/scratch' }).
-    -- The judge still sees and judges them. Read/write tools are unaffected.
+    -- Folders outside the workspace (datasets, results, a venv: { '/data',
+    -- '../env' }; relative to the workspace root) that command arguments may
+    -- name without forcing a question (the judge still decides), and that
+    -- read tools (read_file, list_dir, search) read without asking, except
+    -- secrets there (keys, tokens, .env, ~/.ssh-like folders). Writes and
+    -- deletes outside the workspace always ask.
     allowed_paths = {},
     notify_on_allow = false, -- bell (notify.bell / notify.desktop) when a command ran without asking
   },

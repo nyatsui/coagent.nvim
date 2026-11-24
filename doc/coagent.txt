@@ -1640,10 +1640,17 @@ instead of asking you (like Claude Code's auto mode); after
 command (after `judge.max_sent_back_total` in the session: until /judge
 resume). /judge blocked lists what was sent back; /judge allow [n] approves
 one for a retry. Hard rules and judge failures still ask you.
-`judge.hard_rules = 'judge'` (default) sends downloads, package installs and
-paths outside the workspace a command only reads to the judge, flagged and
-held to a higher bar; writes outside, deletes, remote shells and uploads
-always ask. 'ask': all of them always ask. One that does not fit is first reviewed IN FULL by a separate
+`judge.hard_rules = 'judge'` (default) sends downloads, package installs,
+paths outside the workspace a command only reads and reads outside the
+workspace by read tools (never credentials: key files, .env, .ssh-like
+folders) to the judge, flagged and held to a higher bar (a folder it allowed
+for a read tool needs no judge again until Neovim restarts; content read
+from outside is marked to the agent as data, not instructions); writes outside, deletes, remote shells and uploads
+always ask. 'ask': all of them always ask.
+`judge.allowed_paths` folders (relative entries from the workspace root)
+may be named by commands (the judge decides) and are read by read tools
+without asking, except secrets (keys, tokens, .env, .ssh-like folders).
+One that does not fit is first reviewed IN FULL by a separate
 request (in parts of `judge.review_chunk_bytes`; once per content; role
 "judge_review"), and the judge gets that review. Files over 256 KB are
 NOT SHOWN, and the judge asks. When it asks, the tool item lists how each
@@ -1668,7 +1675,7 @@ Options: >lua
     max_sent_back = 3, max_sent_back_total = 20,
     hard_rules = 'judge',     -- 'ask': downloads, installs, outside reads ask
     instructions = nil,       -- your standing rules (string or lines)
-    allowed_paths = {},       -- absolute paths args may name (datasets)
+    allowed_paths = {},       -- folders args may name, read tools read
     notify_on_allow = false,  -- bell when a command ran without asking
   }
 <

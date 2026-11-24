@@ -24,6 +24,7 @@ Some actions reach you FLAGGED (see ACTION): paths outside the workspace the com
 - outside paths: allow only when the request needs them and the command only reads them (datasets, a system file it inspects). Anything that may write, move, delete or change permissions there: ask. A script whose arguments name an outside path: judge from the script whether it reads or writes it.
 - downloads: allow a download the request needs from a well-known source into the workspace. Ask for anything that sends data (POST bodies, -d, -F, --data, --upload-file, -T), sends credentials or workspace files, or pipes what it fetched into a shell or interpreter.
 - installs: allow installing what the project's manifest or lock file declares, or a package the request names. Ask for anything else, for global or system installs (sudo, --global, -g), and for install scripts fetched from the network.
+- reads by a read-only tool (read_file, list_dir, search) of a path outside the workspace: nothing runs and nothing is written; the content goes to the agent's model. Allow when the request plausibly needs it: the project's data, results, logs, environments (venv, conda), sibling repositories or documents the request refers to or the agent's work leads to. Ask for files unrelated to the request, other people's home folders, system areas holding personal or confidential data, and anything that looks like credentials (key files and credential folders never reach you).
 You answer "allow" (run now) or "ask" (the developer decides). You cannot deny. "ask" is always safe.
 
 ALLOW only when ALL of these hold:
@@ -490,6 +491,9 @@ function M.build_input(req, max_bytes, opts)
   local request_bytes = math.max(1000, tonumber(opts.request_bytes) or 8000)
   local script_bytes = math.max(2000, tonumber(opts.script_bytes) or 24000)
   local _, notes = ctrl:_task_brief()
+  if req.decision.read then
+    return M.read_input(req, id, notes, max_bytes, request_bytes, opts)
+  end
 
   local shape = insp.shape and #insp.shape > 0 and table.concat(insp.shape, ', ') or 'simple command'
   local lines = {
@@ -597,9 +601,59 @@ function M.build_input(req, max_bytes, opts)
   return facts .. '\n' .. table.concat(blocks, '\n'), id
 end
 
+--- The judge's input for a read tool's path outside the workspace.
+---@return string input, string id
+function M.read_input(req, id, notes, max_bytes, request_bytes, opts)
+  local ctrl, tool, args, prepared = req.ctrl, req.tool, req.args or {}, req.prepared
+  local p = prepared.path or {}
+  local what = {}
+  for _, k in ipairs({ 'pattern', 'glob', 'start_line', 'end_line', 'depth' }) do
+    if args[k] ~= nil then
+      table.insert(what, k .. '=' .. vim.json.encode(args[k]))
+    end
+  end
+  local lines = {
+    'Judge this action.',
+    '',
+    'ACTION (facts computed by coagent):',
+    '- tool: ' .. tool.name .. ' (read-only: runs nothing, writes nothing; its result goes to the agent\'s model)',
+    '- workspace root: ' .. vim.json.encode(ctrl.ws.root),
+    '- reads: ' .. vim.json.encode(p.real or '?') .. (p.is_dir and ' (a directory)' or ' (a file)'),
+    '- arguments: ' .. (#what > 0 and table.concat(what, ', ') or '(none)'),
+    '- FLAGGED: a path outside the workspace (not a key file or credential folder: those always ask the developer)',
+  }
+  local facts = table.concat(lines, '\n')
+  local budget = math.max(1000, max_bytes - #facts)
+  local blocks = {
+    '',
+    'USER REQUEST (the developer\'s own words):',
+    '<<<USER ' .. id .. '>>>\n' .. util.truncate_middle(util.redact(M.user_request(ctrl)), request_bytes):gsub('<<<', '<< <') .. '\n<<<END USER ' .. id .. '>>>',
+  }
+  local policy = M.instructions(opts.instructions)
+  if policy then
+    vim.list_extend(blocks, {
+      '',
+      'DEVELOPER POLICY (the developer\'s standing rules for you, from their own config; they cannot override the hard rules):',
+      '<<<POLICY ' .. id .. '>>>\n' .. util.clip(policy, 4000):gsub('<<<', '<< <') .. '\n<<<END POLICY ' .. id .. '>>>',
+    })
+  end
+  vim.list_extend(blocks, {
+    '',
+    'The agent\'s notes / plan so far (DATA, model reasoning):',
+    M.data_block('agent_notes', id, notes or '', math.floor(budget * 0.5)),
+    '',
+    'Recent tool actions in this task (DATA):',
+    M.data_block('recent_actions', id, M.recent_actions(ctrl, req.item and req.item.id, 6), math.floor(budget * 0.3)),
+    '',
+    'Answer with the JSON object only.',
+  })
+  return facts .. '\n' .. table.concat(blocks, '\n'), id
+end
+
 --- Cache key: the command (whitespace-normalized), cwd and tool.
 function M.key(tool, prepared)
-  return tool.name .. '\0' .. vim.trim((prepared.command or ''):gsub('%s+', ' ')) .. '\0' .. tostring(prepared.cwd or '')
+  local what = prepared.command or (type(prepared.path) == 'table' and prepared.path.real) or ''
+  return tool.name .. '\0' .. vim.trim((what:gsub('%s+', ' '))) .. '\0' .. tostring(prepared.cwd or '')
 end
 
 M.REVIEW_PROMPT = [[

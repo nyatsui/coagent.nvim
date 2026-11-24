@@ -1487,13 +1487,16 @@ OS サンドボックスが邪魔になる（`bwrap` は GPU を隠す）場面�
    パッケージ公開など）、リモートのシェルと転送（`scp`・`ssh`・`nc`・リモートへの `rsync`）、アップロード、`unlink` / `rmdir` /
    `find -delete`、crontab・サービス操作、ワークスペース外への**書き込み**（リダイレクト、`cp`・`rsync`・`ln` のコピー先、`mv`・
    `tee`・`touch`・`sed -i`・`dd of=` など）、保護ファイル（`.env`・鍵・`.git/`）、スキルフォルダのスクリプト、ファイル削除、
-   `writable_globs` 外への書込み、読み取りツールでのワークスペース外や保護ファイルの読込、`delegate` ツール、MCP ツール。
+   `writable_globs` 外への書込み、読み取りツールでの保護ファイルとワークスペース外の秘密情報（鍵、`.env`、`.ssh`・`.aws`
+   などのフォルダ）の読込、`delegate` ツール、MCP ツール。
    `supervised` で拒否されるものは拒否。
    **印を付けて judge が判断するもの**（`judge.hard_rules = 'judge'`、既定。Claude Code の auto モードでも分類器が判断する範囲）:
    ダウンロード（`curl`・`wget`）、パッケージのインストール（`pip install`・`npm install` など）、書き込むプログラムを通さずに
-   名前が出てくるワークスペース外のパス（`cat ../x`、`cp /data/x runs/`、スクリプトの `--data ~/datasets`）。judge には印付きで
-   渡し、高めの基準で判断させます（外のパスは読むだけで依頼に必要なもの、ダウンロードは何も送らないもの、インストールは
-   プロジェクトが宣言しているか依頼が名指ししたもの）。`hard_rules = 'ask'` にすると従来どおり必ず承認です。sed の式・awk の
+   名前が出てくるワークスペース外のパス（`cat ../x`、`cp /data/x runs/`、スクリプトの `--data ~/datasets`）、読み取りツール
+   （`read_file`・`list_dir`・`search`）でのそれ以外のワークスペース外の読込。judge には印付きで渡し、高めの基準で判断させます
+   （外のパスは読むだけで依頼に必要なもの、ダウンロードは何も送らないもの、インストールはプロジェクトが宣言しているか
+   依頼が名指ししたもの）。読み取りツールは、judge が一度許可したフォルダ（サブフォルダは除く）なら、Neovim を再起動するまで
+   judge なしで読みます。外から読んだ内容は、指示ではなくデータだとエージェントに明示します。`hard_rules = 'ask'` にすると従来どおり必ず承認です。sed の式・awk の
    プログラム・grep のパターンの中のスラッシュはパスとして扱いません。
    **承認なしで削除するもの**（auto と judge）は、モデルの判断ではなく事実で決めます: このセッションでエージェント自身が
    作り、その後だれも変えていないファイル、または `auto.deletable_globs` に一致するパス（キャッシュ: `__pycache__/`・`*.pyc`・
@@ -1533,8 +1536,11 @@ OS サンドボックスが邪魔になる（`bwrap` は GPU を隠す）場面�
   `pause_after = 0` で一時停止しません
 - judge のリクエストは `:CoagentUsage` に役割 `judge` として計上されます（タスクのリクエスト数・トークン数にも含む）
 - `judge.notify_on_allow = true` にすると、確認なしで実行したときにベル（`notify.bell` / `notify.desktop`）を鳴らします
-- `judge.allowed_paths = { '/data', '/scratch' }` で、コマンド引数がそれらの絶対パス（データセットやキャッシュ）を指しても
-  固定ルールでは止めず judge の判定に回します。読込・書込ツールには影響しません
+- `judge.allowed_paths = { '/data', '../env' }`（相対パスはワークスペースのルートから）で、コマンド引数がそれらのフォルダ
+  （データセット、結果、venv）を指しても固定ルールでは止めず judge の判定に回します。読込ツール（`read_file`・`list_dir`・
+  `search`）はそこを確認なしで読みます。ただし秘密情報（鍵、トークン、`.env`、`.ssh`・`.aws` などのフォルダ、
+  `auto.protected_globs`）は確認します。ワークスペース外への書き込み・削除は常に確認します。読んだ内容はワークスペースの
+  ファイルと同じくモデルに送られます
 - **judge には丸ごと見せます。** 依頼文が途中で切れていたり、スクリプトの中身が見えなかったりすると judge は ask します:
   - 依頼文は `judge.max_request_bytes`（8 KB）まで渡します。`/plan approve` のあとは、承認の定型文ではなく、元の依頼と
     承認したプランを渡します。
@@ -1660,10 +1666,10 @@ require('coagent').setup({
     on_ask = 'user',          -- 'agent': ask をあなたではなくエージェントに戻す
     max_sent_back = 3,        -- この回数続けて戻すと、承認するまで ask があなたに来る
     max_sent_back_total = 20, -- セッションでこの回数戻すと、/judge resume まで同上
-    hard_rules = 'judge',     -- ダウンロード・インストール・外のパスの読み取りを judge に回す（'ask': 必ず承認）
+    hard_rules = 'judge',     -- ダウンロード・インストール・外のパスの読み取り（コマンド・読込ツール）を judge に回す（'ask': 必ず承認）
     instructions = nil,       -- judge への常設のルール（文字列か、行のリスト）
     pause_after = 3,          -- 承認なしで続いた「承認」判定の回数で一時停止（承認すると再開）。0 = しない
-    allowed_paths = {},       -- 例: { '/data/imagenet', '/scratch' }
+    allowed_paths = {},       -- 例: { '/data/imagenet', '../env' }: コマンド引数・読込ツール
     notify_on_allow = false,  -- 確認なしで実行したらベル
   },
   lsp = { attach_timeout_ms = 4000, request_timeout_ms = 10000, max_results = 100 },

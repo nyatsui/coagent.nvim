@@ -161,6 +161,74 @@ function Permissions:grant(key)
   end
 end
 
+--- Credential folders and files, wherever they are: never read without
+--- asking, even under judge.allowed_paths.
+local SECRET_PARTS = {
+  ['.ssh'] = true, ['.aws'] = true, ['.gnupg'] = true, ['.kube'] = true, ['.docker'] = true, ['.azure'] = true,
+  ['.password-store'] = true, ['github-copilot'] = true, ['copilot_chat'] = true, ['.netrc'] = true,
+  ['.git-credentials'] = true, ['.pypirc'] = true, ['.npmrc'] = true, ['.pgpass'] = true,
+}
+
+--- Is `real` (under the allowed folder `under`) a secret: a credential
+--- folder or file, `.config/gh`, or a match of auto.protected_globs taken
+--- from that folder (.env, keys, .git/**)?
+---@param real string
+---@param under string? the allowed folder (nil: globs from /)
+---@return string? why
+function Permissions:_outside_secret(real, under)
+  for part in real:gmatch('[^/]+') do
+    if SECRET_PARTS[part] then
+      return part
+    end
+  end
+  if real:find('/%.config/gh/') or real:match('/%.config/gh$') then
+    return '.config/gh'
+  end
+  local rel = under and (real == under and '.' or real:sub(#under + 2)) or real:sub(2)
+  for _, g in ipairs(self.config.auto.protected_globs or {}) do
+    local ok, lp = pcall(vim.glob.to_lpeg, g)
+    if ok and (lp:match(rel) or lp:match(vim.fs.basename(rel))) then
+      return g
+    end
+  end
+end
+
+--- The folder a read of `p` stands for: the directory itself, or a file's
+--- directory. The judge allows it once per session (not its subfolders).
+---@param p Coagent.PathInfo
+---@return string
+local function read_dir(p)
+  return p.is_dir and p.real or vim.fs.dirname(p.real)
+end
+
+--- judge mode: the judge allowed reading in this folder before.
+---@param p Coagent.PathInfo
+---@return boolean
+function Permissions:_read_dir_allowed(p)
+  local dirs = self.read_dirs or {}
+  return dirs[p.real] == true or (not p.is_dir and dirs[vim.fs.dirname(p.real)] == true)
+end
+
+--- The judge allowed a read outside the workspace: other reads in that
+--- folder (not its subfolders) need no judge in this session.
+---@param dir string
+function Permissions:remember_read_dir(dir)
+  self.read_dirs = self.read_dirs or {}
+  self.read_dirs[dir] = true
+end
+
+--- judge mode: the judge.allowed_paths folder `real` is in (nil: none).
+---@param real string
+---@return string?
+function Permissions:_allowed_root(real)
+  local roots = cmdparse.allowed_roots((self.config.judge or {}).allowed_paths or {}, self.ws.root)
+  for _, r in ipairs(roots) do
+    if real == r or vim.startswith(real, r .. '/') or r == '/' then
+      return r
+    end
+  end
+end
+
 local function decision(action, reason, extra)
   return vim.tbl_extend('force', { action = action, reason = reason, warnings = {}, sandbox = false, can_always = false }, extra or {})
 end
@@ -202,6 +270,26 @@ function Permissions:decide(tool, args, prepared)
     local skill = p and not p.inside and self.skills and self.skills:owner(p.real)
     if skill and not self:_skill_protected(skill, p.real) then
       return decision('allow', 'file of the user skill "' .. skill.name .. '" (read-only)')
+    end
+    if p and not p.inside and mode == 'judge' then
+      -- folders you listed in judge.allowed_paths (datasets, results, a venv):
+      -- read without asking, except their secrets; writes still ask
+      local under = self:_allowed_root(p.real)
+      if under and not self:_outside_secret(p.real, under) then
+        return decision('allow', 'judge.allowed_paths: ' .. under .. ' (read-only)')
+      end
+      -- anywhere else: the judge decides whether the request needs it (once
+      -- per folder); secrets never reach it (they ask below)
+      local route = ((self.config.judge or {}).hard_rules or 'judge') == 'judge'
+      if route and not under and not self:_outside_secret(p.real) and not self.grants['read:' .. p.real] then
+        if self:_read_dir_allowed(p) then
+          return decision('allow', 'judge mode: the judge allowed reading this folder before (read-only)')
+        end
+        return decision('ask', 'reads a path outside the workspace (the judge decides)', {
+          warnings = { 'outside workspace: ' .. p.real }, can_always = true, grant_key = 'read:' .. p.real,
+          judge = true, read = p.real, read_dir = read_dir(p),
+        })
+      end
     end
     if p and not p.inside then
       if mode == 'readonly' then

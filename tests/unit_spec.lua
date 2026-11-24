@@ -73,6 +73,42 @@ describe('command analysis', function()
       assert.is_false(danger(c), c)
     end
   end)
+  it('kill and eval: the program or the shell builtin, not an option or argument of that name', function()
+    local function danger(c)
+      return #cmdparse.analyze(c, '/tmp').dangerous > 0
+    end
+    for _, c in ipairs({
+      'kill 12345', 'pgrep -f train.py | xargs kill', '/bin/kill -9 1', 'docker kill x', 'tmux kill-session -t a', 'python -c "p.kill()"',
+      'eval "$x"', 'sh -c "eval $x"', "bash -c 'eval $x'", 'x; eval $y', 'if true; then eval $y; fi', 'echo $(eval echo hi)', 'a && eval',
+    }) do
+      assert.is_true(danger(c), c)
+    end
+    for _, c in ipairs({
+      'timeout --kill-after=10 600 python train.py', 'python train.py --kill_on_nan',
+      'python run.py --do_eval --bs 8', 'python -m eval x', 'python main.py --mode eval --ckpt a', 'make eval', 'python eval.py', 'bash scripts/eval.sh',
+    }) do
+      assert.is_false(danger(c), c)
+    end
+  end)
+  it('option names and searched text are not the commands they name', function()
+    local function danger(c)
+      return #cmdparse.analyze(c, '/tmp').dangerous > 0
+    end
+    for _, c in ipairs({
+      'docker run --rm img python t.py', 'python t.py --rm_duplicates', 'python rm.py', 'ls runs/rm/', 'python scripts/kill.py',
+      'python t.py --delete_old_ckpt', 'huggingface-cli download x --force-download', 'python t.py --force_download',
+      'python t.py --graceful_shutdown', 'python t.py --on_shutdown save', 'python t.py --reboot_count 3', 'python t.py --chown', 'python t.py --su 3',
+      'grep -n "rm " scripts/run.sh', "rg 'kill' src/", 'git grep -n "kill(" src', 'git log --grep="reset"', 'grep -rn "eval(" src',
+    }) do
+      assert.is_false(danger(c), c)
+    end
+    for _, c in ipairs({
+      'rm -rf build', '/bin/rm x', 'git rm x', 'xargs rm < list', 'find . -delete', 'git push --force', 'cp --force a b', 'chown u f', 'su root',
+      'sudo shutdown -h now', 'reboot', 'grep "rm" x | sh', 'grep "$(rm -rf x)" f', 'rg "x" ; rm -rf y', 'grep -r x ~/.ssh',
+    }) do
+      assert.is_true(danger(c), c)
+    end
+  end)
   it('matches allowlist prefixes only for bare program names', function()
     local allowed = { { 'npm', 'test' }, { 'pytest' } }
     assert.is_not_nil(cmdparse.allowed({ 'npm', 'test', '--', '-u' }, allowed))

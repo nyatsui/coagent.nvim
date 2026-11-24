@@ -1550,14 +1550,17 @@ For hands-off work where an allowlist is impractical (training entry points vary
    `chmod -R`, writes to an absolute path, publishing, ...), remote shells and transfers (`scp`, `ssh`, `nc`, `rsync` to a
    remote), uploads, `unlink` / `rmdir` / `find -delete`, crontab / services, **writes** outside the workspace (a redirect,
    `cp`/`rsync`/`ln` destinations, `mv`, `tee`, `touch`, `sed -i`, `dd of=` ...), protected files (`.env`, keys, `.git/`),
-   scripts from skill folders, file deletes (see below), writes outside `writable_globs`, reads outside the workspace or of
-   protected files with the read tools, the `delegate` tool and MCP tools. Whatever `supervised` denies is denied.
+   scripts from skill folders, file deletes (see below), writes outside `writable_globs`, reads of
+   protected files and of credentials outside the workspace (key files, `.env`, `.ssh` / `.aws`-like folders) with the
+   read tools, the `delegate` tool and MCP tools. Whatever `supervised` denies is denied.
    **Flagged, decided by the judge** (`judge.hard_rules = 'judge'`, the default, like Claude Code's auto mode, whose
    classifier decides these): downloads (`curl`, `wget`), package installs (`pip install`, `npm install`, ...) and paths
    outside the workspace a command names without a program that writes them (`cat ../x`, `cp /data/x runs/`, a script's
-   `--data ~/datasets`). The judge is told they are flagged and holds them to a higher bar: outside paths only read and
-   needed, downloads that send nothing, installs the project declares or the request names. `hard_rules = 'ask'`: they
-   always ask, as before. The slashes in a sed script, an awk program or a grep pattern are not paths
+   `--data ~/datasets`), and other reads outside the workspace by the read tools (`read_file`, `list_dir`, `search`).
+   The judge is told they are flagged and holds them to a higher bar: outside paths only read and needed, downloads
+   that send nothing, installs the project declares or the request names. Once it allows a read tool in a folder,
+   other reads there (not its subfolders) need no judge until Neovim restarts; what such a read returns is marked to
+   the agent as data from outside the workspace, never instructions. `hard_rules = 'ask'`: they always ask, as before. The slashes in a sed script, an awk program or a grep pattern are not paths
    **Deletes without approval** (auto and judge), decided by facts, never by a model: `delete_file` of a file the agent
    created in this session that nobody changed since, or of a path matching `auto.deletable_globs` (caches:
    `__pycache__/`, `*.pyc`, `.pytest_cache/`, `.mypy_cache/`, `.ruff_cache/`, `.ipynb_checkpoints/`; add your
@@ -1598,8 +1601,11 @@ For hands-off work where an allowlist is impractical (training entry points vary
   pauses
 - Judge requests are counted in `:CoagentUsage` as role `judge` (and in the task's request/token totals)
 - `judge.notify_on_allow = true` rings the bell (`notify.bell` / `notify.desktop`) when a command ran without asking
-- `judge.allowed_paths = { '/data', '/scratch' }` lets command arguments name those absolute paths (datasets, caches)
-  without forcing a question; the judge still decides. Read/write tools are not affected
+- `judge.allowed_paths = { '/data', '../env' }` (relative entries are taken from the workspace root) lets command
+  arguments name those folders (datasets, results, a venv) without forcing a question; the judge still decides. Read
+  tools (`read_file`, `list_dir`, `search`) read there without asking, except secrets (keys, tokens, `.env`, `.ssh` /
+  `.aws`-like folders, `auto.protected_globs`). Writes and deletes outside the workspace always ask. What they read is
+  sent to the model like workspace files
 - **What the judge sees, whole.** A request cut in the middle, or a script it cannot see whole, makes the judge ask:
   - Your request goes up to `judge.max_request_bytes` (8 KB). After `/plan approve` it is your original request and the
     plan you approved (not the approval line).
@@ -1727,10 +1733,10 @@ require('coagent').setup({
     on_ask = 'user',          -- 'agent': an ask goes back to the agent instead of you
     max_sent_back = 3,        -- that many in a row: asks come to you until you approve one
     max_sent_back_total = 20, -- that many in the session: until /judge resume
-    hard_rules = 'judge',     -- downloads, installs, outside reads go to the judge ('ask': always ask)
+    hard_rules = 'judge',     -- downloads, installs, outside reads (commands, read tools) go to the judge ('ask': always ask)
     instructions = nil,       -- your standing rules for the judge (string or list of lines)
     pause_after = 3,          -- asks in a row without an approval -> asks you directly until you approve one; 0 = never
-    allowed_paths = {},       -- e.g. { '/data/imagenet', '/scratch' }
+    allowed_paths = {},       -- e.g. { '/data/imagenet', '../env' }: commands name, read tools read
     notify_on_allow = false,  -- bell when a command ran without asking
   },
   lsp = { attach_timeout_ms = 4000, request_timeout_ms = 10000, max_results = 100 },

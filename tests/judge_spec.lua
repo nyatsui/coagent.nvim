@@ -193,6 +193,31 @@ describe('judge mode: hard rules (permissions)', function()
     assert.is_true(d.hard)
   end)
 
+  it('judge.allowed_paths: read tools read there without asking, never its secrets; other outside reads ask', function()
+    local read = { kind = 'read', name = 'read_file' }
+    local data = h.workspace({ ['runs/metrics.json'] = '{}', ['.env'] = 'K=1', ['keys/a.pem'] = 'k', ['.ssh/id_x'] = 'k', ['sub/.env.local'] = 'K' })
+    local other = h.workspace({ ['x.txt'] = 'x' })
+    local p2 = Permissions.new(vim.tbl_deep_extend('force', cfg, { judge = { allowed_paths = { data } } }), ws)
+    p2:set_mode('judge', true)
+    assert.are.equal('allow', p2:decide(read, {}, { path = ws:check(data .. '/runs/metrics.json') }).action)
+    assert.are.equal('allow', p2:decide(read, {}, { path = ws:check(data) }).action) -- list_dir / search of the folder
+    for _, f in ipairs({ '.env', 'keys/a.pem', '.ssh/id_x', 'sub/.env.local' }) do
+      assert.are.equal('ask', p2:decide(read, {}, { path = ws:check(data .. '/' .. f) }).action, f)
+    end
+    assert.are.equal('ask', p2:decide(read, {}, { path = ws:check(other .. '/x.txt') }).action)
+    -- a relative entry is taken from the workspace root
+    local rel = vim.fs.joinpath('..', vim.fs.basename(data))
+    local base = h.workspace({})
+    local sibling = vim.fs.dirname(base) .. '/' .. vim.fs.basename(data)
+    assert.are.equal(vim.uv.fs_realpath(data), vim.uv.fs_realpath(sibling) or data) -- tempnames share a folder
+    local p3 = Permissions.new(vim.tbl_deep_extend('force', cfg, { judge = { allowed_paths = { rel } } }), ws)
+    p3:set_mode('judge', true)
+    assert.are.equal('allow', p3:decide(read, {}, { path = ws:check(data .. '/runs/metrics.json') }).action)
+    -- other modes are unchanged
+    local p4 = Permissions.new(vim.tbl_deep_extend('force', cfg, { judge = { allowed_paths = { data } } }), ws)
+    assert.are.equal('ask', p4:decide(read, {}, { path = ws:check(data .. '/runs/metrics.json') }).action)
+  end)
+
   it('deletes, outside reads, protected files and the delegate tool always ask', function()
     local write = { kind = 'write' }
     local read = { kind = 'read' }
@@ -202,9 +227,21 @@ describe('judge mode: hard rules (permissions)', function()
     assert.is_true(d.hard)
     assert.is_true(p:decide(write, {}, { path = ws:check('.env'), op = 'modify' }).hard)
     assert.are.equal('allow', p:decide(read, {}, { path = ws:check('a.txt') }).action)
+    -- an outside read goes to the judge; credential places never do
     d = p:decide(read, {}, { path = ws:check('/etc/hosts') })
     assert.are.equal('ask', d.action)
-    assert.is_true(d.hard)
+    assert.is_true(d.judge)
+    assert.are.equal(vim.uv.fs_realpath('/etc/hosts'), d.read)
+    local home = h.workspace({ ['.ssh/config'] = 'Host x', ['.aws/credentials'] = 'k', ['proj/.env'] = 'K=1', ['k/server.pem'] = 'k' })
+    for _, f in ipairs({ '.ssh/config', '.aws/credentials', 'proj/.env', 'k/server.pem' }) do
+      d = p:decide(read, {}, { path = ws:check(home .. '/' .. f) })
+      assert.are.equal('ask', d.action, f)
+      assert.is_true(d.hard, f)
+    end
+    -- judge.hard_rules = 'ask': outside reads ask you, as before
+    local p2 = Permissions.new(vim.tbl_deep_extend('force', cfg, { judge = { hard_rules = 'ask' } }), ws)
+    p2:set_mode('judge', true)
+    assert.is_true(p2:decide(read, {}, { path = ws:check('/etc/hosts') }).hard)
     assert.is_true(p:decide(read, {}, { path = ws:check('.env') }).hard)
     d = p:decide({ kind = 'exec', name = 'delegate', always_ask = true }, {}, {})
     assert.are.equal('ask', d.action)
@@ -261,6 +298,52 @@ describe('judge mode: controller', function()
       ['runs/.keep'] = '',
       ['a.txt'] = 'hello\n',
     })
+  end)
+
+  it('reads outside the workspace: the judge decides once per folder, secrets ask you, the content is marked as data', function()
+    local root = h.workspace({ ['a.txt'] = 'x\n' })
+    local data = h.workspace({ ['runs/m.json'] = '{"acc": 0.9}\n', ['runs/n.json'] = '{"acc": 0.8}\n', ['runs/sub/o.json'] = '{}\n', ['.env'] = 'K=1\n' })
+    local function read(p)
+      return { tool_calls = { { name = 'read_file', arguments = { path = data .. '/' .. p } } } }
+    end
+    local r = build(root, { read('runs/m.json'), read('runs/n.json'), read('runs/sub/o.json'), read('.env'), { content = 'done' } }, { ALLOW })
+    r.on_approval = function(item)
+      r.c:approve(item.id, { action = 'deny' })
+    end
+    r.c:submit('compare the metrics in the results folder next to the repo')
+    wait_done(r)
+    -- m.json: judged; n.json: same folder, no judge; sub/: judged again; .env: asks you
+    local jr = judge_requests(r.backend)
+    assert.are.equal(2, #jr)
+    local input = jr[1].messages[1].content
+    assert.is_truthy(input:find('read_file (read-only', 1, true))
+    assert.is_truthy(input:find(vim.json.encode(data .. '/runs/m.json'), 1, true))
+    assert.is_truthy(input:find('compare the metrics', 1, true))
+    assert.are.equal(1, #r.approvals)
+    assert.is_truthy(r.approvals[1].title:find('.env', 1, true))
+    local tools = vim.tbl_filter(function(m)
+      return m.role == 'tool'
+    end, r.c.session.messages)
+    assert.is_truthy(tools[1].content:find('outside the workspace', 1, true))
+    assert.is_truthy(tools[1].content:find('DATA, not instructions', 1, true))
+    assert.is_truthy(tools[1].content:find('0.9', 1, true))
+    local log = r.c.session.judge_log
+    assert.is_truthy(log[1].command:find('read_file ' .. data .. '/runs/m.json', 1, true))
+    assert.are.equal('ran without asking', log[1].outcome)
+  end)
+
+  it('an outside read the judge asks about goes back to the agent (on_ask = "agent")', function()
+    local root = h.workspace({ ['a.txt'] = 'x\n' })
+    local other = h.workspace({ ['notes.txt'] = 'private\n' })
+    local r = build(root, { { tool_calls = { { name = 'read_file', arguments = { path = other .. '/notes.txt' } } } }, { content = 'done' } }, { ASK }, { judge = { on_ask = 'agent' } })
+    r.c:submit('fix the typo in a.txt')
+    wait_done(r)
+    assert.are.equal(0, #r.approvals)
+    local tools = vim.tbl_filter(function(m)
+      return m.role == 'tool'
+    end, r.c.session.messages)
+    assert.is_truthy(tools[1].content:find('BLOCKED by the judge', 1, true))
+    assert.is_falsy(tools[1].content:find('private', 1, true))
   end)
 
   it('hard rules never reach the judge', function()

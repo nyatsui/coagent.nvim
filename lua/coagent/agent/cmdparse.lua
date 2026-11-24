@@ -76,9 +76,83 @@ function M.tokenize(cmd)
   return tokens
 end
 
+--- `word` as a word of its own, not inside an option or a name joined by
+--- `-` or `_` (`--kill-after`, `--kill_on_nan`, `--do_eval` are arguments of
+--- a program, not the program).
+---@param s string lower-cased command
+---@param word string
+---@return boolean
+local function own_word(s, word)
+  local init = 1
+  while true do
+    local a, b = s:find(word, init, true)
+    if not a then
+      return false
+    end
+    local prev, next = s:sub(a - 1, a - 1), s:sub(b + 1, b + 1)
+    -- `/bin/kill` and `p.kill()` count; `rm.py`, `runs/rm/` do not
+    if not prev:match('[%w_%-]') and not next:match('[%w_%-%./]') then
+      return true
+    end
+    init = b + 1
+  end
+end
+
+--- `word` where the shell runs it as a command: at the start, after a
+--- separator (`;` `&` `|` `(` `{` a backtick, a newline), a quote (`sh -c
+--- 'eval ...'`) or a keyword (then, do, else, `!`). For shell builtins such
+--- as eval, which no other program (xargs, sudo, env) can run.
+---@param s string lower-cased command
+---@param word string
+---@return boolean
+local function at_command(s, word)
+  local init = 1
+  while true do
+    local a, b = s:find(word, init, true)
+    if not a then
+      return false
+    end
+    local next = s:sub(b + 1, b + 1)
+    if next == '' or next:match('[%s;&|)]') then
+      local before = s:sub(1, a - 1):gsub('%s+$', '')
+      local last = before:sub(-1)
+      local kw = before:match('([%w!]+)$')
+      if before == '' or last:match('[;&|({`\n"\']') or kw == 'then' or kw == 'do' or kw == 'else' or kw == '!' then
+        return true
+      end
+    end
+    init = b + 1
+  end
+end
+
+--- The command with the quoted arguments of a search program (grep, rg,
+--- git grep / log) blanked: `grep -n "rm " x` searches for the text, it does
+--- not run it. A command that is not one plain search (pipes, `;`, `$(...)`)
+--- is left whole: a quote there may be a shell's script.
+---@param s string lower-cased command
+---@return string
+local function search_text_blanked(s)
+  local prog = s:match('^%s*([%w%-%._/]+)')
+  prog = prog and prog:match('([^/]+)$')
+  local search = prog == 'grep' or prog == 'egrep' or prog == 'fgrep' or prog == 'rg' or prog == 'ag' or prog == 'ack'
+    or (prog == 'git' and (s:match('^%s*git%s+grep%s') or s:match('^%s*git%s+log%s')))
+  if not search then
+    return s
+  end
+  -- quotes blanked first, then any shell feature left keeps the whole text
+  local blanked = s:gsub("'[^']*'", ' Q '):gsub('"[^"\\$`]*"', ' Q ')
+  -- a quote left (one that expands `$x` or a backtick) or a shell feature
+  if blanked:find('[\'";&|`$(){}<>\n]') then
+    return s
+  end
+  return blanked
+end
+
 --- Patterns that always require explicit, per-command approval.
 local DANGEROUS = {
-  { '%f[%w]rm%s', 'deletes files' },
+  { function(s)
+    return own_word(s, 'rm')
+  end, 'deletes files' },
   { 'git%s+reset', 'git reset can discard work' },
   { 'git%s+clean', 'git clean deletes untracked files' },
   { 'git%s+checkout%s+%-%-', 'git checkout -- discards changes' },
@@ -92,26 +166,34 @@ local DANGEROUS = {
   { 'git%s+rebase', 'rewrites history' },
   { 'git%s+commit%s.*%-%-amend', 'rewrites history' },
   { 'git%s+filter%-', 'rewrites history' },
-  { '%-%-force', 'forced operation' },
+  { '%-%-force%f[^%w_%-]', 'forced operation' },
   { '%f[%w]sudo%f[%W]', 'runs as root' },
   { '%f[%w]doas%f[%W]', 'runs as root' },
-  { '%f[%w]su%s', 'switches user' },
+  { function(s)
+    return own_word(s, 'su')
+  end, 'switches user' },
   { 'chmod%s+%-R', 'recursive permission change' },
-  { 'chown', 'ownership change' },
+  { function(s)
+    return own_word(s, 'chown')
+  end, 'ownership change' },
   { 'mkfs', 'formats a filesystem' },
   { '%f[%w]dd%s+.*of=', 'raw disk write' },
-  { 'shutdown', 'system power' },
-  { 'reboot', 'system power' },
+  { function(s)
+    return own_word(s, 'shutdown') or own_word(s, 'reboot') or own_word(s, 'halt') or own_word(s, 'poweroff')
+  end, 'system power' },
   { '|%s*sudo', 'pipes into sudo' },
   { '|%s*[%w/]*sh%f[%W]', 'pipes into a shell' },
   { '|%s*[%w/]*bash%f[%W]', 'pipes into a shell' },
   { '|%s*[%w/]*zsh%f[%W]', 'pipes into a shell' },
   { '>%s*/', 'writes to an absolute path' },
   { '>%s*~', 'writes to the home directory' },
-  { '%f[%w]kill%f[%W]', 'kills processes' },
+  { function(s)
+    return own_word(s, 'kill')
+  end, 'kills processes' },
+  { 'tmux%s.*kill%-', 'kills tmux sessions or panes' },
   { 'pkill', 'kills processes' },
   { 'killall', 'kills processes' },
-  { '%-delete%f[%W]', 'deletes files' },
+  { '%-delete%f[^%w_]', 'deletes files' },
   { '%f[%w]publish%f[%W]', 'publishes a package' },
   { 'docker%s+.*prune', 'deletes docker data' },
   { 'docker%s+rm', 'deletes containers' },
@@ -119,7 +201,9 @@ local DANGEROUS = {
   { 'terraform%s+apply', 'changes infrastructure' },
   { 'terraform%s+destroy', 'destroys infrastructure' },
   { ':%(%)%s*{', 'fork bomb' },
-  { '%f[%w]eval%s', 'evaluates arbitrary code' },
+  { function(s)
+    return at_command(s, 'eval')
+  end, 'evaluates arbitrary code' },
   { '%.ssh', 'touches SSH keys' },
   { 'security%s+find%-', 'reads the keychain' },
   { 'copilot_chat/tokens', 'touches Copilot tokens' },
@@ -128,6 +212,26 @@ local DANGEROUS = {
 
 --- Flags that let otherwise harmless tools run arbitrary programs or write files.
 local DENY_FLAGS = { '-exec', '-execdir', '-ok', '-okdir', '-fprint', '-fprintf', '--pre', '--output', '-o' }
+
+--- `judge.allowed_paths` as real paths without a trailing slash: `~` is
+--- expanded, a relative entry (`../env`) is taken from the workspace root.
+---@param paths string[]
+---@param root string
+---@return string[]
+function M.allowed_roots(paths, root)
+  local out = {}
+  for _, p in ipairs(paths or {}) do
+    if type(p) == 'string' and p ~= '' then
+      local norm = vim.fs.normalize(p)
+      if norm:sub(1, 1) ~= '/' then
+        norm = vim.fs.normalize(root .. '/' .. norm)
+      end
+      local real = (vim.uv.fs_realpath(norm) or norm):gsub('/+$', '')
+      table.insert(out, real ~= '' and real or '/')
+    end
+  end
+  return out
+end
 
 ---@class Coagent.CommandAnalysis
 ---@field simple boolean
@@ -280,10 +384,16 @@ end
 function M.analyze(cmd, cwd, ws)
   local res = { simple = false, dangerous = {}, outside_paths = {}, denied_flags = {}, protected_paths = {} }
   -- discarding output (`> /dev/null`, `2>/dev/null`) is not a write to an absolute path
-  local lower = cmd:lower():gsub('>>?%s*/dev/null%f[^%w/%._%-]', '> NULL')
+  local lower = search_text_blanked((cmd:lower():gsub('>>?%s*/dev/null%f[^%w/%._%-]', '> NULL')))
   local seen = {}
   for _, p in ipairs(DANGEROUS) do
-    if lower:find(p[1]) and not seen[p[2]] then
+    local hit
+    if type(p[1]) == 'function' then
+      hit = p[1](lower)
+    else
+      hit = lower:find(p[1]) ~= nil
+    end
+    if hit and not seen[p[2]] then
       seen[p[2]] = true
       table.insert(res.dangerous, p[2])
     end
@@ -545,11 +655,7 @@ function M.inspect(cmd, cwd, ws, opts)
   end
   res.shape = shape
 
-  local allowed = {}
-  for _, p in ipairs(vim.list_extend({ '/dev/null' }, vim.deepcopy(opts.allowed_paths or {}))) do
-    local norm = vim.fs.normalize(p)
-    table.insert(allowed, ((vim.uv.fs_realpath(norm) or norm):gsub('/+$', '')))
-  end
+  local allowed = M.allowed_roots(vim.list_extend({ '/dev/null' }, vim.deepcopy(opts.allowed_paths or {})), ws and ws.root or cwd)
   local function is_allowed(real)
     for _, a in ipairs(allowed) do
       if real == a or vim.startswith(real, a .. '/') then
