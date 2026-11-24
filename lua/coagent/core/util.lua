@@ -164,6 +164,56 @@ function M.truncate_middle(text, max_bytes)
   return head .. string.format('\n\n... [%d bytes omitted] ...\n\n', omitted) .. tail, true
 end
 
+--- Fit texts (oldest first) into about `budget` bytes, keeping every short
+--- one whole: long ones (pasted logs, code) are shortened to their head and
+--- tail, each to an equal share of what the short ones leave. When even
+--- `min_each` bytes per text do not fit, the oldest after the first (which
+--- usually sets the task) are left out.
+---@param texts string[]
+---@param budget integer
+---@param min_each integer?
+---@return string[] kept, integer left_out (after the first)
+function M.fit_texts(texts, budget, min_each)
+  min_each = min_each or 300
+  local keep = {}
+  for i = 1, #texts do
+    keep[i] = texts[i]
+  end
+  local left_out = 0
+  while #keep > 2 and #keep * min_each > budget do
+    table.remove(keep, 2)
+    left_out = left_out + 1
+  end
+  -- separators and markers
+  local remaining = budget - #keep * 60
+  local open = {}
+  for k = 1, #keep do
+    open[k] = true
+  end
+  local changed = true
+  while changed do
+    changed = false
+    local n = vim.tbl_count(open)
+    if n == 0 then
+      break
+    end
+    local share = math.floor(remaining / n)
+    for k in pairs(open) do
+      if #keep[k] <= share then
+        remaining = remaining - #keep[k]
+        open[k] = nil
+        changed = true
+      end
+    end
+  end
+  local n = vim.tbl_count(open)
+  local share = n > 0 and math.max(min_each, math.floor(remaining / n)) or 0
+  for k in pairs(open) do
+    keep[k] = (M.truncate_middle(keep[k], share))
+  end
+  return keep, left_out
+end
+
 ---@return string
 function M.uuid()
   local t = {}

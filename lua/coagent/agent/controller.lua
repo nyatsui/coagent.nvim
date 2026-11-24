@@ -1985,7 +1985,7 @@ function Controller:_review_progress_at_limit(gen, kind, message)
     string.format('Limit reached: %s (extension %d of at most %d).', message, (t.extensions or 0) + 1, max),
     '',
     'The request (DATA):',
-    Judge.data_block('request', id, Judge.user_request(self), 6000),
+    Judge.data_block('request', id, Judge.user_request(self, 6000), 6000),
     '',
     'The agent\'s latest notes / plan (DATA, model reasoning):',
     Judge.data_block('notes', id, notes or '', 4000),
@@ -2341,6 +2341,22 @@ function Controller:_task_brief()
     end
   end
   local request = #asks > 1 and util.truncate_middle(table.concat(asks, '\n---\n'), 3000) or util.clip(asks[1] or '', 3000)
+  -- earlier prompts of the session: a follow-up ("resume", "続けて")
+  -- continues the task they set
+  local earlier = {}
+  for i = 1, (first or 1) - 1 do
+    if prompt(msgs[i]) then
+      table.insert(earlier, vim.trim(msgs[i].content or ''))
+    end
+  end
+  if #earlier > 0 then
+    local kept, left_out = util.fit_texts(earlier, 2000)
+    if left_out > 0 then
+      table.insert(kept, 2, string.format('[%d earlier message%s not shown]', left_out, left_out == 1 and '' or 's'))
+    end
+    request = 'Earlier in this session (context; this task continues it):\n' .. table.concat(kept, '\n---\n')
+      .. '\n---\nThis task:\n' .. request
+  end
   -- a long task: its first plans and its latest notes
   return request, (util.truncate_middle(table.concat(said, '\n---\n'), 4000))
 end
@@ -3564,6 +3580,11 @@ function Controller:_execute(gen, tc)
       return nil
     end
   end
+  -- judge mode: an ask the judge did not make (a hard rule, the judge
+  -- paused) goes into /judge log too, with its reason
+  if decision.action == 'ask' and not jlog and self.permissions:effective_mode() == 'judge' then
+    jlog = self:_judge_log_rule(tool, prepared, decision, item)
+  end
   item.decision = { action = decision.action, reason = decision.reason, warnings = decision.warnings, can_always = decision.can_always, sandbox = decision.sandbox, rule = decision.rule }
 
   if decision.action == 'deny' then
@@ -3596,6 +3617,13 @@ function Controller:_execute(gen, tc)
     end
     if d.action == 'deny' or d.action == 'deny_stop' then
       self.task.denials = self.task.denials + 1
+      if jlog and not jlog.rule and self.task.judge_agent_paused then
+        -- you answered one of the judge's asks: like an approval, it ends the
+        -- pause (your denial agrees with the judge); asks go back to the agent
+        self.task.judge_agent_paused = false
+        self.task.judge_sent_back = 0
+        self:notice('info', 'You answered a command the judge asked about: its asks go back to the agent again.')
+      end
       local msg = 'DENIED by the user.' .. (d.reason and d.reason ~= '' and (' Reason: ' .. d.reason) or '')
         .. ' Do not retry this exact action. Choose another approach or explain what you need from the user.'
       local j = item.judge
@@ -3614,7 +3642,7 @@ function Controller:_execute(gen, tc)
       return out
     end
     self.task.denials = 0
-    self:_judge_approved(jlog ~= nil)
+    self:_judge_approved(jlog ~= nil and not jlog.rule)
     if d.action == 'approve_always' and decision.can_always then
       if d.rule and decision.rule and self.permissions.rules then
         -- the rule computed by the policy, never one from the request
@@ -3795,6 +3823,35 @@ function Controller:_execute(gen, tc)
   return { content = content ~= '' and content or '(no output)', item = item, wait = res.ok and res.wait_external or nil, stop = res.stop }
 end
 
+--- Judge mode: log an ask that did not come from a judge verdict (a hard
+--- rule, or the judge paused), so /judge log shows why you were asked.
+---@return table entry
+function Controller:_judge_log_rule(tool, prepared, decision, item)
+  self.session.judge_log = self.session.judge_log or {}
+  local paused = item.judge and item.judge.paused
+  local why = paused and ('judge paused: ' .. tostring(item.judge.reason)) or tostring(decision.reason)
+  local w = (decision.warnings or {})[1]
+  if not paused and w and not why:find(w, 1, true) then
+    why = why .. '; ' .. w
+  end
+  local shown = prepared.command or (prepared.path and prepared.path.real and (tool.name .. ' ' .. prepared.path.real)) or tool.name
+  local entry = {
+    at = os.time(),
+    item = item.id,
+    tool = tool.name,
+    command = util.clip(util.redact(shown), 500),
+    cwd = prepared.cwd_rel,
+    decision = paused and 'paused' or 'rule',
+    reason = util.clip(util.redact(why), 300),
+    rule = true,
+  }
+  table.insert(self.session.judge_log, entry)
+  while #self.session.judge_log > 500 do
+    table.remove(self.session.judge_log, 1)
+  end
+  return entry
+end
+
 --- Judge mode: ask the judge model about a command the policy left at 'ask'.
 --- After judge.pause_after 'ask' verdicts in a row (no judge allow and no
 --- approval of the user in between) the judge pauses: commands ask the user
@@ -3858,7 +3915,7 @@ function Controller:_judge(gen, tool, args, prepared, decision, item)
       self:notice('warn', string.format('The judge has sent %d commands back to the agent in this session: from now on its asks come to you (like Claude Code\'s auto mode pausing). /judge resume turns sending back on again.', self.session.judge_sent_back_total))
     elseif t.judge_sent_back >= streak then
       t.judge_agent_paused = true
-      self:notice('warn', string.format('The judge sent %d commands in a row back to the agent: its asks come to you until you approve one. /judge blocked lists what was blocked.', t.judge_sent_back))
+      self:notice('warn', string.format('The judge sent %d commands in a row back to the agent: its asks come to you until you approve or deny one. /judge blocked lists what was blocked.', t.judge_sent_back))
     else
       self:notice('info', string.format('Judge: blocked `%s` and sent it back to the agent: %s. /judge blocked to review, /judge allow to approve it.', util.clip(shown, 80), tostring(v.reason)))
     end

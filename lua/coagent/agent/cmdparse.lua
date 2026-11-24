@@ -82,7 +82,9 @@ end
 ---@param s string lower-cased command
 ---@param word string
 ---@return boolean
-local function own_word(s, word)
+local function own_word(s, word, program)
+  -- program: a program name only (`os.unlink`, `data.nc` are not the program)
+  local before = program and '[%w_%-%.]' or '[%w_%-]'
   local init = 1
   while true do
     local a, b = s:find(word, init, true)
@@ -91,7 +93,7 @@ local function own_word(s, word)
     end
     local prev, next = s:sub(a - 1, a - 1), s:sub(b + 1, b + 1)
     -- `/bin/kill` and `p.kill()` count; `rm.py`, `runs/rm/` do not
-    if not prev:match('[%w_%-]') and not next:match('[%w_%-%./]') then
+    if not prev:match(before) and not next:match('[%w_%-%./]') then
       return true
     end
     init = b + 1
@@ -443,17 +445,24 @@ end
 -- A third field 'judge': judge.hard_rules = 'judge' sends it to the judge
 -- model (held to a higher bar) instead of always asking, like Claude Code's
 -- auto mode, whose classifier decides downloads and installs.
+--- A program name as its own word (not `data.nc`, `--nc`, `sync_ssh.py`).
+local function prog(word)
+  return function(s)
+    return own_word(s, word, true)
+  end
+end
+
 local JUDGE_HARD = {
-  { '%f[%w]curl%f[%W]', 'network transfer (curl)', 'judge' },
-  { '%f[%w]wget%f[%W]', 'network transfer (wget)', 'judge' },
-  { '%f[%w]scp%f[%W]', 'copies to/from a remote host (scp)' },
-  { '%f[%w]sftp%f[%W]', 'remote file transfer (sftp)' },
-  { '%f[%w]ftp%f[%W]', 'remote file transfer (ftp)' },
-  { '%f[%w]ssh%f[%W]', 'remote shell (ssh)' },
-  { '%f[%w]nc%f[%W]', 'raw network connection (nc)' },
-  { '%f[%w]ncat%f[%W]', 'raw network connection (ncat)' },
-  { '%f[%w]netcat%f[%W]', 'raw network connection (netcat)' },
-  { '%f[%w]telnet%f[%W]', 'raw network connection (telnet)' },
+  { prog('curl'), 'network transfer (curl)', 'judge' },
+  { prog('wget'), 'network transfer (wget)', 'judge' },
+  { prog('scp'), 'copies to/from a remote host (scp)' },
+  { prog('sftp'), 'remote file transfer (sftp)' },
+  { prog('ftp'), 'remote file transfer (ftp)' },
+  { prog('ssh'), 'remote shell (ssh)' },
+  { prog('nc'), 'raw network connection (nc)' },
+  { prog('ncat'), 'raw network connection (ncat)' },
+  { prog('netcat'), 'raw network connection (netcat)' },
+  { prog('telnet'), 'raw network connection (telnet)' },
   { '/dev/tcp/', 'raw network connection (/dev/tcp)' },
   { '%f[%w]pip3?%s+install', 'installs packages', 'judge' },
   { '%-m%s+pip%s+install', 'installs packages', 'judge' },
@@ -479,12 +488,12 @@ local JUDGE_HARD = {
   { '%f[%w]docker%s+push', 'publishes an image' },
   { 'huggingface%-cli%s+upload', 'uploads to a remote hub' },
   { '%f[%w]hf%s+upload', 'uploads to a remote hub' },
-  { '%f[%w]unlink%f[%W]', 'deletes files' },
-  { '%f[%w]rmdir%f[%W]', 'deletes directories' },
-  { '%f[%w]shred%f[%W]', 'destroys files' },
-  { '%f[%w]crontab%f[%W]', 'creates persistent jobs' },
-  { '%f[%w]systemctl%f[%W]', 'changes system services' },
-  { '%f[%w]launchctl%f[%W]', 'changes system services' },
+  { prog('unlink'), 'deletes files' },
+  { prog('rmdir'), 'deletes directories' },
+  { prog('shred'), 'destroys files' },
+  { prog('crontab'), 'creates persistent jobs' },
+  { prog('systemctl'), 'changes system services' },
+  { prog('launchctl'), 'changes system services' },
   { 'git%s+config%s+%-%-global', 'changes global git configuration' },
   { 'git%s+config%s+%-%-system', 'changes system git configuration' },
 }
@@ -764,10 +773,17 @@ function M.inspect(cmd, cwd, ws, opts)
     end
   end
 
-  local lower = cmd:lower()
+  -- searched text (`grep -rn "ssh" src`) is not a command it names
+  local lower = search_text_blanked(cmd:lower())
   local hseen = {}
   for _, p in ipairs(JUDGE_HARD) do
-    if lower:find(p[1]) and not hseen[p[2]] then
+    local hit
+    if type(p[1]) == 'function' then
+      hit = p[1](lower)
+    else
+      hit = lower:find(p[1]) ~= nil
+    end
+    if hit and not hseen[p[2]] then
       hseen[p[2]] = true
       table.insert(res.hard, p[2])
       if p[3] == 'judge' then

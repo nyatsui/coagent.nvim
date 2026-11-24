@@ -525,6 +525,29 @@ describe('util', function()
     assert.are.equal('aaaaaa', s:sub(1, 6))
     assert.are.equal('bbbbbb', s:sub(-6))
   end)
+  it('fit_texts keeps short messages whole and shortens long ones; too many: the first and the newest stay', function()
+    local log = string.rep('loss=0.1 step\n', 500)
+    local kept, out = util.fit_texts({ 'train the model', log, 'commit when the tests pass', log, 'go on' }, 2000)
+    assert.are.equal(0, out)
+    assert.are.equal(5, #kept)
+    assert.are.equal('train the model', kept[1])
+    assert.are.equal('commit when the tests pass', kept[3])
+    assert.are.equal('go on', kept[5])
+    assert.truthy(#kept[2] < 1000 and kept[2]:find('omitted', 1, true))
+    local total = 0
+    for _, k in ipairs(kept) do
+      total = total + #k
+    end
+    assert.truthy(total <= 2000, total)
+    local many = {}
+    for i = 1, 30 do
+      many[i] = 'message ' .. i .. ' ' .. string.rep('x', 400)
+    end
+    kept, out = util.fit_texts(many, 2000)
+    assert.truthy(out > 0)
+    assert.truthy(kept[1]:find('^message 1 '))
+    assert.truthy(kept[#kept]:find('^message 30 '))
+  end)
 end)
 
 describe('tools', function()

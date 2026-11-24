@@ -1602,12 +1602,17 @@ vary) and the OS sandbox gets in the way (bwrap hides GPUs). Per tool call:
    scripts, deletes, writes outside `writable_globs`, reads outside the
    workspace or of protected files, the delegate tool and MCP tools.
    Whatever supervised denies is denied.
-2. Reads inside the workspace run.
+2. Reads inside the workspace run, and so do plain read-only git
+   commands (git status / diff / log / show; no pipes, --output,
+   --ext-diff or outside paths) without a judge request.
 3. Workspace edits run (as in auto).
 4. Any other command (run_command, start_process, complex shell) is sent
    to the judge: one headless request to `judge.model` (default: the
    builder model; a cheap model is recommended), no tools, temperature 0.
-   It gets your request, the exact command, cwd, a command analysis, the
+   It gets your request (after your earlier messages in the session, so
+   a follow-up such as "resume" keeps the task; short ones whole, long
+   ones shortened, with very many the first and the newest), the exact
+   command, cwd, a command analysis, the
    agent's purpose / notes and the last tool actions. Everything not
    computed by coagent is wrapped in nonce-delimited DATA blocks that the
    judge must never take instructions from. The answer must be exactly
@@ -1624,7 +1629,8 @@ runs are shown to the judge with their origin (the agent's diff, or the
 project file marked unchanged since the last commit, with uncommitted
 changes, or not in git). Judge
 requests count as role "judge" in :CoagentUsage. /judge log lists every
-verdict with its outcome; the log is saved with the session.
+verdict with its outcome, and the asks the judge did not make ("rule": a
+hard rule, with its reason; "paused"); the log is saved with the session.
 
 A request cut in the middle, or a script it cannot see whole, makes the
 judge ask, so both have budgets of their own: the request up to
@@ -1636,8 +1642,8 @@ script a wrapper calls), at most `judge.max_tool_steps` requests; its reads
 never ask and do not count as the agent's.
 `judge.on_ask = 'agent'` sends an "ask" back to the agent with the reason
 instead of asking you (like Claude Code's auto mode); after
-`judge.max_sent_back` in a row its asks come to you until you approve a
-command (after `judge.max_sent_back_total` in the session: until /judge
+`judge.max_sent_back` in a row its asks come to you until you approve or
+deny one (after `judge.max_sent_back_total` in the session: until /judge
 resume). /judge blocked lists what was sent back; /judge allow [n] approves
 one for a retry. Hard rules and judge failures still ask you.
 `judge.hard_rules = 'judge'` (default) sends downloads, package installs,

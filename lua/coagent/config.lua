@@ -454,7 +454,8 @@ local defaults = {
     -- (like Claude Code's auto mode: the command is blocked and the agent gets
     -- the reason, then takes a safer way or stops and tells you; /judge
     -- blocked lists them, /judge allow <n> approves one for a retry). After
-    -- max_sent_back in a row its asks come to you until you approve one;
+    -- max_sent_back in a row its asks come to you until you answer one
+    -- (approve or deny);
     -- after max_sent_back_total in a session, until /judge resume. Hard rules
     -- and judge failures still ask you.
     on_ask = 'user',

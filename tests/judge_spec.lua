@@ -116,6 +116,11 @@ describe('judge mode: hard rules (permissions)', function()
     'cat .env',
     'unlink a.txt',
     'find . -name "*.pyc" -delete',
+    'cat $HOME/.netrc',
+    'cat ~/.aws/credentials',
+    'ls ../.env',
+    'rsync -e ssh a.txt b:',
+    [[python -c "import subprocess; subprocess.run(['ssh', 'h'])"]],
   }
   -- like Claude Code's auto mode: decided by the judge, flagged
   local FLAGGED = {
@@ -127,7 +132,6 @@ describe('judge mode: hard rules (permissions)', function()
     { 'cp /etc/hosts runs/hosts.txt', 'names a path outside the workspace' },
     { 'python train.py --out /etc/x', 'names a path outside the workspace' },
     { 'CUDA_VISIBLE_DEVICES=0 python train.py --data ~/datasets', 'names a path outside the workspace' },
-    { 'cat $HOME/.netrc', 'names a path outside the workspace' },
   }
 
   it('always asks for dangerous commands, writes outside, deletes, remote shells, uploads, protected files', function()
@@ -167,6 +171,14 @@ describe('judge mode: hard rules (permissions)', function()
       'python train.py --config configs/a.yaml 2>&1 | tee runs/log.txt',
       'python train.py > runs/out.log 2>/dev/null',
       'nvidia-smi',
+      -- words that only look like hard-rule programs
+      'python train.py --data data/era5.nc',
+      'python train.py --nc 4',
+      'python scripts/sync_ssh_keys.py',
+      'grep -rn "ssh" .',
+      [[python -c "import os; os.unlink('a.txt')"]],
+      -- an absolute path inside the workspace
+      'python train.py > ' .. root .. '/runs/out.log 2>&1',
     }) do
       local d = p:decide(exec, {}, cmd(c))
       assert.are.equal('ask', d.action, c)
@@ -364,7 +376,18 @@ describe('judge mode: controller', function()
     for _, it in ipairs(tool_items(r.c)) do
       assert.is_nil(it.judge)
     end
-    assert.is_nil(r.c.session.judge_log)
+    -- /judge log shows why you were asked, with your answer
+    local log = r.c.session.judge_log
+    assert.are.equal(4, #log)
+    for _, e in ipairs(log) do
+      assert.are.equal('rule', e.decision)
+      assert.are.equal('user denied', e.outcome)
+    end
+    assert.are.equal('rm -rf runs', log[1].command)
+    assert.truthy(log[1].reason:find('DANGEROUS', 1, true), log[1].reason)
+    local text = require('coagent.agent.judge').log_text(log)
+    assert.truthy(text:find('rule', 1, true))
+    assert.truthy(text:find('user denied', 1, true))
     assert.are.equal('hello\n', h.read(root .. '/a.txt'))
   end)
 
@@ -1065,6 +1088,70 @@ describe('judge: scripts given whole', function()
   end)
 end)
 
+describe('judge: the request after a stop', function()
+  it('a follow-up such as "再開" carries the earlier request of the session to the judge and the advisor', function()
+    local root = h.workspace({})
+    local r = build(root, {
+      { content = 'started' },
+      run_cmd('python3 a.py'),
+      { content = 'ok' },
+    }, { ALLOW })
+    r.c:submit('fix the loss in train.py and commit it')
+    wait_done(r)
+    r.done = nil
+    r.c:submit('再開')
+    wait_done(r)
+    local jr = judge_requests(r.backend)
+    assert.are.equal(1, #jr)
+    local input = jr[1].messages[1].content
+    assert.is_truthy(input:find('fix the loss in train.py and commit it', 1, true), input)
+    assert.is_truthy(input:find('Current task:\n再開', 1, true), input)
+    local task = r.c:_task_brief()
+    assert.is_truthy(task:find('fix the loss in train.py and commit it', 1, true), task)
+    assert.is_truthy(task:find('This task:\n再開', 1, true), task)
+  end)
+
+  it('long earlier messages are shortened, the instructions between them stay whole', function()
+    local root = h.workspace({})
+    local log = string.rep('epoch 1 loss=0.123 acc=0.9\n', 600)
+    local steps = {}
+    for _ = 1, 4 do
+      table.insert(steps, { content = 'noted' })
+    end
+    table.insert(steps, run_cmd('git commit -am fix'))
+    table.insert(steps, { content = 'ok' })
+    local r = build(root, steps, { ALLOW })
+    for _, msg in ipairs({ 'fix the loss', 'here is the log:\n' .. log, 'commit the fix when the tests pass', 'and the log again:\n' .. log }) do
+      r.done = nil
+      r.c:submit(msg)
+      wait_done(r)
+    end
+    r.done = nil
+    r.c:submit('再開')
+    wait_done(r)
+    local input = judge_requests(r.backend)[1].messages[1].content
+    assert.is_truthy(input:find('commit the fix when the tests pass', 1, true), input)
+    assert.is_truthy(input:find('fix the loss', 1, true))
+    assert.is_truthy(input:find('Current task:\n再開', 1, true))
+    assert.is_truthy(#input < 20000, #input)
+  end)
+
+  it('read-only git commands run without a judge request', function()
+    local root = h.workspace({})
+    local r = build(root, {
+      run_cmd('git status --short'),
+      run_cmd('git diff --stat'),
+      run_cmd('git add -A'),
+      { content = 'ok' },
+    }, { ALLOW })
+    r.c:submit('show me the changes')
+    wait_done(r)
+    assert.are.equal(0, #r.approvals)
+    -- only git add went to the judge
+    assert.are.equal(1, #judge_requests(r.backend))
+  end)
+end)
+
 describe('judge: on_ask = "agent"', function()
   it('sends an ask back to the agent with the reason; after max_sent_back in a row its asks come to you', function()
     local root = h.workspace({})
@@ -1098,6 +1185,26 @@ describe('judge: on_ask = "agent"', function()
     assert.is_truthy(r.approvals[1].title:find('d.py', 1, true))
     assert.is_true(items[5].judge.sent_back)
     assert.are.equal(4, #r.c:judge_blocked())
+  end)
+
+  it('your denial during the pause also sends the asks back to the agent again', function()
+    local root = h.workspace({})
+    local r = build(root, {
+      run_cmd('python3 a.py'),
+      run_cmd('python3 b.py'),
+      run_cmd('python3 c.py'),
+      run_cmd('python3 d.py'),
+      { content = 'ok' },
+    }, { ASK }, { judge = { on_ask = 'agent', max_sent_back = 2 }, limits = { max_identical_calls = 10, max_consecutive_denials = 100 } })
+    r.on_approval = function(item)
+      r.c:approve(item.id, { action = 'deny' })
+    end
+    r.c:submit('run them')
+    wait_done(r)
+    -- a, b sent back; c asks you (denied); d is sent back again
+    assert.are.equal(1, #r.approvals)
+    assert.is_truthy(r.approvals[1].title:find('c.py', 1, true))
+    assert.is_true(tool_items(r.c)[4].judge.sent_back)
   end)
 
   it('/judge allow approves a blocked command for a retry and tells the agent', function()

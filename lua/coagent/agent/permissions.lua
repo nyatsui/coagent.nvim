@@ -351,7 +351,15 @@ function Permissions:decide(tool, args, prepared)
     local a = prepared.analysis or cmdparse.analyze(prepared.command or args.command or '', prepared.cwd or self.ws.root, self.ws)
     local key = 'exec:' .. vim.trim((prepared.command or ''):gsub('%s+', ' ')) .. '@' .. (prepared.cwd or '')
     local warnings = {}
-    for _, d in ipairs(a.dangerous) do
+    local dangerous = a.dangerous
+    if mode == 'judge' then
+      -- judge mode checks each redirect target itself (_judge_exec): one in
+      -- the workspace is fine, one outside it is a hard rule
+      dangerous = vim.tbl_filter(function(d)
+        return d ~= 'writes to an absolute path'
+      end, a.dangerous)
+    end
+    for _, d in ipairs(dangerous) do
       table.insert(warnings, 'DANGEROUS: ' .. d)
     end
     for _, p in ipairs(a.outside_paths) do
@@ -365,7 +373,7 @@ function Permissions:decide(tool, args, prepared)
     end
     -- judge mode never sandboxes (GPU access); its safety is the hard rules + judge
     local sandbox_all = mode ~= 'judge' and self.config.commands.sandbox_all and self.config.commands.sandbox ~= 'off' and sandbox.backend() ~= nil
-    if #a.dangerous > 0 then
+    if #dangerous > 0 then
       return decision('ask', 'potentially destructive command', { warnings = warnings, can_always = false, sandbox = sandbox_all, hard = true })
     end
     if self.grants[key] then
@@ -419,6 +427,9 @@ function Permissions:decide(tool, args, prepared)
   return decision('ask', 'unknown tool kind')
 end
 
+-- git subcommands that only read the repository
+local READONLY_GIT = { status = true, diff = true, log = true, show = true }
+
 --- Judge mode, a command that is not dangerous and not previously approved:
 --- the judge-mode hard rules ask; anything else is left to the judge model.
 --- With judge.hard_rules = 'judge' (the default, like Claude Code's auto
@@ -456,6 +467,21 @@ function Permissions:_judge_exec(prepared, args, a, key)
   if #(insp.outside_writes or {}) > 0 then
     table.insert(hard, 'writes a path outside the workspace')
   end
+  -- credentials outside the workspace (~/.ssh, ~/.aws, .env...) always ask,
+  -- as for read tools
+  local home = vim.env.HOME or ''
+  for _, p in ipairs(reads) do
+    local full = p:gsub('^~/', home .. '/'):gsub('^~$', home):gsub('^%$%{?HOME%}?', home)
+    if full:sub(1, 1) ~= '/' then
+      full = (prepared.cwd or self.ws.root) .. '/' .. full
+    end
+    full = vim.uv.fs_realpath(full) or vim.fs.normalize(full)
+    local secret = self:_outside_secret(full)
+    if secret then
+      table.insert(hard, 'reads credentials outside the workspace (' .. secret .. ')')
+      break
+    end
+  end
   if #reads > 0 then
     if route then
       table.insert(flagged, 'names a path outside the workspace')
@@ -479,6 +505,19 @@ function Permissions:_judge_exec(prepared, args, a, key)
   end
   if #hard > 0 then
     return decision('ask', 'judge mode: ' .. hard[1], { warnings = warnings, grant_key = key, can_always = true, hard = true, inspection = insp })
+  end
+  -- read-only git (status / diff / log / show), plain: no judge request
+  if #flagged == 0 and a.simple and #a.denied_flags == 0 and #a.outside_paths == 0 and #(a.protected_paths or {}) == 0
+    and a.argv and a.argv[1] == 'git' and READONLY_GIT[a.argv[2] or ''] then
+    local plain = true
+    for i = 3, #a.argv do
+      if a.argv[i]:match('^%-%-ext%-diff') or a.argv[i]:match('^%-%-textconv') then
+        plain = false
+      end
+    end
+    if plain then
+      return decision('allow', 'judge mode: read-only git command', { sandbox = false })
+    end
   end
   local reason = #flagged > 0 and ('judge mode: ' .. flagged[1] .. ' (the judge decides)') or 'command execution'
   return decision('ask', reason, { warnings = warnings, grant_key = key, can_always = true, judge = true, inspection = insp, flagged = flagged, outside_reads = reads })

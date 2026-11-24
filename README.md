@@ -1547,12 +1547,12 @@ For hands-off work where an allowlist is impractical (training entry points vary
 
 1. **Hard rules first** — deterministic. Always **ask** (the judge is never consulted and can never turn them into
    "allow"): dangerous patterns (`rm`, `git reset/clean/checkout --/restore/push/rebase`, `sudo`, `| sh`, `chown`,
-   `chmod -R`, writes to an absolute path, publishing, ...), remote shells and transfers (`scp`, `ssh`, `nc`, `rsync` to a
+   `chmod -R`, publishing, ...), remote shells and transfers (`scp`, `ssh`, `nc`, `rsync` to a
    remote), uploads, `unlink` / `rmdir` / `find -delete`, crontab / services, **writes** outside the workspace (a redirect,
    `cp`/`rsync`/`ln` destinations, `mv`, `tee`, `touch`, `sed -i`, `dd of=` ...), protected files (`.env`, keys, `.git/`),
    scripts from skill folders, file deletes (see below), writes outside `writable_globs`, reads of
    protected files and of credentials outside the workspace (key files, `.env`, `.ssh` / `.aws`-like folders) with the
-   read tools, the `delegate` tool and MCP tools. Whatever `supervised` denies is denied.
+   read tools or named in a command, the `delegate` tool and MCP tools. Whatever `supervised` denies is denied.
    **Flagged, decided by the judge** (`judge.hard_rules = 'judge'`, the default, like Claude Code's auto mode, whose
    classifier decides these): downloads (`curl`, `wget`), package installs (`pip install`, `npm install`, ...) and paths
    outside the workspace a command names without a program that writes them (`cat ../x`, `cp /data/x runs/`, a script's
@@ -1566,11 +1566,14 @@ For hands-off work where an allowlist is impractical (training entry points vary
    `__pycache__/`, `*.pyc`, `.pytest_cache/`, `.mypy_cache/`, `.ruff_cache/`, `.ipynb_checkpoints/`; add your
    temporary folders). Such deletes are recorded too (`/changes` `x`, `/rewind`). Every other delete asks, and `rm` /
    `unlink` / `find -delete` in a command always ask; the agent is told to delete with `delete_file`
-2. **Reads** inside the workspace run (as today).
+2. **Reads** inside the workspace run (as today), and so do plain read-only git commands (`git status` / `diff` / `log` /
+   `show` without pipes, `--output`, `--ext-diff` or outside paths), with no judge request.
 3. **Workspace file edits** run (as in `auto`, honouring `writable_globs` / `protected_globs`).
 4. **Everything else that would ask** (`run_command`, `start_process`, complex shell with pipes, redirects, `&&`, env
    assignments) is sent to the **judge**: one headless request to `judge.model` (default: the builder model; a cheap fast
-   model is recommended), no tools, temperature 0, its own system prompt. It sees your request for the task, the exact
+   model is recommended), no tools, temperature 0, its own system prompt. It sees your request for the task (with your earlier messages in the session before it, so a
+   follow-up such as "resume" after a stop keeps the task you set; short messages stay whole, long ones such as pasted
+   logs are shortened to their start and end, and with very many the first and the newest stay), the exact
    command, cwd, the command analysis (shell features, env assignments, redirect targets, workspace files it references,
    URLs), the agent's stated purpose and notes, and the last few tool actions. Everything not computed by coagent (the
    command text, repository text, tool output, the agent's reasoning) is wrapped in nonce-delimited DATA blocks, and the
@@ -1592,7 +1595,8 @@ For hands-off work where an allowlist is impractical (training entry points vary
 
 - The verdict is shown on the tool item as a dim line (`judge: allowed — runs the project's training script`, or
   `judge: asks (risk medium) — …` above the usual approval). `/judge log` lists every verdict of the session with its
-  outcome (ran without asking / you approved / you denied); the log is saved with the session
+  outcome (ran without asking / you approved / you denied); asks the judge did not make are there too, as `rule` (a hard
+  rule, with its reason) or `paused`, so you can see why you were asked. The log is saved with the session
 - Verdicts are cached per (command, cwd) for the session (`judge.cache`; `/judge clear` forgets them). "Always allow" in the
   approval dialog still works as in the other modes
 - After `judge.pause_after` (3) "ask" verdicts in a row with no allow and no approval of yours in between, the judge
@@ -1630,7 +1634,7 @@ For hands-off work where an allowlist is impractical (training entry points vary
   rule not to get the same effect another way; it takes a safer approach or stops and tells you what it needs. A notice
   tells you; `/judge blocked` lists what was sent back and `/judge allow [n]` approves one (that exact command then runs
   without asking in this session, and the agent is told it may run it again), like Claude Code's "Recently blocked".
-  After `judge.max_sent_back` (3) in a row its asks come to you until you approve a command; after
+  After `judge.max_sent_back` (3) in a row its asks come to you until you approve or deny one; after
   `judge.max_sent_back_total` (20) in the session, until `/judge resume` (Claude Code pauses auto mode the same way).
   Hard rules and failures of the judge itself (timeout, unusable answer) still ask you
 - **Your standing rules: `judge.instructions`** (a string or a list of lines), e.g.
@@ -1731,7 +1735,7 @@ require('coagent').setup({
     tools = 'read',           -- the judge reads files itself ('none': only what coagent sends)
     max_tool_steps = 4, max_tool_result_bytes = 6000,
     on_ask = 'user',          -- 'agent': an ask goes back to the agent instead of you
-    max_sent_back = 3,        -- that many in a row: asks come to you until you approve one
+    max_sent_back = 3,        -- that many in a row: asks come to you until you approve or deny one
     max_sent_back_total = 20, -- that many in the session: until /judge resume
     hard_rules = 'judge',     -- downloads, installs, outside reads (commands, read tools) go to the judge ('ask': always ask)
     instructions = nil,       -- your standing rules for the judge (string or list of lines)

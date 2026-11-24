@@ -1483,12 +1483,12 @@ Claude Code の権限モードとの対応: `supervised` ≈ default（毎回確
 OS サンドボックスが邪魔になる（`bwrap` は GPU を隠す）場面で、確認なしに進めるためのモードです。ツール呼び出しごとに:
 
 1. **固定ルールが先**（決定的）。次は**必ず承認**で、judge には送らず、judge が「許可」に変えることもできません:
-   危険パターン（`rm`、`git reset/clean/checkout --/restore/push/rebase`、`sudo`、`| sh`、`chown`、`chmod -R`、絶対パスへの書き込み、
+   危険パターン（`rm`、`git reset/clean/checkout --/restore/push/rebase`、`sudo`、`| sh`、`chown`、`chmod -R`、
    パッケージ公開など）、リモートのシェルと転送（`scp`・`ssh`・`nc`・リモートへの `rsync`）、アップロード、`unlink` / `rmdir` /
    `find -delete`、crontab・サービス操作、ワークスペース外への**書き込み**（リダイレクト、`cp`・`rsync`・`ln` のコピー先、`mv`・
    `tee`・`touch`・`sed -i`・`dd of=` など）、保護ファイル（`.env`・鍵・`.git/`）、スキルフォルダのスクリプト、ファイル削除、
-   `writable_globs` 外への書込み、読み取りツールでの保護ファイルとワークスペース外の秘密情報（鍵、`.env`、`.ssh`・`.aws`
-   などのフォルダ）の読込、`delegate` ツール、MCP ツール。
+   `writable_globs` 外への書込み、読み取りツールやコマンドでの保護ファイルとワークスペース外の秘密情報（鍵、`.env`、
+   `.ssh`・`.aws` などのフォルダ）の読込、`delegate` ツール、MCP ツール。
    `supervised` で拒否されるものは拒否。
    **印を付けて judge が判断するもの**（`judge.hard_rules = 'judge'`、既定。Claude Code の auto モードでも分類器が判断する範囲）:
    ダウンロード（`curl`・`wget`）、パッケージのインストール（`pip install`・`npm install` など）、書き込むプログラムを通さずに
@@ -1503,11 +1503,14 @@ OS サンドボックスが邪魔になる（`bwrap` は GPU を隠す）場面�
    `.pytest_cache/`・`.mypy_cache/`・`.ruff_cache/`・`.ipynb_checkpoints/`。一時フォルダを追加できます）への `delete_file`。
    この削除も記録されるので `/changes` の `x` や `/rewind` で戻せます。それ以外の削除は確認し、コマンド中の `rm` /
    `unlink` / `find -delete` は常に確認します。エージェントには `delete_file` で削除するよう指示しています
-2. ワークスペース内の**読込**はそのまま実行（従来どおり）。
+2. ワークスペース内の**読込**はそのまま実行（従来どおり）。読み取りだけの git（`git status` / `diff` / `log` / `show`。パイプ・
+   `--output`・`--ext-diff`・ワークスペース外のパスを含まないもの）も judge に問い合わせずに実行します。
 3. ワークスペース内の**ファイル編集**は実行（`auto` と同じく `writable_globs` / `protected_globs` に従う）。
 4. **それ以外で承認が必要になるもの**（`run_command`・`start_process`、パイプ・リダイレクト・`&&`・環境変数代入を含む複雑なシェル）を
    **judge** に問い合わせます。`judge.model`（既定はビルダーのモデル。安くて速いモデルを推奨）へのヘッドレスな 1 リクエストで、
-   ツールなし・temperature 0・専用のシステムプロンプト。渡すのは、タスクについてのユーザーの依頼文、コマンドそのもの、cwd、
+   ツールなし・temperature 0・専用のシステムプロンプト。渡すのは、タスクについてのユーザーの依頼文（セッション内のそれ以前の依頼も前に付けるので、Stop 後の「再開」のような
+   短い続きの依頼でも元の依頼が伝わります。短い依頼はそのまま、貼り付けたログのような長い依頼は最初と最後を残して短くし、
+   件数が多すぎるときは最初の依頼と新しい依頼を残します）、コマンドそのもの、cwd、
    コマンド解析（シェル機能・環境変数代入・リダイレクト先・参照するワークスペース内ファイル・URL）、エージェントが述べた目的とメモ、
    直近のツール操作です。coagent が計算したもの以外（コマンド文字列・リポジトリの文章・ツール出力・モデルの推論）はすべて
    ノンス付きの DATA ブロックで囲み、その中の指示はインジェクションの試みとして扱うよう judge に指示しています。
@@ -1526,7 +1529,8 @@ OS サンドボックスが邪魔になる（`bwrap` は GPU を隠す）場面�
    だけでは承認に回しません。スクリプトが変わればキャッシュした判定は使いません。
 
 - 判定はツール項目に薄い 1 行で表示します（`judge: allowed — runs the project's training script`、または通常の承認の上に
-  `judge: asks (risk medium) — …`）。`/judge log` でセッション中の全判定と結果（確認なしで実行 / 承認 / 拒否）を一覧でき、
+  `judge: asks (risk medium) — …`）。`/judge log` でセッション中の全判定と結果（確認なしで実行 / 承認 / 拒否）を一覧できます。
+  judge を通らずに聞いたもの（固定ルール `rule` と理由、judge の一時停止 `paused`）も載るので、なぜ聞かれたか分かります。
   ログはセッションと一緒に保存されます
 - 判定はセッション中 (コマンド, cwd) ごとにキャッシュします（`judge.cache`。`/judge clear` で消去）。承認ダイアログの
   「常に許可」も他のモードと同じく使えます
@@ -1565,7 +1569,7 @@ OS サンドボックスが邪魔になる（`bwrap` は GPU を隠す）場面�
   エージェントに返します。エージェントは安全なやり方に変えるか、止まって必要なことをあなたに説明します。
   戻したことはお知らせで伝え、`/judge blocked` で一覧、`/judge allow [n]` で承認できます（そのコマンドはこのセッション中
   確認なしで動き、エージェントにはやり直してよいと伝えます。Claude Code の「Recently blocked」に相当）。
-  `judge.max_sent_back`（3）回続けて戻すと、あなたがどれかのコマンドを承認するまで、judge の ask はあなたに来ます。
+  `judge.max_sent_back`（3）回続けて戻すと、あなたがどれかに答える（承認または拒否）まで、judge の ask はあなたに来ます。
   セッション中に `judge.max_sent_back_total`（20）回戻すと、`/judge resume` までそうなります（Claude Code の auto も同じように一時停止します）。
   固定ルールと、judge 自体の失敗（時間切れ・読めない答え）は
   これまでどおりあなたに聞きます
@@ -1664,7 +1668,7 @@ require('coagent').setup({
     tools = 'read',           -- judge が自分でファイルを読む（'none': coagent が渡すものだけ）
     max_tool_steps = 4, max_tool_result_bytes = 6000,
     on_ask = 'user',          -- 'agent': ask をあなたではなくエージェントに戻す
-    max_sent_back = 3,        -- この回数続けて戻すと、承認するまで ask があなたに来る
+    max_sent_back = 3,        -- この回数続けて戻すと、承認か拒否をするまで ask があなたに来る
     max_sent_back_total = 20, -- セッションでこの回数戻すと、/judge resume まで同上
     hard_rules = 'judge',     -- ダウンロード・インストール・外のパスの読み取り（コマンド・読込ツール）を judge に回す（'ask': 必ず承認）
     instructions = nil,       -- judge への常設のルール（文字列か、行のリスト）
