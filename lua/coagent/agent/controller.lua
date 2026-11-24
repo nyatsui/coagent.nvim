@@ -2063,7 +2063,7 @@ function Controller:_loop(gen)
         self:notice('info', string.format('%s Progress check: going on (extension %d of %d): %s', limit, t.extensions,
           math.max(0, tonumber(self.config.limits.max_extensions) or 3), why or 'it is making progress'))
         if note and note ~= '' then
-          table.insert(self.session.messages, { role = 'user', content = '[Progress check at the run limit: you may go on. Advice: ' .. note .. ']' })
+          table.insert(self.session.messages, { role = 'user', content = '[Progress check at the run limit: you may go on. Advice: ' .. note .. ']', injected = true })
         end
         break
       end
@@ -2161,7 +2161,7 @@ function Controller:_loop(gen)
         return self:_finish(gen, S.COMPLETED, { reason = 'model_done' })
       end
       -- the advisor found issues: hand them to the builder and keep going
-      table.insert(self.session.messages, { role = 'user', content = note })
+      table.insert(self.session.messages, { role = 'user', content = note, injected = true })
       goto next_step
     end
 
@@ -2219,7 +2219,7 @@ function Controller:_loop(gen)
         return self:_finish(gen, S.CANCELLED, { reason = 'denied', message = stop_reason })
       end
       if results_note then
-        table.insert(self.session.messages, { role = 'user', content = results_note })
+        table.insert(self.session.messages, { role = 'user', content = results_note, injected = true })
       end
       -- PROGRESS (strict): a periodic on-track check at the step boundary
       local note, stopped = self:_review_progress(gen)
@@ -2227,7 +2227,7 @@ function Controller:_loop(gen)
         return
       end
       if note then
-        table.insert(self.session.messages, { role = 'user', content = note })
+        table.insert(self.session.messages, { role = 'user', content = note, injected = true })
       end
     end
     self:save()
@@ -2273,17 +2273,35 @@ function Controller:_execute_parallel(gen, tool_calls, group)
   return outs
 end
 
---- Compact text of what the builder said so far in this task.
+--- A user-role message the loop wrote itself (a todo nudge, advisor points,
+--- a progress check), not a prompt: never taken for the task's request.
+--- Sessions saved before `injected` was set are recognized by the text.
+---@param m table
+---@return boolean
+function Controller.generated_note(m)
+  if m.role ~= 'user' then
+    return false
+  end
+  if m.injected then
+    return true
+  end
+  local c = m.content or ''
+  return c:match('^Advisor review') ~= nil or c:match('^TODO NOT FINISHED') ~= nil or c:match('^%[Progress check at the run limit') ~= nil
+end
+
+--- The task's request (the prompts of this task) and what the builder said
+--- since it began.
 function Controller:_task_brief()
+  local msgs = self.session.messages
   local from = self.task and self.task.brief_from
   if from then
     -- a planned task: every prompt since the plan phase began (task,
     -- revisions, approval) and everything the builder said (the plan included)
     local asks, said = {}, {}
-    for i = from, #self.session.messages do
-      local m = self.session.messages[i]
+    for i = from, #msgs do
+      local m = msgs[i]
       local text = vim.trim(m.content or '')
-      if m.role == 'user' and not text:match('^Advisor review') then
+      if m.role == 'user' and not Controller.generated_note(m) then
         table.insert(asks, text)
       elseif m.role == 'assistant' and text ~= '' then
         table.insert(said, text)
@@ -2291,23 +2309,40 @@ function Controller:_task_brief()
     end
     return util.clip(table.concat(asks, '\n---\n'), 3000), util.clip(table.concat(said, '\n---\n'), 4000)
   end
-  local first_user, said = nil, {}
-  for i = #self.session.messages, 1, -1 do
-    local m = self.session.messages[i]
-    if m.role == 'user' and not (m.content or ''):match('^Advisor review') then
-      first_user = m.content
-      break
+  local function prompt(m)
+    return m.role == 'user' and not Controller.generated_note(m)
+  end
+  -- the prompts of the running task: its first message and what the user
+  -- added while it ran (a todo nudge or advisor points in between are not
+  -- the request); outside a task, the last prompt
+  local first, asks = nil, {}
+  local start = self.task and self.task.msg_start
+  if start and start <= #msgs then
+    for i = start, #msgs do
+      if prompt(msgs[i]) then
+        first = first or i
+        table.insert(asks, vim.trim(msgs[i].content or ''))
+      end
     end
   end
-  local started = false
-  for _, m in ipairs(self.session.messages) do
-    if m.content == first_user then
-      started = true
-    elseif started and m.role == 'assistant' and vim.trim(m.content or '') ~= '' then
+  if not first then
+    for i = #msgs, 1, -1 do
+      if prompt(msgs[i]) then
+        first, asks = i, { vim.trim(msgs[i].content or '') }
+        break
+      end
+    end
+  end
+  local said = {}
+  for i = (first or #msgs) + 1, #msgs do
+    local m = msgs[i]
+    if m.role == 'assistant' and vim.trim(m.content or '') ~= '' then
       table.insert(said, vim.trim(m.content))
     end
   end
-  return util.clip(first_user or '', 3000), util.clip(table.concat(said, '\n---\n'), 4000)
+  local request = #asks > 1 and util.truncate_middle(table.concat(asks, '\n---\n'), 3000) or util.clip(asks[1] or '', 3000)
+  -- a long task: its first plans and its latest notes
+  return request, (util.truncate_middle(table.concat(said, '\n---\n'), 4000))
 end
 
 function Controller:_changes_diff()
@@ -4517,7 +4552,7 @@ function Controller:_ledger_task_event(state, summary, t)
     if m.role == 'assistant' and vim.trim(m.content or '') ~= '' then
       final = vim.trim(m.content)
       break
-    elseif m.role == 'user' and not (m.content or ''):match('^Advisor review') then
+    elseif m.role == 'user' and not Controller.generated_note(m) then
       break -- the task never replied in text
     end
   end

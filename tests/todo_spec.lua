@@ -91,7 +91,8 @@ describe('todo list', function()
   it('sends the agent back to open items instead of ending with a report', function()
     local root = h.workspace({ ['a.txt'] = 'x\n' })
     local step = 0
-    local r = build(root, function(messages)
+    local r
+    r = build(root, function(messages)
       step = step + 1
       if step == 1 then
         return todo_call({ { text = 'fix the loss', status = 'in_progress' }, { text = 'run the eval', status = 'pending' } })
@@ -100,6 +101,11 @@ describe('todo list', function()
       elseif step == 3 then
         assert.is_truthy(last_user(messages):find('TODO NOT FINISHED', 1, true))
         assert.is_truthy(last_user(messages):find('[ ] run the eval', 1, true))
+        -- the judge, advisor and critic still see the user's request and the
+        -- agent's notes from before the nudge, not the nudge as the task
+        local task, notes = r.c:_task_brief()
+        assert.are.equal('fix the loss and evaluate', task)
+        assert.is_truthy(notes:find('Fixed the loss', 1, true))
         return todo_call({ { text = 'fix the loss', status = 'done' }, { text = 'run the eval', status = 'done', note = 'val_acc 0.91' } })
       end
       return { content = 'All done.' }
