@@ -4729,13 +4729,29 @@ function Controller:_ledger_auto_capture(why)
   if why == 'compact' and pass.tasks == 0 then
     return false
   end
+  if self.ledger_capturing then
+    return false -- one pass at a time; the next one reads from where this one ends
+  end
   local from = pass.item
   local chat = Ledger.transcript(vim.list_slice(self.session.items, from + 1), l.config.auto_capture_bytes or 40 * 1024)
   if #vim.trim(chat) < (l.config.auto_capture_min_bytes or 1500) then
     return false
   end
-  pass.item, pass.tasks = #self.session.items, 0
-  return (l:capture({ sources = { 'chat' }, chat = chat, auto = true }))
+  -- the conversation up to here is done only when the pass succeeds: after
+  -- a failed request or reply, the next pass reads it again
+  local to, tasks = #self.session.items, pass.tasks
+  self.ledger_capturing = true
+  local started = l:capture({ sources = { 'chat' }, chat = chat, auto = true }, function(ok)
+    self.ledger_capturing = nil
+    if ok and self.session.ledger_pass == pass then
+      pass.item = math.max(pass.item, math.min(to, #self.session.items))
+      pass.tasks = math.max(0, pass.tasks - tasks)
+    end
+  end)
+  if not started then
+    self.ledger_capturing = nil
+  end
+  return started and true or false
 end
 
 return Controller

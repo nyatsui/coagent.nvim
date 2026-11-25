@@ -24,11 +24,13 @@ local function kind(req)
   return 'agent'
 end
 
-local function build(root, cfg)
+local function build(root, cfg, auto_replies)
+  local autos = 0
   local backend = Mock.new(function(_, _, req)
     local k = kind(req)
     if k == 'auto' then
-      return { content = CAPTURE }
+      autos = autos + 1
+      return { content = auto_replies and auto_replies[autos] or CAPTURE }
     elseif k == 'update' then
       return { content = '{"subtask": {"title": "talk"}}' }
     elseif k == 'summary' then
@@ -140,6 +142,29 @@ describe('ledger in the background', function()
     -- the same decision is not added twice
     local _, n = l:read('decisions'):gsub('Use focal loss for the rare classes', '')
     assert.are.equal(1, n)
+  end)
+
+  it('a failed pass leaves its conversation for the next one', function()
+    local root = h.workspace({ ['a.txt'] = 'x\n' }, { git = true })
+    local r = build(root, { ledger = { auto_create = true, auto_capture = 1 } }, { 'not json' })
+    task(r, 'first question about focal loss')
+    assert.are.equal(1, count(r, 'auto'))
+    assert.is_truthy(notices(r.c):find('the reply was not JSON', 1, true))
+    assert.are.equal(0, r.c.session.ledger_pass.item)
+    task(r, 'second question about mixup')
+    assert.are.equal(2, count(r, 'auto'))
+    local last
+    for _, q in ipairs(r.backend.requests) do
+      if kind(q) == 'auto' then
+        last = q
+      end
+    end
+    -- the failed pass's conversation is read again
+    assert.is_truthy(last.messages[1].content:find('first question about focal loss', 1, true))
+    assert.is_truthy(r.c.ledger:read('decisions'):find('Use focal loss for the rare classes', 1, true))
+    -- this pass succeeded: done up to where it started (its notices come after)
+    assert.truthy(r.c.session.ledger_pass.item > 0)
+    assert.are.equal(0, r.c.session.ledger_pass.tasks)
   end)
 
   it('runs at /compact summary when there was a task since the previous pass', function()

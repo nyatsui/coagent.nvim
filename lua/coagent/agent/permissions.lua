@@ -184,7 +184,12 @@ function Permissions:_outside_secret(real, under)
   if real:find('/%.config/gh/') or real:match('/%.config/gh$') then
     return '.config/gh'
   end
-  local rel = under and (real == under and '.' or real:sub(#under + 2)) or real:sub(2)
+  local rel
+  if not under or under == '/' then
+    rel = real:sub(2)
+  else
+    rel = real == under and '.' or real:sub(#under + 2)
+  end
   for _, g in ipairs(self.config.auto.protected_globs or {}) do
     local ok, lp = pcall(vim.glob.to_lpeg, g)
     if ok and (lp:match(rel) or lp:match(vim.fs.basename(rel))) then

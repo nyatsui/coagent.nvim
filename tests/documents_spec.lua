@@ -249,6 +249,20 @@ describe('documents', function()
     end
   end)
 
+  it('xlsx sheets: a sheet without a heading does not hide the ones after it; a "## " line in a sheet is not one', function()
+    local lines = { '## Data', '| a |', '## Notes', '## Summary', '| b |', '## not a sheet', 'x' }
+    -- MarkItDown left out "Empty" (between Data and Notes)
+    local s = Documents.structure(lines, 'xlsx', { 'Data', 'Empty', 'Notes', 'Summary' })
+    assert.are.same({ { 'Data', 1, 2 }, { 'Notes', 3, 3 }, { 'Summary', 4, 7 } }, vim.tbl_map(function(x)
+      return { x.name, x.s, x.e }
+    end, s))
+    -- in workbook order only: an earlier name later in the text is content
+    s = Documents.structure({ '## B', '## A', 'x' }, 'xlsx', { 'A', 'B' })
+    assert.are.same({ 'B' }, vim.tbl_map(function(x)
+      return x.name
+    end, s))
+  end)
+
   it('@path and #file attach the converted Markdown, marked as read-only untrusted data', function()
     local clean, atts, errors = resolve('summarize @docs/deck.pptx and #file:docs/book.xlsx')
     assert.are.same({}, errors)

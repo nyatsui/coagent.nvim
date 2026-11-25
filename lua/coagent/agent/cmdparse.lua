@@ -229,6 +229,9 @@ function M.allowed_roots(paths, root)
         norm = vim.fs.normalize(root .. '/' .. norm)
       end
       local real = (vim.uv.fs_realpath(norm) or norm):gsub('/+$', '')
+      if real == '' then
+        real = '/'
+      end
       table.insert(out, real ~= '' and real or '/')
     end
   end
@@ -446,6 +449,9 @@ end
 -- model (held to a higher bar) instead of always asking, like Claude Code's
 -- auto mode, whose classifier decides downloads and installs.
 --- A program name as its own word (not `data.nc`, `--nc`, `sync_ssh.py`).
+-- redirect targets that write no file
+local DISCARD = { ['/dev/null'] = true, ['/dev/stdout'] = true, ['/dev/stderr'] = true, ['/dev/tty'] = true }
+
 local function prog(word)
   return function(s)
     return own_word(s, word, true)
@@ -667,7 +673,7 @@ function M.inspect(cmd, cwd, ws, opts)
   local allowed = M.allowed_roots(vim.list_extend({ '/dev/null' }, vim.deepcopy(opts.allowed_paths or {})), ws and ws.root or cwd)
   local function is_allowed(real)
     for _, a in ipairs(allowed) do
-      if real == a or vim.startswith(real, a .. '/') then
+      if real == a or a == '/' or vim.startswith(real, a .. '/') then
         return true
       end
     end
@@ -762,11 +768,15 @@ function M.inspect(cmd, cwd, ws, opts)
             elseif info.exists and not info.is_dir and value ~= '.' then
               add('files', info.rel)
             end
+          elseif DISCARD[value] or DISCARD[info.real] or (info.real or ''):match('^/dev/fd/%d+$') then
+            -- output discarded or sent to the terminal: not a file write
+          elseif w.write and looks_like_path then
+            -- a write outside the workspace, judge.allowed_paths included
+            -- (those folders are for reading)
+            add('outside_paths', value)
+            add('outside_writes', value)
           elseif looks_like_path and not is_allowed(info.real) then
             add('outside_paths', value)
-            if w.write then
-              add('outside_writes', value)
-            end
           end
         end
       end

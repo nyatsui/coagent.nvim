@@ -203,6 +203,31 @@ describe('judge mode: hard rules (permissions)', function()
     assert.is_true(vim.tbl_contains(d.flagged, 'names a path outside the workspace'))
     d = p2:decide(exec, {}, cmd('python train.py > /etc/passwd'))
     assert.is_true(d.hard)
+    -- the folders are for reading: a write there is a write outside the workspace
+    for _, c in ipairs({
+      'python train.py > ' .. data .. '/log.txt',
+      'python train.py 2>&1 | tee ' .. data .. '/log.txt',
+      'cp runs/a.pt ' .. data .. '/',
+      'mv a.txt ' .. data .. '/a.txt',
+    }) do
+      d = p2:decide(exec, {}, cmd(c))
+      assert.is_true(d.hard, c)
+      assert.are.equal('judge mode: writes a path outside the workspace', d.reason, c)
+    end
+    -- discarded output is not a write
+    for _, c in ipairs({ 'python train.py > /dev/null 2>&1', 'python train.py 2>/dev/stderr', 'python train.py >/dev/stdout' }) do
+      d = p2:decide(exec, {}, cmd(c))
+      assert.is_true(d.judge, c)
+    end
+    -- '/' as an entry: every read reaches the judge unflagged, writes still ask, secrets still ask
+    local p5 = Permissions.new(vim.tbl_deep_extend('force', cfg, { judge = { allowed_paths = { '/' } } }), ws)
+    p5:set_mode('judge', true)
+    assert.are.same({}, p5:decide(exec, {}, cmd('cat /etc/hosts')).flagged)
+    assert.is_true(p5:decide(exec, {}, cmd('echo x > /etc/x')).hard)
+    local read = { kind = 'read', name = 'read_file' }
+    local secret = h.workspace({ ['.env'] = 'K=1', ['ok.txt'] = 'x' })
+    assert.are.equal('ask', p5:decide(read, {}, { path = ws:check(secret .. '/.env') }).action)
+    assert.are.equal('allow', p5:decide(read, {}, { path = ws:check(secret .. '/ok.txt') }).action)
   end)
 
   it('judge.allowed_paths: read tools read there without asking, never its secrets; other outside reads ask', function()

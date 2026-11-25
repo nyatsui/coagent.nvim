@@ -705,7 +705,9 @@ def cmd_topng(args):
                 "%s needs LibreOffice (soffice) to become PNG%s" % (ext.upper(), "" if Image else "; Pillow is not installed either"),
                 "missing_soffice",
             )
-        work = tempfile.mkdtemp(prefix="png-", dir=os.path.dirname(os.path.abspath(dst)))
+        # in the working directory (coagent runs the helper in a private
+        # temporary one and deletes it, even after a kill), not next to dst
+        work = tempfile.mkdtemp(prefix="png-", dir=os.getcwd())
         try:
             outdir = os.path.join(work, "out")
             os.makedirs(outdir, mode=0o700)

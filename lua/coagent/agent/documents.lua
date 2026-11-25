@@ -416,10 +416,21 @@ function M.structure(lines, fmt, sheets)
     local idx = 1
     for i, l in ipairs(lines) do
       local name = l:match('^##%s+(.-)%s*$')
-      if name and (not want or name == vim.trim(want[idx] or '')) then
+      local at = nil
+      if name and want then
+        -- in workbook order; a sheet without a heading (MarkItDown may
+        -- leave an empty one out) does not hide the ones after it
+        for j = idx, #want do
+          if name == vim.trim(want[j] or '') then
+            at = j
+            break
+          end
+        end
+      end
+      if name and (not want or at) then
         close(i)
         table.insert(out, { kind = 'sheet', name = name, s = i })
-        idx = idx + 1
+        idx = (at or idx) + 1
       end
     end
   end
