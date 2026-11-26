@@ -603,6 +603,9 @@ local function track_write(ctx, prepared, content)
   end
 end
 
+-- shared with the LSP edit tools (tools/lsp_edit.lua)
+M.writable, M.preview, M.commit, M.track_write, M.is_binary = writable, preview, commit, track_write, is_binary
+
 ------------------------------------------------------------------------------
 -- write_file
 ------------------------------------------------------------------------------

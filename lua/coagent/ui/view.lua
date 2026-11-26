@@ -642,7 +642,7 @@ function View:diff(item)
   local c = self.c
   if item and item.type == 'tool' and item.preview and item.preview.diff then
     local p = c:pending()
-    if p and p.item == item then
+    if p and p.item == item and not p.prepared.files then
       diffview.side_by_side(item.preview.path, p.prepared.old, { text = p.prepared.new })
       return
     end
@@ -701,6 +701,12 @@ function View:review()
   local p = c:pending()
   if not p or p.item.kind ~= 'write' then
     vim.notify('[coagent] no pending file change to review', vim.log.levels.INFO)
+    return
+  end
+  if p.prepared.files then
+    -- one change across files (LSP rename / code action): approved as a whole
+    diffview.unified(p.item.preview.path, p.prepared.diff, nil, c.source and c.source.winnr)
+    vim.notify('[coagent] a change across ' .. #p.prepared.files .. ' file(s): approve or deny it as a whole in the panel', vim.log.levels.INFO)
     return
   end
   return diffview.review(p.prepared, function(decision)

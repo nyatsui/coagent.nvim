@@ -320,6 +320,32 @@ function Permissions:decide(tool, args, prepared)
     return decision('deny', 'read-only mode: ' .. tool.kind .. ' tools are disabled')
   end
 
+  if tool.kind == 'write' and prepared.files then
+    -- one change across files (LSP rename / code action): every file counts
+    local reals, warnings = {}, {}
+    local all_writable = true
+    for _, f in ipairs(prepared.files) do
+      table.insert(reals, f.path.real)
+      if f.path.protected then
+        table.insert(warnings, 'protected path: ' .. f.path.protected)
+        return decision('ask', 'modifies a protected file (' .. f.path.rel .. ')', { warnings = warnings, hard = true })
+      end
+      all_writable = all_writable and f.path.writable == true
+    end
+    table.sort(reals)
+    local key = 'write:' .. table.concat(reals, '|')
+    if self.grants[key] then
+      return decision('allow', 'previously approved for these files')
+    end
+    if mode == 'auto' or mode == 'judge' then
+      if all_writable then
+        return decision('allow', mode .. ' mode: workspace files')
+      end
+      return decision('ask', 'outside writable_globs', { warnings = warnings, grant_key = key, can_always = true, hard = true })
+    end
+    return decision('ask', #prepared.files == 1 and 'file change' or ('change of ' .. #prepared.files .. ' files'), { warnings = warnings, grant_key = key, can_always = true })
+  end
+
   if tool.kind == 'write' then
     local p = prepared.path
     local key = 'write:' .. (p and p.real or '?')

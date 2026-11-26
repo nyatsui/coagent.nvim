@@ -9,9 +9,10 @@ local util = require('coagent.core.util')
 
 local M = {}
 
-local function opts(ctx)
+function M.opts(ctx)
   return vim.tbl_extend('force', { attach_timeout_ms = 4000, request_timeout_ms = 10000, max_results = 100 }, ctx.config.lsp or {})
 end
+local opts = M.opts
 
 --- Load a file into a buffer without displaying it.
 ---@return integer
@@ -31,7 +32,7 @@ local ensure_buf = M.ensure_buf
 
 --- Wait until a client supporting `method` is attached.
 ---@return vim.lsp.Client[]? clients, string? err
-local function wait_clients(buf, method, timeout)
+function M.wait_clients(buf, method, timeout)
   local deadline = util.now() + timeout
   while true do
     async.main()
@@ -52,9 +53,10 @@ local function wait_clients(buf, method, timeout)
     async.sleep(100)
   end
 end
+local wait_clients = M.wait_clients
 
 --- buf_request_all with a timeout, as a coroutine-friendly call.
-local request_all = async.wrap(function(buf, method, params, timeout, cb)
+M.request_all = async.wrap(function(buf, method, params, timeout, cb)
   local done = false
   local cancel
   local timer = vim.uv.new_timer()
@@ -82,6 +84,7 @@ local request_all = async.wrap(function(buf, method, params, timeout, cb)
     cb(results)
   end)
 end, 5)
+local request_all = M.request_all
 
 --- Lines of a file, from a loaded buffer when possible.
 local function file_lines(fname, cache)
@@ -101,7 +104,7 @@ end
 
 --- Resolve the requested position: {line, column} or the first occurrence of `symbol`.
 ---@return integer? row0, integer? byte_col0, string? err
-local function position(buf, args)
+function M.position(buf, args)
   local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
   local line = tonumber(args.line)
   local sym = args.symbol
@@ -150,8 +153,9 @@ local function position(buf, args)
   end
   return line - 1, col - 1
 end
+local position = M.position
 
-local function position_params(buf, row, col)
+function M.position_params(buf, row, col)
   local text = vim.api.nvim_buf_get_lines(buf, row, row + 1, false)[1] or ''
   return function(client)
     local enc = client.offset_encoding or 'utf-16'
@@ -162,6 +166,7 @@ local function position_params(buf, row, col)
     }
   end
 end
+local position_params = M.position_params
 
 --- Format LSP locations as "path:line:col  source" lines.
 local function format_locations(ctx, results, limit)
@@ -219,7 +224,7 @@ local function errors_of(results)
   return errs
 end
 
-local function file_prepare(args, ctx)
+function M.file_prepare(args, ctx)
   if not args.path or args.path == '' then
     return nil, 'path is required'
   end
@@ -229,6 +234,7 @@ local function file_prepare(args, ctx)
   end
   return { path = info }
 end
+local file_prepare = M.file_prepare
 
 --- Shared implementation of position-based requests.
 local function positional(method, label)
@@ -353,6 +359,8 @@ M.lsp_hover = {
     return { ok = true, output = out, summary = #util.lines(out) .. ' lines' }
   end,
 }
+
+M.POSITION_PROPS = POSITION_PROPS
 
 local STRUCTURAL = {
   Module = true, Namespace = true, Package = false, Class = true, Method = true, Property = true, Field = true,

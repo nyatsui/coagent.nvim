@@ -1352,7 +1352,7 @@ function Controller:_count_read(role, text)
   end
 end
 
-local READS = { read_file = true, recall_output = true }
+local READS = { read_file = true, read_symbol = true, recall_output = true }
 
 --- roles.lead_reads: nil when the lead may read this, else why not.
 function Controller:_lead_read_check(tool, args, prepared)
@@ -1364,17 +1364,19 @@ function Controller:_lead_read_check(tool, args, prepared)
   end
   local o = self:roles().lead_reads
   local Seen = require('coagent.tools.seen')
-  local text = tool.name == 'read_file' and (util.read_file(prepared.path.real) or '') or (prepared.text or '')
+  local file = tool.name == 'read_file' or tool.name == 'read_symbol'
+  local text = file and (util.read_file(prepared.path.real) or '') or (prepared.text or '')
   local total = Seen.line_count(text)
-  local s = math.max(1, tonumber(args.start_line) or 1)
-  local e = math.min(total, tonumber(args.end_line) or total)
+  -- read_symbol: the definition's lines
+  local s = math.max(1, tonumber(prepared.start_line or args.start_line) or 1)
+  local e = math.min(total, tonumber(prepared.end_line or args.end_line) or total)
   local n = math.max(0, e - s + 1)
   local over = (self.task.lead_read_bytes or 0) >= o.budget_bytes
   local cap = over and o.verify_lines or o.max_lines
   if n <= cap then
     return nil
   end
-  local what = tool.name == 'read_file' and prepared.path.rel or ('output ' .. tostring(args.id))
+  local what = file and prepared.path.rel or ('output ' .. tostring(args.id))
   return string.format('LEAD READ LIMIT: this would read %d lines of %s (%d lines in total); you read at most %d lines per call%s. '
     .. 'Read a narrower range (start_line / end_line) around what you decide on or verify, or let `explore` / `worker` find '
     .. 'and summarize it (their reports quote the lines with path:line).',
@@ -3478,7 +3480,11 @@ function Controller:_execute(gen, tc)
   if prepared.preview_text then
     item.preview = { text = prepared.preview_text }
   elseif tool.kind == 'write' then
-    item.preview = { diff = prepared.diff, added = prepared.added, removed = prepared.removed, path = prepared.path.rel, abs = prepared.path.real, op = prepared.op, hunks = prepared.hunks }
+    item.preview = { diff = prepared.diff, added = prepared.added, removed = prepared.removed, path = prepared.label or prepared.path.rel,
+      abs = not prepared.files and prepared.path.real or nil, op = prepared.op, hunks = prepared.hunks,
+      files = prepared.files and vim.tbl_map(function(f)
+        return f.path.rel
+      end, prepared.files) or nil }
   elseif tool.kind == 'exec' then
     item.preview = { command = prepared.command, cwd = prepared.cwd_rel, timeout_ms = prepared.timeout_ms, terminal = prepared.terminal and prepared.terminal.label or nil }
   end
@@ -3509,6 +3515,15 @@ function Controller:_execute(gen, tc)
   -- (not for files imported by /receive: the user reviews those)
   if tool.kind == 'write' and not reviewed_here and not self.task.importing then
     local rel = prepared.path and prepared.path.rel
+    if prepared.files then
+      -- a change across files: the first critical one decides
+      for _, f in ipairs(prepared.files) do
+        if self:_critical(f.path.rel) then
+          rel = f.path.rel
+          break
+        end
+      end
+    end
     local kind, glob
     if self:_checkpoint_on('EVERY_EDIT') then
       kind = 'EVERY_EDIT'

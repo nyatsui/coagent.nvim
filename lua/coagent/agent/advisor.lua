@@ -31,7 +31,7 @@ Answer in exactly one of these forms:
 -- read-only tools the advisor may call to verify a brief
 M.TOOLS = {
   read_file = true, search = true, glob = true, list_dir = true,
-  lsp_definition = true, lsp_references = true, lsp_symbols = true, lsp_hover = true,
+  lsp_definition = true, lsp_references = true, lsp_symbols = true, lsp_hover = true, lsp_code_actions = true, read_symbol = true,
   diagnostics = true, git_diff = true, git_status = true, experiments = true,
 }
 

@@ -785,6 +785,28 @@ is closed. The wait is woken by |DiagnosticChanged| and yields the task
 coroutine, so the UI never blocks. Buffers are never modified; files with
 unsaved buffer edits are refused before the write, as always.
 
+                                                       *coagent-lsp-edits*
+Edits by the language server: `lsp_rename` (path, symbol or line/column,
+new_name) renames a symbol everywhere; `lsp_code_actions` (path, line,
+end_line, kind) lists a range's quick fixes / refactorings / source actions
+(read-only) and `lsp_code_action` (the same plus the exact title) applies
+one. The server computes the change; coagent applies it like edit_file:
+one approval for the whole change (its combined diff; a change across files
+is approved or denied as a whole), the same checks for every file (inside
+the workspace, protected files ask, unsaved buffers refuse, a buffer that
+differs from its file refuses), each file recorded for |:CoagentChanges|
+and /rewind, diagnostics after the edit for up to 10 files. A file failing
+a check changes nothing. Changes that create, rename or delete files, and
+code actions that only run a server command, are refused.
+
+                                                       *coagent-read-symbol*
+`read_symbol` (path, symbol, line) reads one definition by name ("M.setup",
+"Parser.parse"; line picks one of several) with the comments and decorators
+right above it, located with treesitter when a parser is installed, else
+with the language server's document symbols. The output is read_file's
+(numbered lines, recorded as read for edit_file); under the lead preset it
+counts against roles.lead_reads like read_file.
+
                                                      *coagent-templates*
 Prompt templates run as /name [text] (or :CoagentPrompt name [text]). The
 template text is put before yours, and #selection (started from visual

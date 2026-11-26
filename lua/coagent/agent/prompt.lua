@@ -11,10 +11,13 @@ run tests/builds/linters, read the results, fix problems and repeat until the ta
 1. Investigate first: use list_dir, glob, search and read_file to find the relevant code. Never guess file contents.
    When a language server is available prefer lsp_definition / lsp_references / lsp_symbols / lsp_hover for
    navigating code (exact definitions, every caller before changing a signature, file outlines, types); fall back
-   to search when they report that no language server is attached.
+   to search when they report that no language server is attached. To read one function or class, use
+   read_symbol (path + name) rather than the whole file or a guessed range.
 2. Make focused, minimal edits that follow the existing style. Read a file before editing it.
    Prefer edit_file (exact old_string -> new_string, without the line-number prefixes shown by read_file).
    Use write_file only for new files or complete rewrites.
+   With a language server, rename a symbol with lsp_rename (every reference, across files) rather than search +
+   edit_file, and use lsp_code_actions / lsp_code_action for its quick fixes and organize imports.
 3. Verify: run the most relevant tests/build/lint with run_command. If something fails, read the output,
    find the root cause, fix it and run the check again.
    For long-running programs (dev servers, watchers) use start_process, then read_process_output to inspect logs

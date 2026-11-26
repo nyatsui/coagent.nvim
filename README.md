@@ -1396,7 +1396,7 @@ terminal = {
 
 | Kind | Tools | Approval (supervised) |
 |---|---|---|
-| Investigation | `list_dir`, `glob`, `search`, `read_file`, `git_status`, `git_diff`, `diagnostics` | No |
+| Investigation | `list_dir`, `glob`, `search`, `read_file`, `read_symbol` (one function / class by name), `git_status`, `git_diff`, `diagnostics` | No |
 | Documents | `read_document` (PDF / Office files as converted Markdown), `read_images` with `document` + `pages` (pages / slides as pictures with their text, read in a separate request); offered only with `documents.enabled` | No |
 | Skills | `use_skill` (loads a skill's instructions; offered only when skills exist) | No |
 | Experiments | `experiments` (the local experiment log: table, details, comparison) | No |
@@ -1405,8 +1405,8 @@ terminal = {
 | Step list | `todo` (the agent's steps for a multi-step request; see "Step list (todo)") | No |
 | Saved outputs | `recall_output` (read back a tool output that was cut or shortened: a range, or the lines matching a query; see "Context length") | No |
 | Delegation | `delegate` (bundle a heavy subtask for another chat; the task waits for `/receive`) | **Always**, also in auto mode |
-| Language server | `lsp_definition`, `lsp_references`, `lsp_symbols` (outline / symbol search), `lsp_hover` (types / docs) | No |
-| Editing | `edit_file`, `write_file`, `delete_file` | Yes (with diff) |
+| Language server | `lsp_definition`, `lsp_references`, `lsp_symbols` (outline / symbol search), `lsp_hover` (types / docs), `lsp_code_actions` (list the quick fixes / refactorings / source actions of a range) | No |
+| Editing | `edit_file`, `write_file`, `delete_file`, `lsp_rename` (rename a symbol everywhere), `lsp_code_action` (apply one code action) | Yes (with diff) |
 | Commands | `run_command` (commands that exit; in your attached terminal when there is one, `on = "local"` keeps it here) | Yes |
 | Background | `start_process` (dev servers, long training / evaluation runs; `experiment = true` records a run) | Yes |
 | | `wait_process` (blocks until exit / a pattern / a monitoring checkpoint, no model requests while waiting), `read_process_output`, `list_processes`, `stop_process` (with a reason for runs) | No (only processes the agent started, or a run handed over with `/exp watch`) |
@@ -1427,6 +1427,18 @@ terminal = {
   that are not UTF-8, so their encoding is never changed by accident
 - LSP tools use the language servers configured in your Neovim (files not yet loaded are loaded invisibly and the server is
   awaited). Files without a server return an error and the model falls back to `search`
+- **Edits by the language server** (`lsp_rename`, `lsp_code_action`): the server computes the change and coagent applies
+  it like `edit_file` — one approval for the whole change (its combined diff over every file; `r` in the panel, `gr` in the input shows it, a change
+  across files is approved or denied as a whole), the same checks for every file (inside the workspace, protected
+  files ask, unsaved buffers refuse; a buffer that differs from its file refuses too, since the server computed the
+  edit on it), and each file goes into `/changes` and `/rewind`. A file that fails a check changes nothing at all.
+  The server never applies anything itself: changes that create, rename or delete files, and code actions that only
+  run a server command, are refused (they would change files outside the approvals)
+- **`read_symbol`** reads one definition by name (`Parser.parse`, `M.setup`; `line` picks one of several), with the
+  comments and decorators right above it: fewer tokens than the whole file and no guessed range. treesitter finds it
+  when a parser for the file is installed, else the language server's document symbols. The output is that of
+  `read_file` (numbered lines, recorded as read, so `edit_file` can follow); under the lead preset it counts against
+  the lead's read limits like `read_file`
 - Background processes keep running after the task ends (winbar: `N bg`). They stop with `<C-c>`, a new session, or when
   Neovim exits. At most 3 at a time; non-experiment processes live at most 2 hours (`background` settings). Monitored
   experiment runs have no lifetime cap: the agent decides from the training log when to stop them (see "Experiment log")

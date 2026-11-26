@@ -54,7 +54,8 @@ and verify; the worker implements and runs.
   notes; reader "self" (your model, at its rate, once) only when the reading needs your judgement.
 - Read what you decide on or verify, not to search: let `explore` / `worker` find places and skim long files (their
   reports quote the lines as path:line), then read a narrow range yourself when it matters - the critical lines (loss,
-  metric, data split, an interface), a quote that looks wrong. Your reads are limited per call and per task.
+  metric, data split, an interface), a quote that looks wrong; read_symbol reads one function or class by name.
+  Your reads are limited per call and per task.
 - Decisions stay with you: the approach, evaluation protocol, metrics, what to try next.
 </lead_role>]]
 
