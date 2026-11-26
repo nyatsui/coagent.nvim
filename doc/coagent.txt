@@ -599,6 +599,12 @@ context; the lead may pass `continue_previous = true` to let the previous
 worker go on with what it read and ran (a follow-up on the same files),
 up to `roles.worker.max_continue_tokens` (30000) of its context. After a
 critic's points the lead is told when the last worker can go on.
+With `roles.worker_strong_model` set, coagent (not the lead) hands an
+assignment to that stronger worker after `roles.worker_strong.after_failures`
+(2) failed assignments in a row (no report, step limit, a failed last
+command, or a `corrects_previous` correction), after the critic's points
+(`after_critic`, true), or when the lead asks with `strong: true`
+(`lead_requests`, 1 per task); a success goes back to the cheap worker.
 Facts are looked up in the code; only what you alone can decide goes under
 Questions, with the recommended answer (answer by typing feedback). The plan
 is shown as a plan item; the winbar shows "plan ready" and an "approval" notification is sent

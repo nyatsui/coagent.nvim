@@ -226,6 +226,9 @@ function M.resolve(config, session, builder_model)
     lead_wanted = p.lead == true,
     lead_model = lead_model,
     worker_model = r.worker_model or builder_model,
+    -- a stronger worker for failed or hard assignments (nil: none)
+    worker_strong_model = (p.lead and r.worker_strong_model and r.worker_strong_model ~= (r.worker_model or builder_model)) and r.worker_strong_model or nil,
+    worker_strong = vim.tbl_extend('force', { after_failures = 2, after_critic = true, lead_requests = 1 }, r.worker_strong or {}),
     worker_opts = vim.tbl_extend('force', { max_steps = 30, max_report_bytes = 6000, max_diff_bytes = 12000, max_continue_tokens = 30000 }, r.worker or {}),
     lead_reads = vim.tbl_extend('force', { max_lines = 300, budget_bytes = 60 * 1024, verify_lines = 40 }, r.lead_reads or {}),
     lead_hands = r.lead_hands == true,

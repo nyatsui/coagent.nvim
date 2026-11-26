@@ -42,7 +42,7 @@ and verify; the worker implements and runs.
   Each assignment is self-contained: the worker sees only what you write, not this conversation.
 - Make each assignment DECISION COMPLETE: the worker chooses nothing - not the approach, names, interfaces,
   parameters or what to do on an edge case. Decide (or investigate) first; a worker left to guess costs a retry.
-{{HANDS}}
+{{HANDS}}{{STRONG}}
 - Never trust a report blindly: check the diff and the results coagent appends to it before you go on. Send a
   corrective assignment, or fix it yourself, when it is wrong.
 - A new assignment starts a new worker with an empty context, which re-reads what it needs. `continue_previous: true`
@@ -67,13 +67,100 @@ M.HANDS = {
     .. '  the worker run the checks: coagent appends the diff and the results to its report.',
 }
 
---- The lead's role text; `hands`: may it edit and run commands itself.
+-- roles.worker_strong_model is set
+M.STRONG = [[
+- A stronger worker (%s) takes the assignments the worker (%s) fails: coagent switches to it by itself after %s, and
+  goes back once one succeeds. When you send a correction because the previous assignment went wrong, mark it
+  `corrects_previous: true`. You may also ask for it yourself with `strong: true` and a `why`, %s per task:
+  keep it for the one piece that is clearly beyond the worker (subtle logic, a tricky refactor), not "to be safe".
+  When the stronger worker fails too, do not resend the same assignment: rethink it (decide more, split it) or
+  stop and tell the user what blocks it.]]
+
+--- The lead's role text; `hands`: may it edit and run commands itself;
+--- `roles`: the resolved roles (the stronger worker, when there is one).
 ---@param hands boolean?
+---@param roles table?
 ---@return string
-function M.lead_prompt(hands)
+function M.lead_prompt(hands, roles)
+  local strong = ''
+  if roles and roles.worker_strong_model then
+    local o = roles.worker_strong
+    local after = {}
+    if (tonumber(o.after_failures) or 0) > 0 then
+      table.insert(after, string.format('%d failed assignment%s in a row', o.after_failures, o.after_failures == 1 and '' or 's'))
+    end
+    if o.after_critic then
+      table.insert(after, 'the critic\'s points')
+    end
+    local n = math.max(0, tonumber(o.lead_requests) or 0)
+    strong = '\n' .. string.format(vim.trim(M.STRONG), roles.worker_strong_model, roles.worker_model,
+      #after > 0 and table.concat(after, ' and after ') or 'nothing (only on your request)',
+      n == 0 and 'never (it is off)' or (n == 1 and 'once' or (n .. ' times')))
+  end
   return (M.LEAD:gsub('{{HANDS}}', function()
     return hands and M.HANDS.on or M.HANDS.off
+  end):gsub('{{STRONG}}', function()
+    return strong
   end))
+end
+
+--- Which model the next assignment runs on: the stronger worker after
+--- failures, after the critic's points, or on the lead's request (within
+--- roles.worker_strong.lead_requests); else roles.worker_model.
+---@return string model, string? why (stronger worker), string? note (for the lead)
+function M.pick_model(ctrl, args)
+  local roles = ctrl:roles()
+  local strong, o = roles.worker_strong_model, roles.worker_strong
+  local t = ctrl.task or {}
+  if args.corrects_previous == true and t.worker_last_ok then
+    -- the lead found the previous assignment wrong: it failed, in a row with
+    -- the failures before it
+    t.worker_last_ok = nil
+    t.worker_fails = (t.worker_fails_before or 0) + 1
+  end
+  if not strong then
+    if args.strong == true then
+      return roles.worker_model, nil, 'no stronger worker is set up (roles.worker_strong_model): this ran on ' .. roles.worker_model
+    end
+    return roles.worker_model
+  end
+  local after = tonumber(o.after_failures) or 0
+  if t.worker_after_critic then
+    return strong, 'after the critic\'s points'
+  elseif after > 0 and (t.worker_fails or 0) >= after then
+    return strong, string.format('after %d failed assignment%s in a row', t.worker_fails, t.worker_fails == 1 and '' or 's')
+  elseif args.strong == true then
+    local limit = math.max(0, tonumber(o.lead_requests) or 0)
+    if (t.worker_strong_asked or 0) < limit then
+      t.worker_strong_asked = (t.worker_strong_asked or 0) + 1
+      local why = type(args.why) == 'string' and vim.trim(args.why) ~= '' and util.ellipsize((vim.trim(args.why):gsub('%s+', ' ')), 100) or nil
+      return strong, 'your request' .. (why and (' (' .. why .. ')') or '')
+    end
+    return roles.worker_model, nil, string.format('strong: true not granted (your %d request%s per task %s used): this ran on %s',
+      limit, limit == 1 and '' or 's', limit == 1 and 'is' or 'are', roles.worker_model)
+  end
+  return roles.worker_model
+end
+
+--- Record how an assignment went: a failure counts toward the stronger
+--- worker, a success goes back to roles.worker_model.
+local function record(ctrl, model, ok)
+  local t = ctrl.task
+  if not t then
+    return
+  end
+  if ok then
+    t.worker_fails_before = t.worker_fails or 0
+    t.worker_fails, t.worker_after_critic = 0, nil
+  else
+    t.worker_fails = (t.worker_fails or 0) + 1
+    t.worker_fails_before = nil
+  end
+  t.worker_last_ok = ok or nil
+  local roles = ctrl:roles()
+  if roles.worker_strong_model and model == roles.worker_strong_model then
+    t.worker_strong_runs = (t.worker_strong_runs or 0) + 1
+  end
 end
 
 -- tools a worker does not get (no nesting, no lead-level orchestration)
@@ -319,7 +406,7 @@ end
 function M.run(ctrl, gen, args, item)
   local roles = ctrl:roles()
   local opts = roles.worker_opts
-  local model = roles.worker_model
+  local model, strong_why, pick_note = M.pick_model(ctrl, args)
   item.model = model
   local mode = ctrl.permissions:effective_mode()
   local system = require('coagent.agent.prompt').build({
@@ -398,6 +485,7 @@ function M.run(ctrl, gen, args, item)
   local tools = tools_for(ctrl)
   local before = ctrl:_snapshot_files()
   local actions, report, steps, stopped, ended = {}, nil, 0, nil, nil
+  local hit_limit, cmd_failed = false, false -- for the stronger worker: how it went
   local last_input
   local prev, prev_notes = ctrl.worker_item, ctrl.worker_notes
   ctrl.worker_item = item.id
@@ -415,6 +503,7 @@ function M.run(ctrl, gen, args, item)
       break
     end
     if last then
+      hit_limit = true
       table.insert(messages, { role = 'user', content = 'Step limit for this assignment reached. Report now without calling tools: what is done, what is not.' })
     end
     local res, err = ctrl.backend:ask({
@@ -459,6 +548,9 @@ function M.run(ctrl, gen, args, item)
         end
         content = out.content
         local it = out.item or {}
+        if it.kind == 'exec' and (it.status == 'done' or it.status == 'failed') then
+          cmd_failed = it.status == 'failed' -- the last command it ran
+        end
         table.insert(actions, string.format('- %s %s%s', STATUS[it.status] or '·', tostring(it.title or tc.name),
           (it.summary and it.summary ~= '') and (' — ' .. util.ellipsize((tostring(it.summary):gsub('\n', ' ')), 120)) or ''))
         if out.stop then
@@ -489,6 +581,13 @@ function M.run(ctrl, gen, args, item)
     end
   end
   local how = continued and 'continued the previous worker' or (fresh_why and ('a new worker: ' .. fresh_why) or nil)
+  if strong_why then
+    how = 'the stronger worker, ' .. strong_why .. (how and ('; ' .. how) or '')
+  end
+  local failed = report == nil or ended ~= nil or hit_limit or cmd_failed
+  if not stopped then
+    record(ctrl, model, not failed)
+  end
   local out = {
     string.format('Worker report (%s, %d step%s%s%s):', model, steps, steps == 1 and '' or 's', how and ('; ' .. how) or '', ended and ('; ' .. ended) or ''),
     report and vim.trim(report) ~= '' and util.clip(vim.trim(report), opts.max_report_bytes) or '(no report)',
@@ -522,6 +621,20 @@ function M.run(ctrl, gen, args, item)
   if t and t.last_worker then
     table.insert(out, string.format('\nWorker context: ~%d tokens (the files it read, its runs). continue_previous: true on the next '
       .. 'assignment keeps it (up to %d tokens); a new worker starts empty and re-reads what it needs.', size, M.max_continue(opts)))
+  end
+  if pick_note then
+    table.insert(out, '\nNote: ' .. pick_note .. '.')
+  end
+  if failed and not stopped and roles.worker_strong_model then
+    local why = report == nil and 'no report' or (ended or (hit_limit and 'it hit its step limit') or 'its last command failed')
+    if model == roles.worker_strong_model then
+      table.insert(out, '\nThe stronger worker did not finish this cleanly (' .. why .. '). Do not resend it as it is: rethink the assignment '
+        .. '(decide more, split it) or stop and tell the user what blocks it.')
+    else
+      local after = tonumber(roles.worker_strong.after_failures) or 0
+      table.insert(out, string.format('\ncoagent counts this assignment as failed (%s)%s.', why,
+        (after > 0 and ((ctrl.task or {}).worker_fails or 0) >= after) and ('; the next one runs on the stronger worker ' .. roles.worker_strong_model) or ''))
+    end
   end
   table.insert(out, '\nVerify before going on (the diff above, read_file / git_diff, test output).')
   local summary = string.format('%d action%s, %d file%s', #actions, #actions == 1 and '' or 's', #files, #files == 1 and '' or 's')
@@ -558,6 +671,17 @@ M.tool = {
           .. 'context" in its report). For a follow-up or correction on the same files right after it, when its context is '
           .. 'small. Leave it out for unrelated work or a large context (every step re-sends all of it).',
       },
+      corrects_previous = {
+        type = 'boolean',
+        description = 'true: this assignment corrects the previous one, which went wrong (coagent counts that one as failed; '
+          .. 'with a stronger worker set up, failures in a row switch to it).',
+      },
+      strong = {
+        type = 'boolean',
+        description = 'true: run this on the stronger worker, when one is set up (a limited number per task, see your role). '
+          .. 'Only for the piece clearly beyond the worker; give the reason in `why`.',
+      },
+      why = { type = 'string', description = 'With strong: why this piece needs the stronger worker.' },
     },
   },
   title = function(args)

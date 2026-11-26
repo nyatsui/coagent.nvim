@@ -2016,6 +2016,19 @@ model does the legwork.
   the lead checks the diff and results coagent appends to the report. Each of the lead's own steps re-sends its whole
   context at the lead model's rate, so this is where most of the saving comes from. `roles.lead_hands = true` lets the
   lead do small steps itself again
+- **A stronger worker for what the cheap one fails** (`roles.worker_strong_model`, default `nil` = none): coagent, not
+  the lead, decides when an assignment goes to it (left to choose, a lead sends most of the work there). Tune it with
+  `roles.worker_strong`:
+  - `after_failures` (2): after this many failed assignments in a row the next one runs on it. Failed: the worker ended
+    without a report or at its step limit, its last command failed, or the lead marked the next assignment
+    `corrects_previous: true`
+  - `after_critic` (`true`): after the `critic` final check's points the next assignment runs on it, since a cheap worker
+    repeating a mistake costs another round with the critic
+  - `lead_requests` (1): how many times per task the lead may ask for it (`strong: true` with a `why`); past that the
+    assignment runs on the cheap worker and the report says so
+  - An assignment that succeeds goes back to the cheap worker. The stronger worker starts with an empty context. When it
+    fails too, the lead is told not to resend the assignment but to rethink it or stop and tell you (it does not get
+    edit or command tools)
 - **The worker** gets the normal tools (read, edit, commands, experiments). Every action goes through the same pipeline
   as the lead's: permission mode, approvals (including `d` with a reason, and `D` stopping the whole task), the judge,
   change tracking and `/rewind`, the read-before-edit rule, token budgets. In the timeline its actions show as

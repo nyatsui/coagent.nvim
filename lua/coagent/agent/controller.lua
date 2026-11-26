@@ -3032,6 +3032,7 @@ function Controller:_request(gen)
       monitor = require('coagent.agent.monitor').enabled(self.config) and require('coagent.agent.monitor').cfg(self.config) or nil,
       lead = self:roles().lead and not self.task.strong and not self.task.model_override,
       lead_hands = self:roles().lead_hands,
+      lead_roles = self:roles(),
       todo = not planning and require('coagent.agent.todo').enabled(self.config),
     })
     self.task.system_mode = key

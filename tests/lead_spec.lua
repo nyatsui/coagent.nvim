@@ -359,4 +359,130 @@ describe('lead / worker', function()
     assert.is_truthy(note:find('continue_previous: true (context ~3000 tokens)', 1, true), note)
     assert.are.equal('hi\nthere\n', h.read(root .. '/a.txt'))
   end)
+  describe('the stronger worker (roles.worker_strong_model)', function()
+    local STRONG = { roles = { worker_strong_model = 'sol' } }
+    local function worker_models(r)
+      local out = {}
+      for _, q in ipairs(r.backend.requests) do
+        if q.role == 'worker' and #q.messages == 1 then
+          table.insert(out, q.model) -- the first request of each assignment
+        end
+      end
+      return out
+    end
+
+    it('two failed assignments in a row switch to it; a success goes back to the worker model', function()
+      local reports = {}
+      local r = build(function(n, messages)
+        if n > 1 then
+          table.insert(reports, messages[#messages].content)
+        end
+        if n <= 4 then
+          return { tool_calls = { { name = 'worker', arguments = { task = 'Make the check pass (' .. n .. ').' } } } }
+        end
+        return { content = 'done' }
+      end, function(_, messages, req)
+        local first = #messages == 1
+        local text = messages[1].content
+        if first and (text:find('(1)', 1, true) or text:find('(2)', 1, true)) then
+          return { tool_calls = { { name = 'run_command', arguments = { command = 'ls no_such_file_here' } } } }
+        elseif first then
+          return { tool_calls = { { name = 'run_command', arguments = { command = 'ls a.txt' } } } }
+        end
+        return { content = 'report from ' .. req.model }
+      end, STRONG)
+      r.c:submit('go')
+      assert.are.equal('COMPLETED', wait_done(r).state)
+      assert.are.same({ 'mock-model', 'mock-model', 'sol', 'mock-model' }, worker_models(r))
+      assert.is_truthy(reports[1]:find('coagent counts this assignment as failed (its last command failed).', 1, true), reports[1])
+      assert.is_truthy(reports[2]:find('the next one runs on the stronger worker sol', 1, true), reports[2])
+      assert.is_truthy(reports[3]:find('Worker report (sol, 2 steps; the stronger worker, after 2 failed assignments in a row)', 1, true), reports[3])
+      assert.is_nil(reports[4]:find('stronger worker', 1, true), reports[4])
+      -- the lead is told how it works
+      local lead_req = r.backend.requests[1]
+      assert.is_truthy(lead_req.system_prompt:find('A stronger worker (sol) takes the assignments the worker (mock-model) fails', 1, true))
+      assert.is_truthy(lead_req.system_prompt:find('once per task', 1, true))
+    end)
+
+    it('the lead gets it on request once per task; corrects_previous counts the previous one as failed', function()
+      local reports = {}
+      local r = build(function(n, messages)
+        if n > 1 then
+          table.insert(reports, messages[#messages].content)
+        end
+        local args = ({
+          { task = 'hard part', strong = true, why = 'subtle locking' },
+          { task = 'another hard part', strong = true },
+          { task = 'fix it', corrects_previous = true },
+          { task = 'fix it again', corrects_previous = true },
+        })[n]
+        if args then
+          return { tool_calls = { { name = 'worker', arguments = args } } }
+        end
+        return { content = 'done' }
+      end, function(_, _, req)
+        return { content = 'ok from ' .. req.model }
+      end, STRONG)
+      r.c:submit('go')
+      assert.are.equal('COMPLETED', wait_done(r).state)
+      -- 1: granted; 2: refused (the one request is used); 3: one failure (2 corrected);
+      -- 4: two in a row (2 and 3 corrected) -> the stronger worker
+      assert.are.same({ 'sol', 'mock-model', 'mock-model', 'sol' }, worker_models(r))
+      assert.is_truthy(reports[1]:find('the stronger worker, your request (subtle locking)', 1, true), reports[1])
+      assert.is_truthy(reports[2]:find('strong: true not granted (your 1 request per task is used): this ran on mock-model.', 1, true), reports[2])
+    end)
+
+    it('after the critic\'s points the next assignment runs on it', function()
+      local note
+      local backend = Mock.new(function(messages, _, req)
+        if req.role == 'critic' then
+          return { content = '1. a.txt line 1 should also change.' }
+        end
+        if req.model == 'strong' then
+          local last = messages[#messages]
+          if last.role == 'user' and last.content:find('independent critic', 1, true) then
+            note = last.content
+            return { tool_calls = { { name = 'worker', arguments = { task = 'Fix line 1 as the critic said.', continue_previous = true } } } }
+          end
+          if #vim.tbl_filter(function(m)
+            return m.role == 'tool'
+          end, messages) == 0 then
+            return { tool_calls = { { name = 'worker', arguments = { task = 'Replace "world" with "there" in a.txt.' } } } }
+          end
+          return { content = 'Done: a.txt updated.' }
+        end
+        if #messages == 1 then
+          local old, new = 'world', 'there'
+          if messages[1].content:find('line 1', 1, true) then
+            old, new = 'hello', 'hi'
+          end
+          return { tool_calls = { { name = 'edit_file', arguments = { path = 'a.txt', old_string = old, new_string = new } } } }
+        end
+        return { content = 'edited by ' .. req.model }
+      end)
+      local c = agent.build({
+        config = h.config(root, { mode = 'auto', auto = { workspaces = { root } }, roles = { preset = 'lead', lead_model = 'strong', final_check = 'critic', critic_model = 'opus', worker_strong_model = 'sol' } }),
+        backend = backend,
+      })
+      local done
+      c.events:on('done', function(s)
+        done = s
+      end)
+      c:submit('fix a.txt')
+      h.wait(function()
+        return done ~= nil
+      end, 15000)
+      assert.are.equal('COMPLETED', done and done.state)
+      assert.is_truthy(note:find('Your next worker assignment runs on the stronger worker sol', 1, true), note)
+      assert.is_nil(note:find('continue_previous: true (context', 1, true), note)
+      local models = {}
+      for _, q in ipairs(backend.requests) do
+        if q.role == 'worker' and #q.messages == 1 then
+          table.insert(models, q.model)
+        end
+      end
+      assert.are.same({ 'mock-model', 'sol' }, models)
+      assert.are.equal('hi\nthere\n', h.read(root .. '/a.txt'))
+    end)
+  end)
 end)

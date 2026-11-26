@@ -288,7 +288,11 @@ local function critic(ctrl, gen, answer, roles)
   t.final_check_result = 'critic: revised after points from ' .. model
   local head = string.format('Advisor review by an independent critic (%s, it read your work but changed nothing):\n%s\n', model, text)
   local tokens = require('coagent.agent.worker').continuable(ctrl)
-  if tokens then
+  if roles.lead and roles.worker_strong_model and roles.worker_strong.after_critic and t.edit_seq then
+    -- a cheap worker that repeats a mistake costs another round with the critic
+    t.worker_after_critic = true
+    head = head .. string.format('Your next worker assignment runs on the stronger worker %s (after the critic\'s points); it starts with an empty context, so give it what it needs.\n', roles.worker_strong_model)
+  elseif tokens then
     -- the worker that wrote the changes still has them in context
     head = head .. string.format('The last worker can go on with its context for the fixes: worker with continue_previous: true (context ~%d tokens).\n', tokens)
   end

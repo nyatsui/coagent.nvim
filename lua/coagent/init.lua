@@ -2363,17 +2363,18 @@ end
 
 --- Pick a model. With a roles preset other than 'single' you first choose
 --- which role (builder / explorer / advisor) to configure.
----@param role 'builder'|'explorer'|'advisor'|'lead'|'strong'|'gate'|'critic'|nil
+---@param role 'builder'|'explorer'|'advisor'|'lead'|'worker_strong'|'strong'|'gate'|'critic'|nil
 function M.select_model(role)
   local c = M.controller()
   local roles = c:roles()
   local function current_of(r)
-    return ({ builder = roles.builder_model, explorer = roles.explorer_model, advisor = roles.advisor_model, lead = roles.lead_model, strong = roles.strong_model, gate = roles.gate_model, critic = roles.critic_model })[r]
+    return ({ builder = roles.builder_model, explorer = roles.explorer_model, advisor = roles.advisor_model, lead = roles.lead_model, worker_strong = roles.worker_strong_model, strong = roles.strong_model, gate = roles.gate_model, critic = roles.critic_model })[r]
   end
   if not role and (roles.preset ~= 'single' or roles.final_check ~= 'off') then
     local choices = { 'builder' }
     if roles.lead_wanted then
       table.insert(choices, 1, 'lead')
+      table.insert(choices, 'worker_strong') -- the stronger worker for failed / hard assignments
     end
     if roles.explorer then
       table.insert(choices, 'explorer')
@@ -2389,7 +2390,8 @@ function M.select_model(role)
     vim.ui.select(choices, {
       prompt = 'Model for which role?',
       format_item = function(r)
-        return string.format('%-9s %s', (r == 'builder' and roles.lead_wanted) and 'worker' or r, current_of(r) or '(not set)')
+        local name = (r == 'builder' and roles.lead_wanted) and 'worker' or (r == 'worker_strong' and 'strong worker' or r)
+        return string.format('%-14s %s', name, current_of(r) or '(not set)')
       end,
     }, function(r)
       if r then

@@ -27,6 +27,16 @@ local defaults = {
     -- with continue_previous (each step re-sends it; past this a new worker
     -- that re-reads a few files costs less).
     worker = { max_steps = 30, max_report_bytes = 6000, max_diff_bytes = 12000, max_continue_tokens = 30000 },
+    -- preset 'lead': a stronger worker for the assignments the cheap one fails
+    -- (nil = none; e.g. the lead's model). coagent picks it, the lead does not
+    -- choose freely: after `after_failures` failed assignments in a row (the
+    -- worker ended without a report or at its step limit, its last command
+    -- failed, or the lead marked the next one corrects_previous), after the
+    -- critic's points (after_critic), and at most `lead_requests` times per
+    -- task when the lead asks for it (strong: true). Back to worker_model
+    -- after an assignment that succeeds. It starts with an empty context.
+    worker_strong_model = nil,
+    worker_strong = { after_failures = 2, after_critic = true, lead_requests = 1 },
     -- preset 'lead': what the lead reads itself (read_file / recall_output).
     -- Finding things and skimming long files is the worker's / explorers' job;
     -- the lead reads what it decides on or verifies. max_lines per call;

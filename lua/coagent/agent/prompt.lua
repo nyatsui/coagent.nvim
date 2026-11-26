@@ -170,7 +170,7 @@ function M.build(opts)
   end
 
   if opts.lead then
-    table.insert(parts, vim.trim(require('coagent.agent.worker').lead_prompt(opts.lead_hands)))
+    table.insert(parts, vim.trim(require('coagent.agent.worker').lead_prompt(opts.lead_hands, opts.lead_roles)))
   end
 
   if opts.skills then
