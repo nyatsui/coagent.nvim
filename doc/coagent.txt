@@ -1448,7 +1448,10 @@ no output for `terminal.idle_ms`, you have not typed for
 The output between the markers is read from the terminal buffer
 ('scrollback' is raised while it runs, wrapped rows are rejoined), the exit
 code comes from the END marker, the echo and the markers are stripped and
-secrets masked. While it runs the terminal's winbar says "coagent running".
+secrets masked. While it runs the terminal window says "coagent running"
+in its winbar when one is shown, else in its status line: the window's
+height never changes (a resize reaches the program in the terminal, and
+kubectl exec through a proxy, for one, drops the connection on it).
 A timeout or <C-c> in the panel sends Ctrl-C. Typing into the terminal (or
 your own Ctrl-C) ends the capture: the agent is told it was interrupted.
 A prompt-like last line ("Password:", "[y/N]", "...?") with no output for

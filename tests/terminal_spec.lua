@@ -231,6 +231,49 @@ describe('terminal: run_command', function()
     assert.is_nil(term.inflight)
   end)
 
+  it('never changes the terminal window\'s height (a resize can drop kubectl exec): a bar already shown, else none', function()
+    setup()
+    local win = vim.fn.win_findbuf(buf)[1]
+    local saved_ls = vim.o.laststatus
+    local function during(cmd)
+      local res, seen
+      term:exec({ body = cmd, timeout_ms = 10000, label = 'sleepy' }, function(r)
+        res = r
+      end)
+      assert(h.wait(function()
+        return term.inflight and term.inflight.sent
+      end, 5000))
+      seen = { height = vim.api.nvim_win_get_height(win), winbar = vim.wo[win].winbar, statusline = vim.wo[win].statusline }
+      assert(h.wait(function()
+        return res ~= nil
+      end, 10000))
+      return seen
+    end
+    vim.wo[win].winbar = ''
+    vim.o.laststatus = 3
+    local h0 = vim.api.nvim_win_get_height(win)
+    local seen = during('sleep 0.4')
+    assert.are.equal(h0, seen.height)
+    assert.are.equal('', seen.winbar)
+    -- its own status line, when the window shows one
+    vim.o.laststatus = 2
+    h0 = vim.api.nvim_win_get_height(win)
+    seen = during('sleep 0.4')
+    assert.are.equal(h0, seen.height)
+    assert.are.equal('', seen.winbar)
+    assert.is_truthy(seen.statusline:find('coagent running: sleepy', 1, true), seen.statusline)
+    assert.are.equal('', vim.wo[win].statusline)
+    -- a winbar the window already has is reused
+    vim.wo[win].winbar = 'mine'
+    h0 = vim.api.nvim_win_get_height(win)
+    seen = during('sleep 0.4')
+    assert.are.equal(h0, seen.height)
+    assert.is_truthy(seen.winbar:find('coagent running: sleepy', 1, true))
+    assert.are.equal('mine', vim.wo[win].winbar)
+    vim.wo[win].winbar = ''
+    vim.o.laststatus = saved_ls
+  end)
+
   it('masks secrets in the output', function()
     setup()
     local r = call('run_command', { command = 'echo token=ghp_abcdefghijklmnopqrstuvwxyz0123456789' })

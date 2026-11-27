@@ -1360,7 +1360,10 @@ How commands run there:
   The output between the START and END markers is read from the terminal buffer ('scrollback' is raised while it runs;
   wrapped lines are rejoined), the exit code comes from the END marker, and the echoed command and markers are stripped.
   Secrets are masked as usual. The line starts with a space, so `HISTCONTROL=ignorespace` keeps it out of your history
-- While it runs, the terminal window's winbar says `coagent running: <command>`
+- While it runs, the terminal window says `coagent running: <command>` without changing the window's height (a resize
+  reaches the program in the terminal, and `kubectl exec` through a proxy, for one, drops the connection on it): in its
+  winbar when one is shown, else in its status line, else (`laststatus=3`) nowhere. For the same reason avoid splitting or
+  resizing that window while connected
 - A timeout (or `<C-c>` in the panel) sends Ctrl-C. Your own Ctrl-C in the terminal interrupts as usual, and anything you
   type into the terminal while a coagent command runs ends the capture: the agent is told it was interrupted. coagent never
   sends while you are typing

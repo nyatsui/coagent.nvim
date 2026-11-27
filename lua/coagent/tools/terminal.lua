@@ -422,6 +422,20 @@ function Term:_busy_reason()
   return nil
 end
 
+--- The bar of `win` that is on screen and can show text without changing
+--- the window's height: 'winbar' when it is shown, else its own status line.
+---@return 'winbar'|'statusline'|nil
+function M.shown_bar(win)
+  if vim.wo[win].winbar ~= '' then
+    return 'winbar'
+  end
+  local ls = vim.o.laststatus
+  if ls == 2 or (ls == 1 and #vim.api.nvim_tabpage_list_wins(vim.api.nvim_win_get_tabpage(win)) > 1) then
+    return 'statusline'
+  end
+  return nil
+end
+
 --- Run `spec.body` (one shell command line, no trailing newline) in the
 --- terminal and capture its output. `cb(res)` runs on the main loop.
 ---@param spec {body:string, timeout_ms:integer?, input_wait_ms:integer|false?, on_output:fun(chunk:string)?, label:string?, busy_wait_ms:integer?}
@@ -446,10 +460,10 @@ function Term:exec(spec, cb)
         vim.bo[self.buf].scrollback = saved_sb
       end)
     end
-    for win, bar in pairs(saved_bars) do
+    for win, saved in pairs(saved_bars) do
       if vim.api.nvim_win_is_valid(win) then
         pcall(function()
-          vim.wo[win].winbar = bar
+          vim.wo[win][saved.opt] = saved.value
         end)
       end
     end
@@ -480,12 +494,18 @@ function Term:exec(spec, cb)
   local function mark_windows()
     local text = '%#CoagentBarBusy# coagent running: ' .. util.ellipsize(f.label:gsub('%%', '%%%%'):gsub('\n', ' '), 80) .. ' %*'
     for _, win in ipairs(vim.fn.win_findbuf(self.buf)) do
-      if saved_bars[win] == nil then
-        saved_bars[win] = vim.wo[win].winbar
+      -- never change the window's height: a resize reaches the program in the
+      -- terminal (SIGWINCH), and some (kubectl exec through a proxy) drop the
+      -- connection on it. Use a bar the window already shows, else none.
+      local opt = M.shown_bar(win)
+      if opt then
+        if saved_bars[win] == nil then
+          saved_bars[win] = { opt = opt, value = vim.wo[win][opt] }
+        end
+        pcall(function()
+          vim.wo[win][opt] = text
+        end)
       end
-      pcall(function()
-        vim.wo[win].winbar = text
-      end)
     end
   end
 
