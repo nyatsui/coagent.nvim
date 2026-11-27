@@ -255,14 +255,15 @@ describe('terminal: run_command', function()
     local seen = during('sleep 0.4')
     assert.are.equal(h0, seen.height)
     assert.are.equal('', seen.winbar)
-    -- its own status line, when the window shows one
+    -- its own status line, when the window shows one (and back to the one it had)
     vim.o.laststatus = 2
+    local own = vim.wo[win].statusline
     h0 = vim.api.nvim_win_get_height(win)
     seen = during('sleep 0.4')
     assert.are.equal(h0, seen.height)
     assert.are.equal('', seen.winbar)
     assert.is_truthy(seen.statusline:find('coagent running: sleepy', 1, true), seen.statusline)
-    assert.are.equal('', vim.wo[win].statusline)
+    assert.are.equal(own, vim.wo[win].statusline)
     -- a winbar the window already has is reused
     vim.wo[win].winbar = 'mine'
     h0 = vim.api.nvim_win_get_height(win)

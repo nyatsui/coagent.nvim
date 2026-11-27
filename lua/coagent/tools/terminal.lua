@@ -590,15 +590,23 @@ function Term:exec(spec, cb)
         return
       end
       if not f.sb_ready_at then
-        -- Raise 'scrollback' first and send on a later poll: Neovim resizes
-        -- the terminal's scrollback storage on its next refresh, and fast
+        -- Raise 'scrollback' first and send on a later poll. Neovim resizes
+        -- the terminal's scrollback storage only on its next refresh (output
+        -- or a resize; at once only when 'scrollback' decreases), and fast
         -- output (thousands of lines in a few ms on Linux) arriving before
-        -- that is pushed into the old, small storage and lost.
+        -- that is pushed into the old, small storage and lost. So raise it one
+        -- past the target and lower it by one: the decrease applies it now,
+        -- without resizing the window (which some programs in the terminal,
+        -- kubectl exec through a proxy, do not survive).
         self.inflight = f
         saved_sb = vim.bo[self.buf].scrollback
-        pcall(function()
-          vim.bo[self.buf].scrollback = math.max(saved_sb or 0, cfg.scrollback)
-        end)
+        local want = math.max(saved_sb or 0, cfg.scrollback)
+        if want > (saved_sb or 0) then
+          pcall(function()
+            vim.bo[self.buf].scrollback = want
+            vim.bo[self.buf].scrollback = want - 1
+          end)
+        end
         mark_windows()
         f.sb_ready_at = now + (cfg.scrollback_settle_ms or 60)
         return
