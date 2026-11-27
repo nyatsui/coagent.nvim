@@ -1362,6 +1362,9 @@ function Controller:_lead_read_check(tool, args, prepared)
   if tool.name == 'recall_output' and type(args.query) == 'string' and args.query ~= '' then
     return nil -- matching lines only
   end
+  if prepared.deferred then
+    return nil -- read_symbol on a file read only after approval: located then
+  end
   local o = self:roles().lead_reads
   local Seen = require('coagent.tools.seen')
   local file = tool.name == 'read_file' or tool.name == 'read_symbol'

@@ -205,6 +205,27 @@ describe('lsp edit tools', function()
     assert.is_truthy(r.prepare_error:find('cannot rename what is at main.fk:1:1', 1, true), r.prepare_error)
   end)
 
+  it('a CRLF file is not a conflict and stays CRLF; a protected file is refused before any buffer is loaded', function()
+    h.write(root .. '/dos.fk', 'function add(a, b)\r\n  return a + b\r\nend\r\n')
+    rename_result = function(params)
+      return { changes = { [vim.uri_from_fname(root .. '/dos.fk')] = {
+        { range = range(0, 9, 0, 12), newText = params.newName },
+        { range = range(2, 3, 2, 3), newText = '\n-- renamed' },
+      } } }
+    end
+    local r = call('lsp_rename', { path = 'dos.fk', symbol = 'add', new_name = 'sum' })
+    assert.is_true(r.ok, r.output or r.prepare_error)
+    assert.are.equal('dos', vim.bo[vim.fn.bufnr(root .. '/dos.fk')].fileformat)
+    assert.are.equal('function sum(a, b)\r\n  return a + b\r\nend\r\n-- renamed\r\n', h.read(root .. '/dos.fk'))
+    -- a protected file: neither loaded nor sent to a server before the approval
+    assert.are.equal(-1, vim.fn.bufnr(root .. '/.env'))
+    r = call('lsp_rename', { path = '.env', line = 1, new_name = 'Y' })
+    assert.is_truthy(r.prepare_error:find('.env is a protected file', 1, true), r.prepare_error)
+    r = call('lsp_code_action', { path = '.env', line = 1, title = 'x' })
+    assert.is_truthy(r.prepare_error:find('.env is a protected file', 1, true), r.prepare_error)
+    assert.are.equal(-1, vim.fn.bufnr(root .. '/.env'))
+  end)
+
   it('lists code actions, marking those that only run a server command', function()
     local r = call('lsp_code_actions', { path = 'lib.fk', line = 1 })
     assert.is_true(r.ok, r.output)

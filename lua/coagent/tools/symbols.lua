@@ -165,9 +165,10 @@ end
 
 --- Definitions matching `want` from the language server's document symbols.
 ---@return table[]? found, string? err
-local function lsp_find(ctx, buf, want)
+---@param wait_ms integer how long to wait for a server to attach (0: only one already attached)
+local function lsp_find(ctx, buf, want, wait_ms)
   local o = lsp.opts(ctx)
-  local _, cerr = lsp.wait_clients(buf, 'textDocument/documentSymbol', o.attach_timeout_ms)
+  local _, cerr = lsp.wait_clients(buf, 'textDocument/documentSymbol', wait_ms)
   if cerr then
     return nil, cerr
   end
@@ -235,55 +236,20 @@ M.read_symbol = {
     if not base then
       return nil, err
     end
-    async.main()
-    local buf = lsp.ensure_buf(base.path.real)
-    local want = vim.trim(args.symbol)
-    local found, how = ts_find(buf, want)
-    local via = 'treesitter'
-    local ts_why
-    if not found or #found == 0 then
-      ts_why = not found and how or nil
-      local lfound, lerr = lsp_find(ctx, buf, want)
-      if lfound and #lfound > 0 then
-        found, via = lfound, 'the language server'
-      elseif not found and not lfound then
-        return nil, string.format('cannot locate definitions in %s (%s; %s). Use lsp_symbols, search or read_file with a range.', base.path.rel, ts_why, lerr)
-      else
-        found = {}
-      end
+    if not base.path.inside or base.path.protected then
+      -- nothing of the file is loaded, parsed or listed before the read is approved
+      return { path = base.path, deferred = true }
     end
-    local line = tonumber(args.line)
-    if line then
-      -- the innermost definition containing the line
-      local best
-      for _, f in ipairs(found) do
-        if f.first <= line and line <= f.last and (not best or f.last - f.first < best.last - best.first) then
-          best = f
-        end
-      end
-      found = best and { best } or {}
-    end
-    if #found == 0 then
-      return nil, string.format('no definition named "%s" in %s%s. lsp_symbols with path lists its outline.', want, base.path.rel, line and (' around line ' .. line) or '')
-    end
-    if #found > 1 then
-      table.sort(found, function(a, b)
-        return a.first < b.first
-      end)
-      local lines = {}
-      for i, f in ipairs(found) do
-        if i > 20 then
-          table.insert(lines, string.format('- ... %d more', #found - 20))
-          break
-        end
-        table.insert(lines, string.format('- %s (%s) lines %d-%d', f.qualified, f.kind, f.first, f.last))
-      end
-      return nil, string.format('%d definitions named "%s" in %s; give `line` (or a qualified name):\n%s', #found, want, base.path.rel, table.concat(lines, '\n'))
-    end
-    local f = found[1]
-    return { path = base.path, start_line = f.first, end_line = f.last, qualified = f.qualified, kind = f.kind, via = via }
+    return M.locate(args, ctx, base)
   end,
   run = function(args, ctx, prepared)
+    if prepared.deferred then
+      local located, err = M.locate(args, ctx, prepared)
+      if not located then
+        return { ok = false, output = 'Error: ' .. err }
+      end
+      prepared = located
+    end
     local res = fs.read_file.run({ path = args.path, start_line = prepared.start_line, end_line = prepared.end_line }, ctx, prepared)
     if res.ok then
       res.output = string.format('[%s (%s): lines %d-%d of %s, located with %s]\n', prepared.qualified, prepared.kind, prepared.start_line,
@@ -292,5 +258,59 @@ M.read_symbol = {
     return res
   end,
 }
+
+--- Find the one definition `args.symbol` names in the file of `base`.
+---@return table? located {path, start_line, end_line, qualified, kind, via}, string? err
+function M.locate(args, ctx, base)
+  async.main()
+  local buf = lsp.ensure_buf(base.path.real)
+  local want = vim.trim(args.symbol)
+  local found, how = ts_find(buf, want)
+  local via = 'treesitter'
+  local ts_why
+  if not found or #found == 0 then
+    ts_why = not found and how or nil
+    -- treesitter parsed the file and found nothing: ask a server only if one
+    -- is already attached (a typo must not wait for one to start)
+    local lfound, lerr = lsp_find(ctx, buf, want, found and 0 or lsp.opts(ctx).attach_timeout_ms)
+    if lfound and #lfound > 0 then
+      found, via = lfound, 'the language server'
+    elseif not found and not lfound then
+      return nil, string.format('cannot locate definitions in %s (%s; %s). Use lsp_symbols, search or read_file with a range.', base.path.rel, ts_why, lerr)
+    else
+      found = {}
+    end
+  end
+  local line = tonumber(args.line)
+  if line then
+    -- the innermost definition containing the line
+    local best
+    for _, f in ipairs(found) do
+      if f.first <= line and line <= f.last and (not best or f.last - f.first < best.last - best.first) then
+        best = f
+      end
+    end
+    found = best and { best } or {}
+  end
+  if #found == 0 then
+    return nil, string.format('no definition named "%s" in %s%s. lsp_symbols with path lists its outline.', want, base.path.rel, line and (' around line ' .. line) or '')
+  end
+  if #found > 1 then
+    table.sort(found, function(a, b)
+      return a.first < b.first
+    end)
+    local lines = {}
+    for i, f in ipairs(found) do
+      if i > 20 then
+        table.insert(lines, string.format('- ... %d more', #found - 20))
+        break
+      end
+      table.insert(lines, string.format('- %s (%s) lines %d-%d', f.qualified, f.kind, f.first, f.last))
+    end
+    return nil, string.format('%d definitions named "%s" in %s; give `line` (or a qualified name):\n%s', #found, want, base.path.rel, table.concat(lines, '\n'))
+  end
+  local f = found[1]
+  return { path = base.path, start_line = f.first, end_line = f.last, qualified = f.qualified, kind = f.kind, via = via }
+end
 
 return M

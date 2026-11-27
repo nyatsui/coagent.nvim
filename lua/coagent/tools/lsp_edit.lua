@@ -113,11 +113,33 @@ end
 --- The buffer's text as it would be written (to compare with the file).
 local function buffer_text(buf)
   local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-  local text = table.concat(lines, '\n')
-  if vim.bo[buf].eol and vim.bo[buf].fixeol ~= false and #lines > 0 then
-    text = text .. '\n'
+  local nl = vim.bo[buf].fileformat == 'dos' and '\r\n' or (vim.bo[buf].fileformat == 'mac' and '\r' or '\n')
+  local text = table.concat(lines, nl)
+  if vim.bo[buf].eol and #lines > 0 then -- as on disk (fixeol applies only on the next write)
+    text = text .. nl
+  end
+  if vim.bo[buf].bomb then
+    text = '\239\187\191' .. text
   end
   return text
+end
+
+--- The file an lsp_rename / lsp_code_action starts from: one the agent may
+--- change, checked before the language server or a buffer is involved.
+local function target(args, ctx)
+  local base, err = lsp.file_prepare(args, ctx)
+  if not base then
+    return nil, err
+  end
+  local info, werr = fs.writable(ctx, args.path)
+  if not info then
+    return nil, werr
+  end
+  if base.path.protected then
+    return nil, string.format('%s is a protected file (%s): the language server would read it before the change is approved. '
+      .. 'Make the change with edit_file.', base.path.rel, base.path.protected)
+  end
+  return base
 end
 
 --- A WorkspaceEdit as a prepared multi-file change (for approval and run).
@@ -149,13 +171,23 @@ function M.prepare_edit(ctx, we, enc, what)
     if fs.is_binary(old) then
       return nil, 'the change edits a binary file (' .. info.rel .. ')'
     end
+    if not util.is_utf8(old) then
+      return nil, string.format('%s is not UTF-8 (the server\'s positions are on the decoded text); make the change with edit_file. Nothing was changed.', info.rel)
+    end
     -- the server computed the edit on the buffer: it must match the file
     local buf = util.find_buf(info.real)
     if buf and vim.api.nvim_buf_is_loaded(buf) and buffer_text(buf) ~= old then
       return nil, string.format('CONFLICT: the Neovim buffer of %s differs from the file on disk (changed outside Neovim?). '
         .. 'The user must reload it (:edit) before the agent can change it.', info.rel)
     end
-    local new, aerr = M.apply_text_edits(old, f.edits, enc)
+    local edits = f.edits
+    if old:find('\r\n', 1, true) then
+      -- keep a CRLF file CRLF: the server writes '\n' in newText
+      edits = vim.tbl_map(function(e)
+        return vim.tbl_extend('force', e, { newText = type(e.newText) == 'string' and e.newText:gsub('\r?\n', '\r\n') or e.newText })
+      end, edits)
+    end
+    local new, aerr = M.apply_text_edits(old, edits, enc)
     if not new then
       return nil, aerr .. ' for ' .. info.rel
     end
@@ -294,7 +326,7 @@ M.lsp_rename = {
     if type(args.new_name) ~= 'string' or vim.trim(args.new_name) == '' then
       return nil, 'new_name is required'
     end
-    local base, err = lsp.file_prepare(args, ctx)
+    local base, err = target(args, ctx)
     if not base then
       return nil, err
     end
@@ -474,7 +506,7 @@ M.lsp_code_action = {
     if type(args.title) ~= 'string' or vim.trim(args.title) == '' then
       return nil, 'title is required (list the actions with lsp_code_actions)'
     end
-    local base, err = lsp.file_prepare(args, ctx)
+    local base, err = target(args, ctx)
     if not base then
       return nil, err
     end

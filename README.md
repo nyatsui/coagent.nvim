@@ -1431,7 +1431,8 @@ terminal = {
   it like `edit_file` — one approval for the whole change (its combined diff over every file; `r` in the panel, `gr` in the input shows it, a change
   across files is approved or denied as a whole), the same checks for every file (inside the workspace, protected
   files ask, unsaved buffers refuse; a buffer that differs from its file refuses too, since the server computed the
-  edit on it), and each file goes into `/changes` and `/rewind`. A file that fails a check changes nothing at all.
+  edit on it; CRLF files stay CRLF), and each file goes into `/changes` and `/rewind`. A protected file is refused as
+  the starting file (the server would read it before the approval; use `edit_file`). A file that fails a check changes nothing at all.
   The server never applies anything itself: changes that create, rename or delete files, and code actions that only
   run a server command, are refused (they would change files outside the approvals)
 - **`read_symbol`** reads one definition by name (`Parser.parse`, `M.setup`; `line` picks one of several), with the
